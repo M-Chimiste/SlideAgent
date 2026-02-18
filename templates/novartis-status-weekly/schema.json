@@ -1,0 +1,56 @@
+{
+  "slides": {
+    "1": {
+      "description": "Title slide",
+      "fields": {
+        "deck_title": {
+          "shape_id": 2,
+          "type": "text",
+          "max_chars": 60,
+          "required": true,
+          "description": "Main title of the status deck"
+        },
+        "report_date": {
+          "shape_id": 3,
+          "type": "date",
+          "date_format": "%d %b %Y",
+          "required": true,
+          "description": "Report date shown on title slide"
+        }
+      }
+    },
+    "2": {
+      "description": "Project status overview",
+      "fields": {
+        "project_name": {
+          "shape_id": 2,
+          "type": "text",
+          "max_chars": 80,
+          "required": true,
+          "description": "Name of the project being reported on"
+        },
+        "summary": {
+          "shape_id": 3,
+          "type": "text",
+          "max_chars": 320,
+          "required": true,
+          "description": "Executive summary of project status"
+        },
+        "status": {
+          "shape_id": 4,
+          "type": "enum",
+          "allowed_values": ["Green", "Amber", "Red"],
+          "required": true,
+          "description": "RAG status indicator"
+        },
+        "owner": {
+          "shape_id": 5,
+          "type": "text",
+          "max_chars": 50,
+          "required": true,
+          "description": "Project owner name"
+        }
+      }
+    }
+  }
+}

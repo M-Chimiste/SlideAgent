@@ -81,7 +81,7 @@ class TemplateRecord(BaseModel):
     display_name: str
     description: Optional[str] = None
     mode: TemplateMode
-    pptx_path: str                       # S3 key or local path
+    pptx_path: str                       # Local filesystem path
     slides: Optional[dict[str, SlideSchema]] = None      # Mode 1
     layouts: Optional[dict[str, LayoutDefinition]] = None # Mode 2
     created_at: datetime
@@ -119,7 +119,7 @@ class JobRecord(BaseModel):
     outline: Optional["DeckOutline"] = None  # Mode 2: set after planning
     warnings: list[str] = []
     error: Optional["JobError"] = None
-    output_url: Optional[str] = None    # Presigned S3 URL when complete
+    output_url: Optional[str] = None    # Download URL when complete
     created_at: datetime
     updated_at: datetime
     ttl_expires_at: datetime

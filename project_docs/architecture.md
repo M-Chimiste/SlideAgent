@@ -8,35 +8,24 @@ graph TB
         UI[React Frontend<br/>Vite + TypeScript]
     end
 
+    subgraph Server["Backend"]
+        API[FastAPI Backend<br/>Uvicorn]
+    end
+
+    subgraph LocalStore["Local Storage"]
+        TMPL[Templates Directory<br/>versioned]
+        OUT[Outputs Directory<br/>24h TTL]
+        DB[SQLite<br/>Job Records]
+    end
+
     subgraph AWS["AWS"]
-        subgraph CDN["CloudFront + S3"]
-            STATIC[Static Frontend Build]
-        end
-
-        subgraph AppRunner["App Runner"]
-            API[FastAPI Backend<br/>Uvicorn / Gunicorn]
-        end
-
-        subgraph Storage["S3"]
-            TMPL_BUCKET[Templates Bucket<br/>versioned]
-            OUT_BUCKET[Outputs Bucket<br/>24h lifecycle]
-        end
-
-        subgraph Compute["Serverless"]
-            BEDROCK[Amazon Bedrock<br/>Claude claude-sonnet-4-6 / Haiku]
-        end
-
-        subgraph Data["Data"]
-            DYNAMO[DynamoDB<br/>Job Records]
-        end
+        BEDROCK[Amazon Bedrock<br/>Claude Sonnet / Haiku]
     end
 
     UI -->|HTTPS REST| API
-    UI -->|Presigned URL| OUT_BUCKET
-    STATIC -->|Serves| UI
-    API -->|Read template| TMPL_BUCKET
-    API -->|Write output| OUT_BUCKET
-    API -->|Job state| DYNAMO
+    API -->|Read template| TMPL
+    API -->|Write output| OUT
+    API -->|Job state| DB
     API -->|Converse API| BEDROCK
 ```
 
@@ -73,22 +62,18 @@ graph TD
     end
 
     subgraph Storage["Storage"]
-        ST[StorageInterface]
-        SL[LocalStorage]
-        SS[S3Storage]
+        SL[LocalStorage<br/>filesystem + atomic writes]
     end
 
     subgraph JobStore["Job Store"]
-        JS[JobStoreInterface]
-        SQ[SQLiteStore]
-        DY[DynamoDBStore]
+        SQ[SQLiteJobStore<br/>aiosqlite]
     end
 
     R1 --> ORCH
-    R2 --> JS
+    R2 --> SQ
     R3 --> ORCH
-    R4 --> ST
-    R5 --> ST
+    R4 --> SL
+    R5 --> SL
 
     ORCH --> IP
     ORCH --> CV
@@ -97,18 +82,14 @@ graph TD
     ORCH --> CC
     ORCH --> XI
     ORCH --> PP
-    ORCH --> JS
+    ORCH --> SQ
 
     IP --> BC
     DP --> BC
     CG --> BC
     CC --> BC
 
-    PP --> ST
-    ST --> SL
-    ST --> SS
-    JS --> SQ
-    JS --> DY
+    PP --> SL
 ```
 
 ---
@@ -125,7 +106,7 @@ sequenceDiagram
     participant XI as XMLInjector
     participant PP as PPTXPipeline
     participant BC as BedrockClient
-    participant S3
+    participant FS as LocalStorage
 
     User->>FE: Select template, fill form
     FE->>API: POST /jobs {template_id, mode:1, input_data}
@@ -136,7 +117,7 @@ sequenceDiagram
         API-->>FE: 202 {job_id}
         API->>API: Queue background job
 
-        Note over API,S3: Background job starts
+        Note over API,FS: Background job starts
         API->>IP: Parse + map fields
         IP->>BC: Coerce ambiguous fields (if any)
         BC-->>IP: Coerced field values
@@ -145,8 +126,8 @@ sequenceDiagram
         API->>CV: Validate all fields
         CV-->>API: Validated values + warnings
 
-        API->>S3: Fetch template.pptx
-        S3-->>API: template bytes
+        API->>FS: Fetch template.pptx
+        FS-->>API: template bytes
 
         API->>PP: Unpack template
         PP-->>API: Staging dir path
@@ -157,8 +138,8 @@ sequenceDiagram
         API->>PP: Repack to output.pptx
         PP-->>API: output bytes
 
-        API->>S3: Write output.pptx
-        S3-->>API: Presigned URL
+        API->>FS: Write output.pptx
+        FS-->>API: File path
 
         API->>API: Update job status → complete
     end
@@ -184,7 +165,7 @@ sequenceDiagram
     participant XI as XMLInjector
     participant PP as PPTXPipeline
     participant BC as BedrockClient
-    participant S3
+    participant FS as LocalStorage
 
     User->>FE: Select branding template, write brief
     FE->>API: POST /jobs {template_id, mode:2, input_data}
@@ -192,7 +173,7 @@ sequenceDiagram
 
     Note over API,BC: Phase 1 - Planning
     API->>DP: Generate deck outline from brief
-    DP->>BC: DeckPlanner prompt (claude-sonnet-4-6)
+    DP->>BC: DeckPlanner prompt (Sonnet)
     BC-->>DP: DeckOutline JSON
     DP-->>API: Validated DeckOutline
 
@@ -227,18 +208,18 @@ sequenceDiagram
     end
 
     API->>CC: Coherence check all slide content
-    CC->>BC: CoherenceCheck prompt (claude-haiku-4-5)
+    CC->>BC: CoherenceCheck prompt (Haiku)
     BC-->>CC: CoherenceCheckOutput
     CC-->>API: Issues + corrections applied
 
     API->>CV: Validate all field content
     CV-->>API: Validated values + warnings
 
-    API->>S3: Fetch branding template.pptx
+    API->>FS: Fetch branding template.pptx
     API->>PP: Unpack template
     API->>XI: Inject all slide content
     API->>PP: Repack output.pptx
-    API->>S3: Write output
+    API->>FS: Write output
 
     API->>API: Update job status → complete
     FE-->>User: Show thumbnail + download button
@@ -250,7 +231,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[template.pptx from S3/disk] --> B[Unzip to staging_dir/job_id/]
+    A[template.pptx from disk] --> B[Unzip to staging_dir/job_id/]
     B --> C[Parse presentation.xml<br/>Build slide index map]
     C --> D{For each InjectionTarget}
     D --> E[Open slide{N}.xml with lxml]
@@ -267,7 +248,7 @@ flowchart TD
     D -->|All slides done| O[Run clean pass<br/>Remove orphaned rels]
     O --> P[Rezip to output.pptx<br/>Preserve original theme/media]
     P --> Q[Verify output opens<br/>No XML parse errors]
-    Q --> R[Upload to S3<br/>Generate presigned URL]
+    Q --> R[Write to outputs directory]
     R --> S[Cleanup staging dir]
     S --> T[Return PipelineResult]
 ```
