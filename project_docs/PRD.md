@@ -105,7 +105,7 @@ SlideAgent is an internal web application that generates PowerPoint presentation
 - Bedrock access via IAM role (no hardcoded credentials)
 - Uploaded templates and input data stored only for job TTL duration
 - Input data treated as untrusted; XML parsing uses defusedxml for template files
-- Presigned S3 URLs for output download (no persistent public URLs)
+- Output files served as direct downloads from local storage
 
 ### NFR-3: Reliability
 - LLM calls: retry up to 3 times with exponential backoff before failing job
@@ -119,8 +119,8 @@ SlideAgent is an internal web application that generates PowerPoint presentation
 - CloudWatch metrics for: job volume by mode, failure rate by stage, p50/p95 generation latency
 
 ### NFR-5: Extensibility
-- Storage backend is abstracted (local / S3) with no service-layer changes required to switch
-- Job store is abstracted (SQLite / DynamoDB)
+- Storage uses local filesystem with atomic writes
+- Job store uses SQLite via aiosqlite
 - New LLM call types are added by defining a Pydantic I/O schema and a prompt constant — no changes to orchestration logic
 - Designed for extraction as a module into Ariadne: the backend services have no UI coupling
 

@@ -81,7 +81,7 @@ GET  /jobs/{id} → returns {status, progress, error, output_url}
 
 Job states: `queued → planning → awaiting_approval → generating → packaging → complete | failed`
 
-Jobs are stored in a lightweight SQLite database locally, swappable for DynamoDB or RDS in AWS deployment.
+Jobs are stored in a lightweight SQLite database locally.
 
 ## Error Handling Hierarchy
 1. **Schema validation errors** (missing required fields, type mismatches): return 422 with field-level detail before job is created
@@ -91,9 +91,9 @@ Jobs are stored in a lightweight SQLite database locally, swappable for DynamoDB
 5. **Pipeline errors** (disk, permissions, zip failures): fail fast, surface as 500 with correlation ID
 
 ## File Handling
-- Templates are stored in S3 (or local filesystem in dev) and referenced by template_id
+- Templates are stored on the local filesystem and referenced by template_id
 - Staging directories for in-flight jobs use a temp dir scoped to job_id, cleaned up on completion or failure
-- Output PPTX files are written to S3 output prefix and served via presigned URL with 1-hour TTL
+- Output PPTX files are written to the outputs directory and served as file downloads
 - No user data persists beyond job TTL (24 hours default, configurable)
 
 ## Frontend State Machine

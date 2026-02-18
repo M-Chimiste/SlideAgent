@@ -22,16 +22,16 @@
 | XML manipulation | lxml | Full XPath, fastest Python XML library |
 | XML parsing (untrusted) | defusedxml | Security-safe parsing for user-uploaded templates |
 | PPTX introspection | python-pptx | Dev-time only: template schema authoring |
-| Job store | SQLite (dev) / DynamoDB (prod) | Lightweight locally, scales to serverless in AWS |
-| File store | Local filesystem (dev) / S3 (prod) | Abstracted behind a storage interface |
+| Job store | SQLite via aiosqlite | Lightweight async job persistence |
+| File store | Local filesystem | Atomic writes via tmp+rename |
 | Task queue | asyncio + BackgroundTasks (v1) / Celery + SQS (if needed) | Start simple, scale when job volume warrants it |
 
 ### Infrastructure (AWS)
 | Component | Service | Notes |
 |-----------|---------|-------|
 | Backend API | AWS App Runner | Container-based, auto-scaling, IAM role for Bedrock access, no VPC required for v1 |
-| Frontend | S3 + CloudFront | Static build, fast CDN delivery |
-| File storage | S3 | Templates bucket (versioned), outputs bucket (lifecycle: delete after 24h) |
+| Frontend | Vite dev server | Static build served locally |
+| File storage | Local filesystem | Templates directory (versioned), outputs directory (24h TTL) |
 | LLM | Amazon Bedrock | Claude via Bedrock API. Model: claude-sonnet-4-6 or claude-haiku-4-5 depending on call type |
 | Secrets | AWS Secrets Manager | Any config that isn't IAM role-derivable |
 | Logs | CloudWatch | App Runner streams logs automatically |
@@ -118,9 +118,7 @@ slideagent/
 │   │   │   ├── templates.py         # Template schema models
 │   │   │   └── schemas.py           # Pydantic I/O models for all LLM calls
 │   │   └── storage/
-│   │       ├── base.py              # Abstract storage interface
-│   │       ├── local.py             # Filesystem implementation
-│   │       └── s3.py                # S3 implementation
+│   │       └── local.py             # LocalStorage (filesystem + atomic writes)
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
@@ -147,12 +145,10 @@ slideagent/
 ```
 # Backend
 BEDROCK_REGION=us-east-1
-STORAGE_BACKEND=local|s3
-S3_BUCKET_TEMPLATES=slideagent-templates
-S3_BUCKET_OUTPUTS=slideagent-outputs
-JOB_STORE_BACKEND=sqlite|dynamodb
+AWS_PROFILE=
+SONNET_MODEL_ID=us.anthropic.claude-sonnet-4-5-20250929-v1:0
+HAIKU_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 SQLITE_PATH=.data/jobs.db
-DYNAMODB_TABLE=slideagent-jobs
 MAX_JOB_TTL_HOURS=24
 LOG_LEVEL=INFO
 

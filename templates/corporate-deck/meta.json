@@ -1,0 +1,7 @@
+{
+  "template_id": "corporate-deck",
+  "version": "1.0.0",
+  "display_name": "Corporate Deck",
+  "description": "General-purpose corporate presentation with multiple layout options. Supports title slides, bullet content, two-column comparison, section dividers, and closing slides.",
+  "mode": "mode2"
+}
