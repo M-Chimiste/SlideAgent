@@ -1,0 +1,84 @@
+from pathlib import Path
+from typing import Iterable
+
+from app.config import Settings
+
+
+class LocalStorage:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.settings.ensure_dirs()
+
+    def template_dir(self, template_id: str) -> Path:
+        return self.settings.templates_dir / template_id
+
+    def job_dir(self, job_id: str) -> Path:
+        return self.settings.jobs_dir / job_id
+
+    def ensure_job_dirs(self, job_id: str) -> None:
+        base = self.job_dir(job_id)
+        (base / "documents").mkdir(parents=True, exist_ok=True)
+        (base / "markdown").mkdir(parents=True, exist_ok=True)
+        (base / "outline").mkdir(parents=True, exist_ok=True)
+        (base / "slides").mkdir(parents=True, exist_ok=True)
+        (base / "preview").mkdir(parents=True, exist_ok=True)
+        (base / "qa").mkdir(parents=True, exist_ok=True)
+
+    def save_template_source(self, template_id: str, filename: str, content: bytes) -> Path:
+        template_dir = self.template_dir(template_id)
+        template_dir.mkdir(parents=True, exist_ok=True)
+        target = template_dir / "source.pptx"
+        target.write_bytes(content)
+        return target
+
+    def save_template_profile(self, template_id: str, profile_json: str) -> Path:
+        template_dir = self.template_dir(template_id)
+        template_dir.mkdir(parents=True, exist_ok=True)
+        target = template_dir / "profile.json"
+        target.write_text(profile_json, encoding="utf-8")
+        return target
+
+    def save_job_document(self, job_id: str, filename: str, content: bytes) -> Path:
+        self.ensure_job_dirs(job_id)
+        target = self.job_dir(job_id) / "documents" / filename
+        target.write_bytes(content)
+        return target
+
+    def save_markdown(self, job_id: str, doc_id: str, markdown: str) -> Path:
+        self.ensure_job_dirs(job_id)
+        target = self.job_dir(job_id) / "markdown" / f"{doc_id}.md"
+        target.write_text(markdown, encoding="utf-8")
+        return target
+
+    def save_outline(self, job_id: str, outline_json: str) -> Path:
+        self.ensure_job_dirs(job_id)
+        target = self.job_dir(job_id) / "outline" / "outline.json"
+        target.write_text(outline_json, encoding="utf-8")
+        return target
+
+    def save_slide_script(self, job_id: str, slide_id: str, script: str) -> Path:
+        self.ensure_job_dirs(job_id)
+        target = self.job_dir(job_id) / "slides" / f"{slide_id}.js"
+        target.write_text(script, encoding="utf-8")
+        return target
+
+    def save_preview_images(self, job_id: str, image_paths: Iterable[Path]) -> None:
+        self.ensure_job_dirs(job_id)
+        preview_dir = self.job_dir(job_id) / "preview"
+        for image_path in image_paths:
+            target = preview_dir / image_path.name
+            if image_path != target:
+                target.write_bytes(image_path.read_bytes())
+
+    def save_qa_log(self, job_id: str, round_number: int, qa_json: str) -> Path:
+        self.ensure_job_dirs(job_id)
+        target = self.job_dir(job_id) / "qa" / f"round-{round_number}.json"
+        target.write_text(qa_json, encoding="utf-8")
+        return target
+
+    def output_pptx_path(self, job_id: str) -> Path:
+        self.ensure_job_dirs(job_id)
+        return self.job_dir(job_id) / "output.pptx"
+
+    def preview_dir(self, job_id: str) -> Path:
+        return self.job_dir(job_id) / "preview"
