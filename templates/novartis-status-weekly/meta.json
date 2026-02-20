@@ -1,7 +1,0 @@
-{
-  "template_id": "novartis-status-weekly",
-  "version": "1.0.0",
-  "display_name": "Weekly Status Deck",
-  "description": "Standard weekly project status report with title slide, RAG status, summary, and owner fields.",
-  "mode": "mode1"
-}
