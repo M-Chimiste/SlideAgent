@@ -210,6 +210,9 @@ __marimo__/
 .data/jobs.db
 .data/staging/
 .data/outputs/
+/data/
+/outputs/
+/backend/data/
 
 # Node
 node_modules/
@@ -217,4 +220,3 @@ frontend/dist/
 
 # PPTAgent source dump (reference only)
 .data/
-outputs/
