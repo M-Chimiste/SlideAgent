@@ -1,136 +1,746 @@
-# SlideAgent — Product Requirements Document
+# SlideForge — AI Presentation Generation Agent
 
-## Overview
-SlideAgent is an internal web application that generates PowerPoint presentations via two agent-driven modes: structured template population from input data (Mode 1), and branded content generation from a topic brief (Mode 2). It runs in AWS, uses Amazon Bedrock for LLM inference, and produces PPTX output compatible with Microsoft PowerPoint.
+## Product Requirements Document
 
----
-
-## Functional Requirements
-
-### FR-1: Template Registry
-
-**FR-1.1** The system shall maintain a registry of available templates, each identified by a unique template_id, display name, version, and mode compatibility (Mode 1, Mode 2, or both).
-
-**FR-1.2** Each Mode 1 template shall have an associated JSON schema defining injectable fields, their slide and shape ID locations, data types, constraints (max_chars, allowed enum values, date formats), and whether they are required.
-
-**FR-1.3** Each Mode 2 template shall have an associated layout library defining available slide layouts, their names, suitable content types, and field structure.
-
-**FR-1.4** Templates shall be versioned. A new template upload creates a new version. Prior versions remain accessible. Jobs reference a specific version at time of creation.
-
-**FR-1.5** A developer-facing CLI tool (`scripts/analyze_template.py`) shall accept a `.pptx` file and output a candidate JSON schema mapping shape IDs to their current text content, to accelerate schema authoring.
+**Codename:** SlideForge  
+**Version:** 0.3 — Final Draft  
+**Date:** 2026-02-20
 
 ---
 
-### FR-2: Job Lifecycle
+## 1. Problem Statement
 
-**FR-2.1** The system shall accept job creation requests specifying: template_id, mode (1 or 2), and input payload.
+Creating polished, consultant-grade presentations is one of the most time-consuming knowledge-work tasks. Two recurring patterns emerge:
 
-**FR-2.2** Job creation shall perform synchronous schema validation before accepting the job. Invalid payloads return 422 with field-level error detail. No job record is created for invalid requests.
+1. **Brand-templated decks** — You have branded master templates with color palettes, fonts, and slide masters, but building a compelling deck from source documents still takes hours. The results are often text-heavy walls of bullets that nobody wants to read.
 
-**FR-2.3** Accepted jobs shall be queued and processed asynchronously. Job creation returns a job_id immediately.
+2. **Structured reporting decks** — Standardized slide formats (project status dashboards, investment requests, governance reviews) have rigid layouts where specific data points must be placed in exact positions, while other slides in the same deck are flexible and need creative content generation.
 
-**FR-2.4** Job status shall be queryable and return: job_id, status, progress percentage, current stage name, error details (if failed), and output URL (if complete).
-
-**FR-2.5** Job states shall follow this sequence:
-- `queued` → `parsing` → `generating` → `packaging` → `complete`
-- Mode 2 inserts `planning` between `parsing` and `generating`, and `awaiting_approval` between `planning` and `generating`
-- Any state may transition to `failed`
-
-**FR-2.6** Completed jobs shall produce a downloadable PPTX accessible via presigned URL for 1 hour (configurable).
-
-**FR-2.7** Job records and output files shall be deleted after 24 hours (configurable TTL).
+No existing tool handles both modes well.
 
 ---
 
-### FR-3: Mode 1 — Template Population
+## 2. Vision
 
-**FR-3.1** The system shall accept structured input as JSON matching the template's field schema. Future versions may accept CSV or Excel, normalized to JSON internally.
+A local Docker-based web application where you upload a template (brand or structured), upload source documents, and receive a polished McKinsey-quality presentation — complete with visual hierarchy, data callouts, icons, and vibrant design — in minutes rather than hours.
 
-**FR-3.2** The InputParser shall map input fields to template schema fields. Exact name matches are direct. Near-matches (e.g., "project_lead" → "owner") shall trigger an LLM coercion call.
-
-**FR-3.3** The ConstraintValidator shall enforce: required field presence, enum value membership, text length within max_chars, and date format validity. Violations shall be categorized as errors (blocking) or warnings (non-blocking with truncation).
-
-**FR-3.4** Long text that exceeds max_chars shall be truncated by the LLM with a preference for preserving complete sentences. Truncation shall be logged in the job record.
-
-**FR-3.5** The XMLInjector shall inject all validated field values into the correct XML elements identified by slide index and shape ID. Existing XML attributes and sibling elements shall be preserved.
-
-**FR-3.6** Output PPTX shall be verified to: open without XML errors, contain no unfilled placeholder markers, and have all required fields present.
+**Non-negotiable quality principles:**
+- **Zero text walls.** Every slide has visual elements. A slide with just title + bullets is a failure.
+- **Visual elements on every deck.** Icons, charts, shapes, data callouts — the deck must feel designed, not typed.
+- **Visual QA is mandatory.** Every generated deck is rendered to images and inspected by an AI agent before delivery. Broken layouts, overlaps, and ugly slides get caught and fixed automatically.
 
 ---
 
-### FR-4: Mode 2 — Branded Content Generation
+## 3. Core Concepts
 
-**FR-4.1** The system shall accept a topic brief as freeform text and/or a structured JSON object containing: title, audience, key messages (list), tone, desired slide count range (min/max), and any sections to include or exclude.
+### 3.1 Template Types
 
-**FR-4.2** The DeckPlanner shall produce a deck outline as structured JSON specifying: slide count, per-slide layout name, per-slide title, per-slide content summary (1-2 sentences), and narrative arc summary.
+**Brand Template** — A reference PPTX that provides visual identity: color palette, fonts, slide masters/layouts, logo placement, and design language. The template's content is illustrative. SlideForge extracts the *style DNA* and generates entirely new slides conforming to it.
 
-**FR-4.3** The outline shall be returned to the client as part of the job status response when the job enters `awaiting_approval` state. The client may modify the outline and submit approval, or reject and provide revision instructions.
+**Strict Template** — A PPTX where specific slides have fixed structure that must be preserved. The system analyzes each slide and classifies it as either:
 
-**FR-4.4** Upon outline approval, the ContentGenerator shall generate full content for each slide concurrently. Each slide generation call shall receive: the layout definition (field names, types, constraints), the slide's outline entry, the full deck outline for context, and the topic brief.
+- **Strict Slide** — Layout, shapes, and data positions are fixed. Content is injected into designated placeholders. Examples: title slide, project status dashboard, KPI scorecards, RAG status grids.
+- **Flexible Slide** — The slide contains guidance about *what kind* of content belongs there (e.g., "Project Requirements" or "Key Risks") but the structure is not dictated. SlideForge generates the layout and content freely using the template's brand DNA.
 
-**FR-4.5** The CoherenceCheck shall receive all generated slide content and the original brief, and return a list of flagged issues (inconsistencies, repetition, tonal drift) with suggested corrections. Corrections shall be applied automatically for minor issues; major issues shall be surfaced as warnings in the job record.
+A single deck template might have slides 1-2 as strict (title + dashboard), slides 3-8 as flexible (narrative sections), and slide 9 as strict (approval/sign-off).
 
-**FR-4.6** Content shall then pass through the same ConstraintValidator and XMLInjector as Mode 1.
+### 3.2 Source Documents
 
----
+Any office document format serves as content input, all parsed via MarkItDown:
 
-### FR-5: Frontend
+| Format | Notes |
+|--------|-------|
+| `.docx`, `.doc` | Structure, tables, embedded images |
+| `.pptx`, `.ppt` | Existing slide content as markdown |
+| `.xlsx`, `.csv`, `.tsv` | Tabular data; numeric data identified for charts/callouts |
+| `.pdf` | Text and basic structure extraction |
+| `.txt`, `.md` | Direct ingestion |
 
-**FR-5.1** The UI shall present a template selection step with template name, description, mode compatibility, and version.
+Multiple documents can be uploaded simultaneously. The system fuses content intelligently.
 
-**FR-5.2** Mode 1 shall render a dynamic input form generated from the template schema, with appropriate input types (text, select for enums, date picker for dates), required field indicators, and character count feedback.
+### 3.3 The McKinsey Standard
 
-**FR-5.3** Mode 2 shall render a brief input form with all fields from FR-4.1, plus a layout preference option (auto / content-heavy / visual-heavy).
+Every generated deck must satisfy these principles. The Visual QA agent enforces them.
 
-**FR-5.4** During generation, the UI shall display a progress indicator with the current stage name, updated by polling GET /jobs/{id} every 2 seconds.
-
-**FR-5.5** For Mode 2, when the job enters `awaiting_approval`, the UI shall render the deck outline in an editable format. The user shall be able to: modify slide titles, reorder slides, change layout assignments (from available layouts), add slides, delete slides, and provide revision text for the planner. Approving the outline submits it and transitions the job to `generating`.
-
-**FR-5.6** Upon job completion, the UI shall display a thumbnail grid of generated slides and a download button for the PPTX.
-
-**FR-5.7** Errors shall be displayed with the failed stage, error message, and a retry option (for transient failures) or a correction prompt (for validation failures).
-
----
-
-## Non-Functional Requirements
-
-### NFR-1: Performance
-- Mode 1 generation: under 30 seconds for a 20-slide deck
-- Mode 2 generation (post-approval): under 90 seconds for a 15-slide deck
-- API response time for job creation: under 500ms
-- Status polling endpoint: under 100ms
-
-### NFR-2: Security
-- All processing occurs within AWS boundary; no data transmitted to external APIs
-- Bedrock access via IAM role (no hardcoded credentials)
-- Uploaded templates and input data stored only for job TTL duration
-- Input data treated as untrusted; XML parsing uses defusedxml for template files
-- Output files served as direct downloads from local storage
-
-### NFR-3: Reliability
-- LLM calls: retry up to 3 times with exponential backoff before failing job
-- Failed jobs preserve staging artifacts for 48 hours for debugging
-- Storage writes are atomic (write to temp path, rename on success)
-
-### NFR-4: Observability
-- All jobs emit structured log events at each state transition
-- LLM call logs include: model, token counts, latency, stage name
-- Failed jobs log full error with stack trace and job context
-- CloudWatch metrics for: job volume by mode, failure rate by stage, p50/p95 generation latency
-
-### NFR-5: Extensibility
-- Storage uses local filesystem with atomic writes
-- Job store uses SQLite via aiosqlite
-- New LLM call types are added by defining a Pydantic I/O schema and a prompt constant — no changes to orchestration logic
-- Designed for extraction as a module into Ariadne: the backend services have no UI coupling
+1. **No text walls** — Every flexible slide has a visual element: chart, icon, shape, or data callout. Title + bullets alone is a **failure state** that QA must catch and force a redesign.
+2. **Visual hierarchy** — Clear title → subtitle → body progression with strong size contrast (36pt+ titles, 14-16pt body).
+3. **Data-forward** — Numbers are large callouts (60-72pt), not buried in sentences.
+4. **Layout variety** — No two consecutive slides use the same layout pattern.
+5. **White space** — Generous margins (0.5" minimum) and breathing room.
+6. **Icons and visual elements** — react-icons rendered as crisp PNGs, placed in colored circles, used as section markers, category indicators, and visual anchors throughout.
+7. **Color discipline** — One dominant color (60-70%), supporting tones, one accent. Never equal weight.
+8. **No accent lines under titles** — Hallmark of AI-generated slides. Use whitespace or background color instead.
 
 ---
 
-## Out of Scope (v1)
-- User authentication (internal tool, single user or trusted internal network)
-- Multi-tenant template isolation
-- Version history of generated decks
-- Side-by-side diff of input vs output
-- Real-time collaborative outline editing
-- Image generation or automatic image sourcing
-- Non-PPTX output formats
+## 4. System Architecture
+
+### 4.1 High-Level Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              SlideForge (Docker Container)                       │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │  React Frontend (:3000 → proxied through :8080)           │  │
+│  │  Upload Template │ Upload Docs │ Configure │ Generate      │  │
+│  └────────┬─────────┴──────┬──────┴─────┬─────┴──────┬───────┘  │
+│           │                │            │            │           │
+│           ▼                ▼            ▼            ▼           │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  FastAPI Backend (:8080)                                   │  │
+│  │                                                            │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │  │
+│  │  │ Template      │  │ Document     │  │ Orchestrator    │  │  │
+│  │  │ Analyzer      │  │ Ingester     │  │                 │  │  │
+│  │  │               │  │              │  │ • Plan          │  │  │
+│  │  │ • Classify    │  │ • MarkItDown │  │ • Generate      │  │  │
+│  │  │   strict/flex │  │ • Structure  │  │ • QA ← ──┐     │  │  │
+│  │  │ • Schema      │  │ • Fuse docs  │  │ • Fix     │     │  │  │
+│  │  │ • Brand DNA   │  │              │  │ • Re-QA ──┘     │  │  │
+│  │  └──────────────┘  └──────────────┘  │ • Deliver       │  │  │
+│  │                                       └─────────────────┘  │  │
+│  │  ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │  Generation Engine                                   │  │  │
+│  │  │                                                      │  │  │
+│  │  │  Content     Design      PPTX Builder                │  │  │
+│  │  │  Planner     Agent       (PptxGenJS for flex,        │  │  │
+│  │  │              + Icons     XML edit for strict)         │  │  │
+│  │  │                                                      │  │  │
+│  │  │  Visual QA Agent                                     │  │  │
+│  │  │  soffice → PDF → pdftoppm → LLM inspect → fix loop  │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │  │
+│  │                                                            │  │
+│  │  SQLite DB │ Local File Storage (./data volume)            │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 Component Details
+
+#### Template Analyzer
+
+**Purpose:** Ingest a PPTX template and produce a reusable Template Profile stored in SQLite.
+
+**For Brand Templates:**
+- Extract color palette (theme colors from `theme1.xml`)
+- Extract font families (heading + body from theme)
+- Catalog slide layouts with visual fingerprints
+- Extract logo assets and placement rules
+- Render each slide to image via `soffice → pdftoppm` for LLM visual analysis
+- LLM classifies each layout by type: title, content, two-column, image+text, section divider, etc.
+
+**For Strict Templates:**
+- All of the above, plus:
+- **Per-slide classification** — LLM vision analysis of each slide image alongside its XML/markdown content to label it `strict` or `flexible` with reasoning
+- **Strict slide schema extraction** — For each strict slide, identify every placeholder with:
+  - Semantic label (e.g., "project_name", "rag_status", "milestone_date")
+  - Content type (text, number, date, status-color, chart-data)
+  - Location in the XML (shape name or XPath)
+  - Constraints (max characters, allowed enum values)
+- **Flexible slide intent extraction** — Topic guidance and content category
+- User can review and override all classifications in the UI
+
+#### Document Ingester
+
+**Purpose:** Convert uploaded docs to structured content using MarkItDown.
+
+**Pipeline:**
+1. MarkItDown converts all formats to markdown (handles docx, pptx, xlsx, csv, pdf, etc.)
+2. LLM-driven structural analysis:
+   - Heading hierarchy and section boundaries
+   - Section summarization
+   - Metadata extraction (title, author, date, key terms)
+   - Table detection and structured extraction
+   - Numeric data identification (KPIs, metrics, percentages)
+3. Multi-document fusion when >1 doc uploaded:
+   - Unified content inventory with provenance
+   - Complementary vs. redundant content identification
+
+**Output:** `DocumentBundle` stored in SQLite — sections, subsections, tables, metadata, content inventory.
+
+#### Content Planner
+
+**Purpose:** Given a TemplateProfile and DocumentBundle, produce a slide-by-slide outline.
+
+**For Brand Templates:**
+- Determine optimal slide count based on content volume
+- Allocate content sections to slides
+- Select layout type per slide (enforcing variety)
+- Identify data callout opportunities, chart candidates, icon placements
+- Ensure narrative flow
+
+**For Strict Templates:**
+- Map content to strict slide fields
+- Plan flexible slides as above
+- **For unmappable fields:** mark as `[INSERT CONTENT HERE]` — obvious, easy to find-and-replace in PowerPoint
+
+**Output:** `SlideOutline` — each slide specifies: type (strict/flexible), content allocation, layout choice, visual element plan (which icons, charts, shapes).
+
+#### Design Agent
+
+**Purpose:** For flexible slides, produce polished visual designs.
+
+- Select and vary layouts: two-column, icon+text rows, stat callouts, 2x2 grids, half-image+text, timeline/process flow
+- **Reject text-only designs** — every flexible slide must include at least one of: icons, chart, data callout, or decorative shapes
+- Choose icons from react-icons that match the content semantics
+- Apply brand palette with dominance hierarchy
+- Maintain spacing rules (0.3-0.5" between blocks, 0.5" margins)
+- Track used layouts to avoid consecutive repeats
+
+#### Icon Pipeline
+
+Icons are the primary visual element for slide art. The pipeline:
+
+```
+LLM selects icon name     →  react-icons component lookup
+(e.g., "FaChartLine")        (react-icons/fa, /md, /hi, /bi)
+                                      │
+                                      ▼
+                              ReactDOMServer.renderToStaticMarkup()
+                                      │
+                                      ▼
+                              sharp() rasterize SVG → PNG at 256px+
+                                      │
+                                      ▼
+                              Base64 encode → PptxGenJS addImage()
+                              (w: 0.4-0.6", placed in colored circles)
+```
+
+Available icon sets:
+- `react-icons/fa` — Font Awesome (business, status, categories)
+- `react-icons/md` — Material Design (clean, modern)
+- `react-icons/hi` — Heroicons (outlined style)
+- `react-icons/bi` — Bootstrap Icons (utility)
+
+The Design Agent LLM prompt includes the icon set catalog so it can select semantically appropriate icons for each content section.
+
+#### PPTX Builder
+
+**Dual-mode construction using PptxGenJS + python-pptx:**
+
+- **Flexible slides** → PptxGenJS (JavaScript). Full creative control over layout, shapes, charts, icons, text. The LLM generates the JavaScript code, which is executed by Node.js.
+
+- **Strict slides** → python-pptx XML editing. Unpack template → locate placeholders in slide XML → inject content values → repack. Preserves exact positioning, shapes, and formatting.
+
+- **Hybrid assembly:**
+  1. Start from the template PPTX (preserving theme, masters, layouts)
+  2. Update strict slides in-place via XML editing (python-pptx)
+  3. Generate flexible slides via PptxGenJS as a separate PPTX
+  4. Merge: extract flexible slide XML from PptxGenJS output, insert into template PPTX at correct positions
+  5. Validate and repack
+
+**PptxGenJS code generation rules** (enforced in the LLM prompt):
+- No `#` prefix on hex colors (corrupts file)
+- No 8-char hex colors (corrupts file) — use `opacity` property
+- `bullet: true` not unicode `•` symbols
+- `breakLine: true` between text array items
+- Fresh option objects per call (no reuse — PptxGenJS mutates them)
+- `RECTANGLE` not `ROUNDED_RECTANGLE` when using accent bars
+- `charSpacing` not `letterSpacing` (silently ignored)
+- `margin: 0` on text boxes that must align precisely with shapes
+
+#### Visual QA Agent (Mandatory — Every Generation)
+
+**Philosophy:** The first render is almost never correct. QA is a bug hunt, not a confirmation step.
+
+**Pipeline:**
+
+```
+Step 1: Render slides to images
+  soffice --headless --convert-to pdf output.pptx
+  pdftoppm -jpeg -r 150 output.pdf slide
+  → slide-01.jpg, slide-02.jpg, ...
+
+Step 2: LLM visual inspection (each slide image sent to Claude Sonnet vision)
+
+  LAYOUT ISSUES:
+  • Overlapping elements (text through shapes, stacked elements)
+  • Text overflow or cut off at box boundaries
+  • Elements too close (< 0.3" gaps) or nearly touching
+  • Uneven spacing (large gap in one area, cramped in another)
+  • Insufficient margin from slide edges (< 0.5")
+  • Columns or elements not aligned consistently
+  • Text boxes too narrow causing excessive wrapping
+
+  VISUAL QUALITY:
+  • Low-contrast text (light gray on cream, etc.)
+  • Low-contrast icons (dark on dark backgrounds)
+  • TEXT WALL DETECTED — flexible slide has no visual elements besides text
+  • Accent line under title (AI hallmark — reject)
+  • Same layout as previous slide (monotonous)
+
+  CONTENT:
+  • Leftover placeholder text ("Lorem ipsum", "XXXX", "Click to add")
+  • Missing content that should be present per the outline
+  • [INSERT CONTENT HERE] placeholders are EXPECTED on strict slides
+    with unmapped fields — do NOT flag these as errors
+
+Step 3: Triage
+  • CRITICAL: Overlaps, text overflow, missing content, text walls → must fix
+  • WARNING: Alignment, spacing, contrast → fix if possible
+  • INFO: Minor improvements → log, don't block delivery
+
+Step 4: Fix and re-render affected slides
+  Regenerate PptxGenJS code (flex) or adjust XML (strict)
+  Re-render only affected slides:
+    pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
+
+Step 5: Re-inspect fixed slides
+  One fix often creates another. Re-inspect until clean pass on criticals.
+
+Step 6: Content verification
+  python -m markitdown output.pptx | grep -iE "lorem|ipsum|xxxx|click.to.add"
+  (Note: [INSERT CONTENT HERE] is intentional and NOT flagged)
+
+Step 7: Deliver with preview images
+```
+
+---
+
+## 5. Deployment
+
+### 5.1 Docker Compose
+
+```yaml
+version: "3.8"
+
+services:
+  slideforge:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ~/.aws:/root/.aws:ro          # AWS creds (read-only)
+      - ./data:/app/data               # SQLite DB + generated files
+    environment:
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+    restart: unless-stopped
+```
+
+Single container. No Redis, no Celery — generation runs in-process with async. SQLite handles the modest concurrency of a single-user app. Files stored on a local Docker volume.
+
+### 5.2 AWS Credentials
+
+Inherits credentials from the host via mounted `~/.aws` directory and `AWS_PROFILE` environment variable. Boto3 default credential chain picks it up automatically.
+
+```python
+import boto3
+
+session = boto3.Session(profile_name=os.environ.get("AWS_PROFILE"))
+bedrock = session.client(
+    "bedrock-runtime",
+    region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+)
+```
+
+- **Local dev:** Uses your configured AWS profile (SSO, static creds, etc.)
+- **No secrets in code, env files, or Docker images**
+- Startup validates the boto3 session can reach Bedrock before accepting requests
+
+### 5.3 Bedrock Models
+
+```python
+MODELS = {
+    "primary": "us.anthropic.claude-sonnet-4-20250514",    # Most tasks
+    "vision":  "us.anthropic.claude-sonnet-4-20250514",    # QA, template analysis
+    "fast":    "us.anthropic.claude-haiku-4-5-20251001",   # Simple extraction
+}
+```
+
+| Task | Model |
+|------|-------|
+| Template analysis & slide classification | Sonnet (vision) |
+| Document structuring | Sonnet |
+| Content planning & outlining | Sonnet |
+| Slide content + PptxGenJS code generation | Sonnet |
+| Visual QA inspection | Sonnet (vision) |
+| Simple metadata extraction, captioning | Haiku |
+
+### 5.4 Container Dependencies
+
+```dockerfile
+FROM python:3.12-slim
+
+# System
+RUN apt-get update && apt-get install -y \
+    libreoffice-impress \
+    poppler-utils \
+    nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python
+RUN pip install \
+    fastapi uvicorn \
+    boto3 \
+    "markitdown[pptx]" \
+    python-pptx \
+    Pillow \
+    defusedxml \
+    aiosqlite
+
+# Node (global)
+RUN npm install -g \
+    pptxgenjs \
+    react-icons react react-dom \
+    sharp
+```
+
+---
+
+## 6. Technology Stack
+
+| Layer | Technology | Rationale |
+|-------|-----------|-----------|
+| Frontend | React + TypeScript + Tailwind | Component-based, rapid iteration |
+| Backend | Python FastAPI (async) | Integrates with boto3, python-pptx, MarkItDown |
+| Database | SQLite (via aiosqlite) | Simple, zero-config, single-user appropriate |
+| File Storage | Local filesystem (`./data` volume) | Templates, generated decks, preview images |
+| LLM | AWS Bedrock (Anthropic Claude) | Credential inheritance via AWS profile |
+| PPTX (flexible) | PptxGenJS (Node.js) | Full creative control, charts, icons, shapes |
+| PPTX (strict) | python-pptx + XML editing | Preserve exact template structure |
+| Document Parsing | MarkItDown | Handles all office formats → markdown |
+| Icons | react-icons + sharp | SVG → PNG rasterization for PPTX embedding |
+| Rendering | LibreOffice + Poppler | PPTX → PDF → slide images for QA |
+
+---
+
+## 7. Data Model (SQLite)
+
+```sql
+-- Template profiles (reusable across generations)
+CREATE TABLE templates (
+    id TEXT PRIMARY KEY,              -- UUID
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,               -- 'brand' or 'strict'
+    brand_json TEXT NOT NULL,         -- BrandDNA as JSON
+    slides_json TEXT NOT NULL,        -- SlideSpec[] as JSON
+    source_file TEXT NOT NULL,        -- path to original .pptx
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Generation jobs
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY,              -- UUID
+    template_id TEXT NOT NULL REFERENCES templates(id),
+    instructions TEXT,                -- optional user instructions
+    config_json TEXT,                 -- GenerationConfig as JSON
+    status TEXT NOT NULL DEFAULT 'queued',
+        -- queued → analyzing → planning → generating → qa → fixing → done | error
+    progress REAL NOT NULL DEFAULT 0.0,
+    qa_rounds INTEGER NOT NULL DEFAULT 0,
+    warnings_json TEXT,               -- Warning[] as JSON
+    result_file TEXT,                 -- path to generated .pptx
+    preview_dir TEXT,                 -- path to slide preview images
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+-- Uploaded source documents per job
+CREATE TABLE job_documents (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,          -- path to uploaded file
+    markdown_content TEXT,            -- MarkItDown output
+    structured_json TEXT,             -- LLM-extracted structure
+    created_at TEXT NOT NULL
+);
+
+-- Slide outlines (generated per job)
+CREATE TABLE slide_outlines (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    slide_index INTEGER NOT NULL,
+    mode TEXT NOT NULL,               -- 'strict' or 'flexible'
+    label TEXT NOT NULL,
+    content_json TEXT NOT NULL,       -- content allocation, field mappings
+    layout_json TEXT NOT NULL,        -- layout choice, visual elements
+    pptxgenjs_code TEXT,             -- generated JS code (flexible only)
+    qa_status TEXT,                   -- 'pass', 'fail', 'fixed'
+    qa_issues_json TEXT,             -- issues found by QA
+    created_at TEXT NOT NULL
+);
+```
+
+### File System Layout
+
+```
+./data/
+├── templates/
+│   ├── {template_id}/
+│   │   ├── source.pptx              # Original uploaded template
+│   │   ├── unpacked/                 # Unpacked XML (for strict editing)
+│   │   ├── thumbnails/               # Slide thumbnail images
+│   │   └── profile.json              # Cached template profile
+│   └── ...
+├── jobs/
+│   ├── {job_id}/
+│   │   ├── documents/                # Uploaded source docs
+│   │   ├── markdown/                 # MarkItDown output per doc
+│   │   ├── outline.json              # Generated slide outline
+│   │   ├── slides/                   # Per-slide PptxGenJS scripts
+│   │   ├── output.pptx               # Final generated deck
+│   │   ├── preview/                  # Slide images for UI + QA
+│   │   │   ├── slide-01.jpg
+│   │   │   ├── slide-02.jpg
+│   │   │   └── ...
+│   │   └── qa/                       # QA inspection logs
+│   │       ├── round-1.json
+│   │       └── round-2.json
+│   └── ...
+└── slideforge.db                     # SQLite database
+```
+
+---
+
+## 8. Template Profile Schema
+
+```json
+{
+  "id": "uuid",
+  "name": "Q4 Project Review Template",
+  "type": "strict",
+  "brand": {
+    "colors": {
+      "primary": "1E2761",
+      "secondary": "CADCFC",
+      "accent": "FF6B35",
+      "background_dark": "1E2761",
+      "background_light": "F5F7FA",
+      "text_dark": "1E2761",
+      "text_light": "FFFFFF"
+    },
+    "fonts": {
+      "heading": "Calibri",
+      "body": "Calibri Light"
+    },
+    "logo": {
+      "path": "media/logo.png",
+      "placement": "top-right",
+      "size": { "w": 1.2, "h": 0.4 }
+    },
+    "design_notes": "Dark navy backgrounds on title/closing slides, light backgrounds for content. Clean, corporate aesthetic with ice blue accents."
+  },
+  "slides": [
+    {
+      "index": 0,
+      "mode": "strict",
+      "label": "Title Slide",
+      "layout_name": "Title Slide",
+      "schema": {
+        "fields": [
+          {
+            "id": "project_title",
+            "type": "text",
+            "location": "shape:Title1",
+            "max_chars": 60,
+            "required": true
+          },
+          {
+            "id": "project_date",
+            "type": "date",
+            "format": "MMMM YYYY",
+            "location": "shape:DatePlaceholder",
+            "required": true
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "mode": "strict",
+      "label": "Status Dashboard",
+      "schema": {
+        "fields": [
+          {
+            "id": "overall_rag",
+            "type": "enum",
+            "values": ["green", "amber", "red"],
+            "location": "shape:RAGIndicator",
+            "render": "fill_color",
+            "color_map": {
+              "green": "00B050",
+              "amber": "FFC000",
+              "red": "FF0000"
+            }
+          },
+          {
+            "id": "key_risks",
+            "type": "text_list",
+            "location": "shape:RisksBox",
+            "max_items": 4,
+            "max_chars_per_item": 80
+          }
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "mode": "flexible",
+      "label": "Project Requirements",
+      "intent": "Present the key requirements and scope.",
+      "content_category": "requirements",
+      "visual_guidance": "Icon rows or two-column layout. Not bullets."
+    }
+  ]
+}
+```
+
+---
+
+## 9. Web Application
+
+### 9.1 UI Flow
+
+**Step 1: Template Setup** (one-time per template)
+- Upload PPTX template
+- System analyzes → shows thumbnail grid of all slides
+- Each slide labeled strict or flexible with reasoning
+- Click any slide to override classification or edit schema
+- Save as reusable Template Profile
+
+**Step 2: Generate Deck**
+- Select a saved Template Profile from dropdown
+- Upload one or more source documents (drag-and-drop)
+- Optional: text box for additional instructions
+- Click Generate → progress bar with status updates
+
+**Step 3: Review & Download**
+- View generated deck as slide thumbnail grid (the QA-inspected images)
+- Warnings displayed for any `[INSERT CONTENT HERE]` placeholder slides
+- Download PPTX button
+- Per-slide "Regenerate" button for individual slide redo
+
+### 9.2 API Endpoints
+
+```
+POST   /api/templates/analyze          Upload and analyze template PPTX
+GET    /api/templates                   List saved templates
+GET    /api/templates/{id}              Get template profile + thumbnails
+PATCH  /api/templates/{id}              Update slide classifications/schema
+DELETE /api/templates/{id}              Remove template
+
+POST   /api/jobs                        Start generation job
+GET    /api/jobs/{id}                   Get job status + progress
+GET    /api/jobs/{id}/preview           Get slide preview images
+GET    /api/jobs/{id}/download          Download generated PPTX
+POST   /api/jobs/{id}/regen/{slide}     Regenerate a specific slide
+
+GET    /api/jobs                        List recent jobs
+```
+
+---
+
+## 10. Visual Asset Strategy
+
+### Icons (Primary Visual Element)
+
+Every flexible slide uses icons as visual anchors. The LLM selects semantically appropriate icons from the react-icons catalog.
+
+**Pipeline:** LLM picks icon name → `react-icons` component → `ReactDOMServer.renderToStaticMarkup()` → `sharp` rasterize to PNG at 256px → base64 embed in PptxGenJS `addImage()`.
+
+**Presentation patterns:**
+- **Icon + text rows** — Icon in a colored circle (brand accent), bold header, description below. 3-4 rows per slide.
+- **Icon grid** — 2x2 or 2x3 grid, each cell has an icon + label. Good for categories, features, capabilities.
+- **Section marker** — Large icon (0.8-1.0") at top of slide as a visual anchor for the topic.
+- **Inline accents** — Small icons (0.3-0.4") next to headers or key points.
+
+### Charts
+
+PptxGenJS native charting from extracted numeric data:
+- Bar/column charts for comparisons
+- Line charts for trends
+- Pie/doughnut for composition
+- Brand-consistent colors: `chartColors` matches template palette
+- Clean styling: subtle gridlines, data labels, no chart junk
+
+### Data Callouts
+
+Large numbers (60-72pt) with small descriptive labels below (12-14pt). Arranged in a row of 3-4 across the slide. The fastest way to make a slide look "designed."
+
+### Decorative Shapes
+
+- Colored rectangles for card backgrounds
+- Accent bars (thin rectangles in accent color) as section dividers
+- Circles as icon containers
+- Semi-transparent overlays for visual depth
+
+---
+
+## 11. Unmappable Strict Fields
+
+When the system can't find content in the source documents for a required strict-slide field:
+
+- Insert `[INSERT CONTENT HERE]` as the field value
+- This text is intentional, obvious, and easy to Ctrl+H in PowerPoint
+- The QA agent is told NOT to flag these as errors
+- The UI preview highlights slides containing these placeholders with a yellow warning badge
+- The API response includes a `warnings` array listing all placeholder fields
+
+---
+
+## 12. Phase Plan
+
+### Phase 1: Foundation (Weeks 1-3)
+- Docker setup with Bedrock credentials
+- FastAPI + React scaffold with SQLite
+- MarkItDown document ingestion (all formats)
+- Brand template analysis (color/font/layout extraction via LLM vision)
+- PptxGenJS slide generation for flexible slides (LLM generates JS code)
+- Icon pipeline (react-icons → sharp → base64 → PptxGenJS)
+- **Visual QA pipeline** (soffice → pdftoppm → LLM inspect → fix loop)
+- End-to-end: upload brand template + doc → get QA'd deck → download
+
+### Phase 2: Strict Templates (Weeks 4-6)
+- Strict/flexible slide classification via LLM vision
+- Schema extraction for strict slides
+- python-pptx XML editing for strict slide content injection
+- Hybrid assembly (strict XML + flexible PptxGenJS in one deck)
+- Template Profile management UI (review/override classifications)
+- `[INSERT CONTENT HERE]` placeholder handling
+
+### Phase 3: Polish (Weeks 7-9)
+- Chart generation from numeric data
+- Multi-document fusion
+- Layout variety enforcement (no consecutive repeats)
+- Data callout generation (big numbers + labels)
+- Text wall detection hardened in QA
+- Per-slide regeneration
+- Generation history in UI
+
+### Phase 4: Refinement (Weeks 10+)
+- Template library (browse, duplicate saved templates)
+- Improved icon selection (LLM learns which icons work best)
+- Performance optimization (parallel slide generation)
+- PDF export option
+- Better error recovery and retry logic
+
+---
+
+## 13. Risks & Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| XML editing corrupts strict slides | Validate via python-pptx after every edit; fallback to recreating from layout |
+| LLM hallucinates content not in source docs | Constrain to DocumentBundle; user review step |
+| PptxGenJS output doesn't match template look | Extract precise brand DNA; Visual QA catches mismatches |
+| QA agent misses issues | "Assume problems exist" prompt; text wall detector as explicit check |
+| LibreOffice rendering ≠ PowerPoint rendering | Known limitation; focus QA on layout/overlap issues that render consistently |
+| AWS creds not available in container | Validate boto3 session on startup with clear error message |
+| PptxGenJS code generation has bugs | QA catches visual bugs; common pitfalls list in LLM prompt |
+
+---
+
+## 14. Success Metrics
+
+| Metric | Target |
+|--------|--------|
+| Generation time | < 2 min for 10-slide deck |
+| Text wall rate | < 5% of flexible slides after QA |
+| Strict field accuracy | > 95% correctly populated |
+| QA rounds needed | ≤ 2 on average |
+| Usability | Decks usable after minor edits, not major rework |
