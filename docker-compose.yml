@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  slideforge:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ~/.aws:/root/.aws:ro
+      - ./data:/app/data
+    environment:
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      - BEDROCK_VALIDATE=${BEDROCK_VALIDATE:-true}
+    restart: unless-stopped
