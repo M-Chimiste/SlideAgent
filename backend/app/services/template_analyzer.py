@@ -1,17 +1,21 @@
 import re
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
 from lxml import etree
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.clients.bedrock_client import BedrockClient
-from app.models.brand import BrandDNA, BrandFonts
+from app.models.brand import BrandDNA, BrandFonts, BrandLogo
 from app.models.template import SlideField, SlideSchema, SlideSpec, TemplateProfile
 from app.services.rendering import render_pptx_to_images
+
+
+SAFE_PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
 
 
 class TemplateAnalyzer:
@@ -47,50 +51,87 @@ class TemplateAnalyzer:
         return profile, thumbnails
 
     def _extract_brand(self, template_path: Path) -> BrandDNA:
+        brand = BrandDNA()
         with zipfile.ZipFile(template_path, "r") as zip_ref:
             theme_path = "ppt/theme/theme1.xml"
-            if theme_path not in zip_ref.namelist():
-                return BrandDNA()
-            xml = zip_ref.read(theme_path)
-        tree = etree.fromstring(xml)
-        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-        clr_scheme = tree.find(".//a:clrScheme", namespaces=ns)
-        colors = {}
-        if clr_scheme is not None:
-            for child in clr_scheme:
-                tag = etree.QName(child).localname
-                color_node = child.find(".//a:srgbClr", namespaces=ns)
-                if color_node is None:
-                    color_node = child.find(".//a:sysClr", namespaces=ns)
-                if color_node is not None:
-                    colors[tag] = color_node.get("val") or color_node.get("lastClr")
-        font_scheme = tree.find(".//a:fontScheme", namespaces=ns)
-        fonts = BrandFonts()
-        if font_scheme is not None:
-            major = font_scheme.find(".//a:majorFont", namespaces=ns)
-            minor = font_scheme.find(".//a:minorFont", namespaces=ns)
-            if major is not None:
-                major_latn = major.find(".//a:latin", namespaces=ns)
-                if major_latn is not None and major_latn.get("typeface"):
-                    fonts.heading = major_latn.get("typeface")
-            if minor is not None:
-                minor_latn = minor.find(".//a:latin", namespaces=ns)
-                if minor_latn is not None and minor_latn.get("typeface"):
-                    fonts.body = minor_latn.get("typeface")
-        brand = BrandDNA(fonts=fonts)
-        if colors:
-            brand.colors.primary = colors.get("accent1", brand.colors.primary)
-            brand.colors.secondary = colors.get("accent2", brand.colors.secondary)
-            brand.colors.accent = colors.get("accent3", brand.colors.accent)
-            brand.colors.text_dark = colors.get("dk1", brand.colors.text_dark)
-            brand.colors.text_light = colors.get("lt1", brand.colors.text_light)
-            brand.colors.background_dark = colors.get(
-                "dk2", brand.colors.background_dark
-            )
-            brand.colors.background_light = colors.get(
-                "lt2", brand.colors.background_light
-            )
+            if theme_path in zip_ref.namelist():
+                xml = zip_ref.read(theme_path)
+                tree = etree.fromstring(xml, parser=SAFE_PARSER)
+                ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+                clr_scheme = tree.find(".//a:clrScheme", namespaces=ns)
+                colors = {}
+                if clr_scheme is not None:
+                    for child in clr_scheme:
+                        tag = etree.QName(child).localname
+                        color_node = child.find(".//a:srgbClr", namespaces=ns)
+                        if color_node is None:
+                            color_node = child.find(".//a:sysClr", namespaces=ns)
+                        if color_node is not None:
+                            colors[tag] = color_node.get("val") or color_node.get("lastClr")
+                font_scheme = tree.find(".//a:fontScheme", namespaces=ns)
+                fonts = BrandFonts()
+                if font_scheme is not None:
+                    major = font_scheme.find(".//a:majorFont", namespaces=ns)
+                    minor = font_scheme.find(".//a:minorFont", namespaces=ns)
+                    if major is not None:
+                        major_latn = major.find(".//a:latin", namespaces=ns)
+                        if major_latn is not None and major_latn.get("typeface"):
+                            fonts.heading = major_latn.get("typeface")
+                    if minor is not None:
+                        minor_latn = minor.find(".//a:latin", namespaces=ns)
+                        if minor_latn is not None and minor_latn.get("typeface"):
+                            fonts.body = minor_latn.get("typeface")
+                brand.fonts = fonts
+                if colors:
+                    brand.colors.primary = colors.get("accent1", brand.colors.primary)
+                    brand.colors.secondary = colors.get("accent2", brand.colors.secondary)
+                    brand.colors.accent = colors.get("accent3", brand.colors.accent)
+                    brand.colors.text_dark = colors.get("dk1", brand.colors.text_dark)
+                    brand.colors.text_light = colors.get("lt1", brand.colors.text_light)
+                    brand.colors.background_dark = colors.get(
+                        "dk2", brand.colors.background_dark
+                    )
+                    brand.colors.background_light = colors.get(
+                        "lt2", brand.colors.background_light
+                    )
+        logo = self._extract_logo(template_path)
+        if logo:
+            brand.logo = logo
+        brand.design_notes = self._design_notes(template_path)
         return brand
+
+    def _extract_logo(self, template_path: Path) -> BrandLogo | None:
+        presentation = Presentation(template_path.as_posix())
+        candidates = []
+        slide_area = int(presentation.slide_width) * int(presentation.slide_height)
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if getattr(shape, "shape_type", None) != MSO_SHAPE_TYPE.PICTURE:
+                    continue
+                area = int(shape.width) * int(shape.height)
+                candidates.append((area / max(slide_area, 1), shape))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        _, shape = candidates[0]
+        image = shape.image
+        extension = image.ext or "png"
+        logo_path = template_path.parent / f"brand-logo.{extension}"
+        logo_path.write_bytes(image.blob)
+        width_inches = max(min(int(shape.width) / 914400, 1.6), 0.45)
+        height_inches = max(min(int(shape.height) / 914400, 0.8), 0.25)
+        return BrandLogo(path=logo_path.as_posix(), w=width_inches, h=height_inches)
+
+    def _design_notes(self, template_path: Path) -> str:
+        presentation = Presentation(template_path.as_posix())
+        layout_names = []
+        for slide in presentation.slides:
+            layout_name = slide.slide_layout.name
+            if layout_name not in layout_names:
+                layout_names.append(layout_name)
+        if not layout_names:
+            return "No reusable layout examples detected."
+        return "Reusable layout examples: " + ", ".join(layout_names[:8])
 
     def _extract_slides(self, template_path: Path, template_type: str) -> list[SlideSpec]:
         presentation = Presentation(template_path.as_posix())
@@ -123,22 +164,18 @@ class TemplateAnalyzer:
 
     def _slide_title(self, slide) -> str:
         for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
-            text = shape.text.strip()
+            text = self._shape_text(shape).strip()
             if text:
                 return text.splitlines()[0][:80]
         return ""
 
     def _classify_slide(self, slide, label: str) -> tuple[str, str]:
-        text = " ".join(
-            shape.text.strip()
-            for shape in slide.shapes
-            if shape.has_text_frame and shape.text
-        ).lower()
+        text = " ".join(self._shape_text(shape).strip() for shape in slide.shapes).lower()
         if any(keyword in text for keyword in ["status", "dashboard", "kpi", "score"]):
             return "strict", "Detected structured dashboard keywords."
         try:
+            if any(getattr(shape, "has_table", False) for shape in slide.shapes):
+                return "strict", "Detected table element."
             if any(getattr(shape, "has_chart", False) for shape in slide.shapes):
                 return "strict", "Detected chart element."
         except Exception:
@@ -150,6 +187,12 @@ class TemplateAnalyzer:
     def _extract_schema(self, slide) -> SlideSchema:
         fields = []
         for shape in slide.shapes:
+            if getattr(shape, "has_chart", False):
+                fields.extend(self._extract_chart_fields(shape))
+                continue
+            if getattr(shape, "has_table", False):
+                fields.extend(self._extract_table_fields(shape, len(fields)))
+                continue
             if not shape.has_text_frame:
                 continue
             name = shape.name or f"Shape{len(fields) + 1}"
@@ -173,6 +216,87 @@ class TemplateAnalyzer:
                 )
             )
         return SlideSchema(fields=fields)
+
+    def _extract_chart_fields(self, shape) -> list[SlideField]:
+        fields: list[SlideField] = []
+        name = shape.name or "Chart"
+        chart = shape.chart
+        for series_idx, series in enumerate(chart.series):
+            fields.append(
+                SlideField(
+                    id=self._sanitize_id(f"{name}_series_{series_idx + 1}_name"),
+                    type="text",
+                    location=f"chart:{name}:series_name:{series_idx}",
+                    required=True,
+                    max_chars=80,
+                )
+            )
+            for point_idx, value in enumerate(series.values):
+                fields.append(
+                    SlideField(
+                        id=self._sanitize_id(
+                            f"{name}_series_{series_idx + 1}_value_{point_idx + 1}"
+                        ),
+                        type="number",
+                        location=f"chart:{name}:value:{series_idx}:{point_idx}",
+                        required=True,
+                        max_chars=20,
+                    )
+                )
+        try:
+            categories = list(chart.plots[0].categories)
+        except Exception:
+            categories = []
+        for point_idx, category in enumerate(categories):
+            fields.append(
+                SlideField(
+                    id=self._sanitize_id(f"{name}_category_{point_idx + 1}"),
+                    type="text",
+                    location=f"chart:{name}:category:{point_idx}",
+                    required=True,
+                    max_chars=max(len(str(category)) + 20, 60),
+                )
+            )
+        return fields
+
+    def _extract_table_fields(self, shape, existing_count: int) -> list[SlideField]:
+        fields: list[SlideField] = []
+        name = shape.name or f"Table{existing_count + 1}"
+        for row_idx, row in enumerate(shape.table.rows):
+            for col_idx, cell in enumerate(row.cells):
+                cell_text = cell.text.strip()
+                if not cell_text:
+                    continue
+                field_id = self._sanitize_id(f"{name}_{row_idx + 1}_{col_idx + 1}")
+                field_type = self._infer_field_type(cell_text)
+                constraints = self._infer_constraints(field_id, field_type, cell_text)
+                fields.append(
+                    SlideField(
+                        id=field_id,
+                        type=field_type,
+                        location=f"table:{name}:{row_idx}:{col_idx}",
+                        required=True,
+                        max_chars=constraints.get("max_chars", 160),
+                        values=constraints.get("values"),
+                        render=constraints.get("render"),
+                        color_map=constraints.get("color_map"),
+                        max_items=constraints.get("max_items"),
+                        max_chars_per_item=constraints.get("max_chars_per_item"),
+                    )
+                )
+        return fields
+
+    def _shape_text(self, shape) -> str:
+        if getattr(shape, "has_text_frame", False):
+            return shape.text or ""
+        if getattr(shape, "has_table", False):
+            cell_text = []
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    if cell.text:
+                        cell_text.append(cell.text)
+            return " ".join(cell_text)
+        return ""
 
     def _infer_field_type(self, text: str) -> str:
         lowered = text.lower()
@@ -213,7 +337,7 @@ class TemplateAnalyzer:
         return cleaned.strip("_") or "field"
 
     def _timestamp(self) -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def _new_id(self) -> str:
         return str(uuid.uuid4())

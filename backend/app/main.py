@@ -1,10 +1,9 @@
-from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.clients.bedrock_client import BedrockClient
+from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.config import get_settings
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
@@ -26,18 +25,40 @@ def create_app() -> FastAPI:
     settings = get_settings()
     store = SQLiteStore(settings)
     storage = LocalStorage(settings)
-    bedrock = BedrockClient(settings)
+    bedrock = None
+    llm_client = None
 
-    if settings.bedrock_validate_on_startup:
+    if settings.llm_provider == "bedrock":
+        bedrock = BedrockClient(settings)
+    elif settings.llm_provider == "openai_compatible":
+        llm_client = OpenAICompatibleClient(settings)
+
+    if bedrock and settings.bedrock_validate_on_startup:
         bedrock.validate()
 
     template_analyzer = TemplateAnalyzer(bedrock=bedrock)
     ingester = DocumentIngester()
-    planner = ContentPlanner()
+    planner = ContentPlanner(llm_client=llm_client)
     designer = DesignAgent()
     node_runner = NodePptxGenRunner(settings)
     builder = PptxBuilder(node_runner)
-    qa_agent = VisualQAAgent(bedrock=bedrock, model_id=settings.sonnet_model_id)
+    vision_client = None
+    if settings.llm_provider == "openai_compatible":
+        vision_client = OpenAICompatibleClient(
+            settings.model_copy(
+                update={
+                    "openai_compatible_base_url": settings.vision_base_url,
+                    "openai_compatible_model": settings.vision_model,
+                    "openai_compatible_timeout_seconds": settings.vision_timeout_seconds,
+                    "openai_compatible_reasoning_effort": settings.vision_reasoning_effort,
+                }
+            )
+        )
+    qa_agent = VisualQAAgent(
+        bedrock=bedrock,
+        openai_client=vision_client,
+        model_id=settings.sonnet_model_id,
+    )
     orchestrator = JobOrchestrator(
         settings=settings,
         store=store,

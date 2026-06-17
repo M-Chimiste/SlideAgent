@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.brand import BrandDNA
 
@@ -24,11 +24,13 @@ class SlideSchema(BaseModel):
 
 
 class SlideSpec(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     index: int
     mode: str
     label: str
     layout_name: Optional[str] = None
-    schema: Optional[SlideSchema] = None
+    slide_schema: Optional[SlideSchema] = Field(default=None, alias="schema")
     intent: Optional[str] = None
     content_category: Optional[str] = None
     visual_guidance: Optional[str] = None

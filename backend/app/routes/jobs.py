@@ -1,75 +1,77 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
 from app.models.api import JobListResponse, JobStatusResponse
-from app.models.job import JobRecord
+from app.models.job import FREEFORM_TEMPLATE_ID, JobRecord
 from app.services.job_queue import JobQueue
 from app.services.orchestrator import JobOrchestrator
 
 router = APIRouter()
 
 
-def _get_store() -> SQLiteStore:
-    from fastapi import Request
-
-    def dependency(request: Request) -> SQLiteStore:
-        return request.app.state.store
-
-    return dependency
+def _get_store(request: Request) -> SQLiteStore:
+    return request.app.state.store
 
 
-def _get_storage() -> LocalStorage:
-    from fastapi import Request
-
-    def dependency(request: Request) -> LocalStorage:
-        return request.app.state.storage
-
-    return dependency
+def _get_storage(request: Request) -> LocalStorage:
+    return request.app.state.storage
 
 
-def _get_orchestrator() -> JobOrchestrator:
-    from fastapi import Request
-
-    def dependency(request: Request) -> JobOrchestrator:
-        return request.app.state.orchestrator
-
-    return dependency
+def _get_orchestrator(request: Request) -> JobOrchestrator:
+    return request.app.state.orchestrator
 
 
-def _get_job_queue() -> JobQueue:
-    from fastapi import Request
-
-    def dependency(request: Request) -> JobQueue:
-        return request.app.state.job_queue
-
-    return dependency
+def _get_job_queue(request: Request) -> JobQueue:
+    return request.app.state.job_queue
 
 
 @router.post("/jobs", response_model=JobRecord)
 async def create_job(
-    template_id: str = Form(...),
+    template_id: str = Form(""),
+    generation_mode: str = Form(""),
+    planner_profile: str = Form("fast"),
     instructions: str = Form(""),
-    documents: list[UploadFile] = File(...),
-    store: SQLiteStore = _get_store(),
-    storage: LocalStorage = _get_storage(),
-    job_queue: JobQueue = _get_job_queue(),
+    documents: Optional[list[UploadFile]] = File(None),
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+    job_queue: JobQueue = Depends(_get_job_queue),
 ) -> JobRecord:
-    template = await store.get_template(template_id)
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found.")
+    generation_mode = generation_mode.strip().lower()
+    if not generation_mode:
+        generation_mode = "freeform" if not template_id else ""
+    if generation_mode not in {"", "freeform", "brand", "strict"}:
+        raise HTTPException(status_code=422, detail="Invalid generation mode.")
+    planner_profile = planner_profile.strip().lower() or "fast"
+    if planner_profile not in {"fast", "deep"}:
+        raise HTTPException(status_code=422, detail="Invalid planner profile.")
+
+    template = None
+    if generation_mode == "freeform":
+        template_id = FREEFORM_TEMPLATE_ID
+    else:
+        if not template_id:
+            raise HTTPException(status_code=422, detail="Template is required for this mode.")
+        template = await store.get_template(template_id)
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found.")
+        generation_mode = generation_mode or template.type
 
     job_id = str(uuid.uuid4())
     job = JobRecord(
         id=job_id,
         template_id=template_id,
         instructions=instructions,
-        config_json=None,
+        config_json={
+            "generation_mode": generation_mode,
+            "planner_profile": planner_profile,
+        },
         status="queued",
         progress=0.0,
         qa_rounds=0,
@@ -82,7 +84,7 @@ async def create_job(
     )
     await store.create_job(job)
 
-    for doc in documents:
+    for doc in documents or []:
         content = await doc.read()
         storage.save_job_document(job_id, doc.filename, content)
 
@@ -91,7 +93,7 @@ async def create_job(
 
 
 @router.get("/jobs", response_model=JobListResponse)
-async def list_jobs(store: SQLiteStore = _get_store()) -> JobListResponse:
+async def list_jobs(store: SQLiteStore = Depends(_get_store)) -> JobListResponse:
     jobs = await store.list_jobs()
     return JobListResponse(jobs=jobs)
 
@@ -99,8 +101,8 @@ async def list_jobs(store: SQLiteStore = _get_store()) -> JobListResponse:
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
     job_id: str,
-    store: SQLiteStore = _get_store(),
-    storage: LocalStorage = _get_storage(),
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
 ) -> JobStatusResponse:
     job = await store.get_job(job_id)
     if not job:
@@ -116,7 +118,7 @@ async def get_job_status(
 
 @router.get("/jobs/{job_id}/preview")
 async def get_job_preview(
-    job_id: str, storage: LocalStorage = _get_storage()
+    job_id: str, storage: LocalStorage = Depends(_get_storage)
 ) -> dict[str, list[str]]:
     preview_dir = storage.preview_dir(job_id)
     if not preview_dir.exists():
@@ -129,7 +131,7 @@ async def get_job_preview(
 async def get_preview_image(
     job_id: str,
     image_name: str,
-    storage: LocalStorage = _get_storage(),
+    storage: LocalStorage = Depends(_get_storage),
 ) -> FileResponse:
     preview_dir = storage.preview_dir(job_id)
     image_path = preview_dir / image_name
@@ -142,8 +144,8 @@ async def get_preview_image(
 async def download_job(
     job_id: str,
     format: str = "pptx",
-    store: SQLiteStore = _get_store(),
-    storage: LocalStorage = _get_storage(),
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
 ) -> FileResponse:
     job = await store.get_job(job_id)
     if not job or not job.result_file:
@@ -161,8 +163,8 @@ async def download_job(
 async def regenerate_slide(
     job_id: str,
     slide_index: int,
-    store: SQLiteStore = _get_store(),
-    orchestrator: JobOrchestrator = _get_orchestrator(),
+    store: SQLiteStore = Depends(_get_store),
+    orchestrator: JobOrchestrator = Depends(_get_orchestrator),
 ) -> dict[str, str]:
     job = await store.get_job(job_id)
     if not job:
@@ -175,4 +177,4 @@ async def regenerate_slide(
 
 
 def _timestamp() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

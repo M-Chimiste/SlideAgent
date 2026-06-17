@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Iterable, Optional
 
 import aiosqlite
@@ -12,7 +12,7 @@ from app.models.template import TemplateProfile, TemplateUpdateRequest
 
 
 def utc_now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class SQLiteStore:
@@ -21,7 +21,7 @@ class SQLiteStore:
         self.settings.ensure_dirs()
 
     async def _connect(self) -> aiosqlite.Connection:
-        return await aiosqlite.connect(self.settings.sqlite_path.as_posix())
+        return aiosqlite.connect(self.settings.sqlite_path.as_posix())
 
     async def init(self) -> None:
         async with await self._connect() as db:
@@ -93,7 +93,7 @@ class SQLiteStore:
                     profile.name,
                     profile.type,
                     profile.brand.model_dump_json(),
-                    json.dumps([slide.model_dump() for slide in profile.slides]),
+                    json.dumps([slide.model_dump(by_alias=True) for slide in profile.slides]),
                     profile.source_file,
                     profile.created_at,
                     profile.updated_at,
@@ -120,7 +120,7 @@ class SQLiteStore:
                 (
                     updated.name,
                     updated.brand.model_dump_json(),
-                    json.dumps([slide.model_dump() for slide in updated.slides]),
+                    json.dumps([slide.model_dump(by_alias=True) for slide in updated.slides]),
                     updated.updated_at,
                     template_id,
                 ),

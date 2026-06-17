@@ -1,7 +1,6 @@
 import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
@@ -12,31 +11,16 @@ from app.services.template_analyzer import TemplateAnalyzer
 router = APIRouter()
 
 
-def _get_store() -> SQLiteStore:
-    from fastapi import Request
-
-    def dependency(request: Request) -> SQLiteStore:
-        return request.app.state.store
-
-    return dependency
+def _get_store(request: Request) -> SQLiteStore:
+    return request.app.state.store
 
 
-def _get_storage() -> LocalStorage:
-    from fastapi import Request
-
-    def dependency(request: Request) -> LocalStorage:
-        return request.app.state.storage
-
-    return dependency
+def _get_storage(request: Request) -> LocalStorage:
+    return request.app.state.storage
 
 
-def _get_analyzer() -> TemplateAnalyzer:
-    from fastapi import Request
-
-    def dependency(request: Request) -> TemplateAnalyzer:
-        return request.app.state.template_analyzer
-
-    return dependency
+def _get_analyzer(request: Request) -> TemplateAnalyzer:
+    return request.app.state.template_analyzer
 
 
 @router.post("/templates/analyze", response_model=TemplateProfile)
@@ -44,9 +28,9 @@ async def analyze_template(
     file: UploadFile = File(...),
     name: str = Form(...),
     template_type: str = Form("brand"),
-    store: SQLiteStore = _get_store(),
-    storage: LocalStorage = _get_storage(),
-    analyzer: TemplateAnalyzer = _get_analyzer(),
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+    analyzer: TemplateAnalyzer = Depends(_get_analyzer),
 ) -> TemplateProfile:
     content = await file.read()
     template_id = str(uuid.uuid4())
@@ -61,14 +45,14 @@ async def analyze_template(
 
 
 @router.get("/templates", response_model=TemplateListResponse)
-async def list_templates(store: SQLiteStore = _get_store()) -> TemplateListResponse:
+async def list_templates(store: SQLiteStore = Depends(_get_store)) -> TemplateListResponse:
     templates = await store.list_templates()
     return TemplateListResponse(templates=templates)
 
 
 @router.get("/templates/{template_id}", response_model=TemplateProfile)
 async def get_template(
-    template_id: str, store: SQLiteStore = _get_store()
+    template_id: str, store: SQLiteStore = Depends(_get_store)
 ) -> TemplateProfile:
     template = await store.get_template(template_id)
     if not template:
@@ -80,8 +64,8 @@ async def get_template(
 async def update_template(
     template_id: str,
     update: TemplateUpdateRequest,
-    store: SQLiteStore = _get_store(),
-    storage: LocalStorage = _get_storage(),
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
 ) -> TemplateProfile:
     updated = await store.update_template(template_id, update)
     if not updated:
@@ -92,7 +76,7 @@ async def update_template(
 
 @router.delete("/templates/{template_id}")
 async def delete_template(
-    template_id: str, store: SQLiteStore = _get_store()
+    template_id: str, store: SQLiteStore = Depends(_get_store)
 ) -> dict[str, str]:
     await store.delete_template(template_id)
     return {"status": "deleted"}
@@ -101,8 +85,8 @@ async def delete_template(
 @router.post("/templates/{template_id}/duplicate", response_model=TemplateProfile)
 async def duplicate_template(
     template_id: str,
-    store: SQLiteStore = _get_store(),
-    storage: LocalStorage = _get_storage(),
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
 ) -> TemplateProfile:
     template = await store.get_template(template_id)
     if not template:
