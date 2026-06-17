@@ -1,11 +1,14 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
 from app.config import Settings
+from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
+from app.models.brand import BrandDNA
 from app.models.job import JobRecord
+from app.models.job import FREEFORM_TEMPLATE_ID
 from app.models.outline import SlideOutline
 from app.models.template import TemplateProfile
 from app.services.content_planner import ContentPlanner
@@ -32,6 +35,7 @@ class JobOrchestrator:
         self.storage = storage
         self.ingester = ingester
         self.planner = planner
+        self.deep_planner = self._build_deep_planner()
         self.designer = designer
         self.builder = builder
         self.qa_agent = qa_agent
@@ -40,7 +44,11 @@ class JobOrchestrator:
         job = await self.store.get_job(job_id)
         if not job:
             return
-        template = await self.store.get_template(job.template_id)
+        template = (
+            self._freeform_template()
+            if job.template_id == FREEFORM_TEMPLATE_ID
+            else await self.store.get_template(job.template_id)
+        )
         if not template:
             await self.store.update_job(
                 job_id,
@@ -69,7 +77,14 @@ class JobOrchestrator:
                     )
 
             await self.store.update_job(job.id, status="planning", progress=0.3)
-            outlines, warnings = self.planner.plan(template, bundle)
+            generation_mode = self._generation_mode(job, template)
+            planner = self._planner_for_job(job)
+            outlines, warnings = planner.plan(
+                template,
+                bundle,
+                instructions=job.instructions or "",
+                generation_mode=generation_mode,
+            )
             outlines = self.designer.apply_design(outlines)
             await self.store.add_slide_outlines(outlines)
 
@@ -89,9 +104,16 @@ class JobOrchestrator:
             qa_result, images = self.qa_agent.inspect_deck(
                 output_path, working_dir / "preview", outlines
             )
-            while not qa_result.passed and qa_round < self.settings.qa_max_rounds:
+            self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
+            seen_actionable_signatures: set[tuple[tuple[int | None, str, str], ...]] = set()
+            while qa_round < self.settings.qa_max_rounds:
+                actionable_signature = self._actionable_qa_signature(qa_result)
+                if not actionable_signature or actionable_signature in seen_actionable_signatures:
+                    break
+                seen_actionable_signatures.add(actionable_signature)
                 qa_round += 1
                 outlines = self._apply_qa_fixes(outlines, qa_result)
+                await self._persist_slide_outlines(outlines, qa_result)
                 strict_warnings = self.builder.build_deck(
                     template, outlines, output_path, working_dir
                 )
@@ -154,24 +176,47 @@ class JobOrchestrator:
             completed_at=self._timestamp(),
         )
 
-    def _apply_qa_fixes(
+    def _apply_qa_fixes(self, outlines: list[SlideOutline], qa_result) -> list[SlideOutline]:
+        return self.designer.revise_deck_for_qa(outlines, qa_result.issues)
+
+    def _has_actionable_qa_issues(self, qa_result) -> bool:
+        return bool(self._actionable_qa_signature(qa_result))
+
+    def _actionable_qa_signature(
+        self, qa_result
+    ) -> tuple[tuple[int, str, str], ...]:
+        return tuple(
+            sorted(
+                (
+                    -1 if issue.slide_index is None else issue.slide_index,
+                    issue.category or "",
+                    " ".join(issue.message.lower().split())[:160],
+                )
+                for issue in qa_result.issues
+                if issue.severity == "CRITICAL"
+                or self.designer.is_actionable_qa_issue(issue)
+            )
+        )
+
+    async def _persist_slide_outlines(
         self, outlines: list[SlideOutline], qa_result
-    ) -> list[SlideOutline]:
-        issues_by_slide = {
-            issue.slide_index
-            for issue in qa_result.issues
-            if issue.severity == "CRITICAL" and issue.slide_index is not None
-        }
-        updated = []
+    ) -> None:
+        issues_by_slide: dict[int, list[dict]] = {}
+        for issue in qa_result.issues:
+            if issue.slide_index is None:
+                continue
+            issues_by_slide.setdefault(issue.slide_index, []).append(issue.model_dump())
         for outline in outlines:
-            if outline.slide_index in issues_by_slide:
-                updated.append(self.designer.revise_for_qa(outline))
-            else:
-                updated.append(outline)
-        return updated
+            await self.store.update_slide_outline(
+                outline.id,
+                content_json=outline.content_json,
+                layout_json=outline.layout_json,
+                qa_status="warning" if issues_by_slide.get(outline.slide_index) else "pass",
+                qa_issues_json={"issues": issues_by_slide.get(outline.slide_index, [])},
+            )
 
     def _timestamp(self) -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def _load_document_paths(self, job_id: str) -> list[Path]:
         doc_dir = self.storage.job_dir(job_id) / "documents"
@@ -191,3 +236,46 @@ class JobOrchestrator:
             seen.add(key)
             merged.append(warning)
         return merged
+
+    def _generation_mode(self, job: JobRecord, template: TemplateProfile) -> str:
+        if job.config_json and job.config_json.get("generation_mode"):
+            return str(job.config_json["generation_mode"])
+        return template.type
+
+    def _planner_for_job(self, job: JobRecord) -> ContentPlanner:
+        if self._planner_profile(job) == "deep" and self.deep_planner is not None:
+            return self.deep_planner
+        return self.planner
+
+    def _planner_profile(self, job: JobRecord) -> str:
+        if job.config_json and job.config_json.get("planner_profile"):
+            profile = str(job.config_json["planner_profile"]).strip().lower()
+            if profile in {"fast", "deep"}:
+                return profile
+        return "fast"
+
+    def _build_deep_planner(self) -> ContentPlanner | None:
+        if self.settings.llm_provider != "openai_compatible":
+            return None
+        deep_settings = self.settings.model_copy(
+            update={
+                "openai_compatible_base_url": self.settings.deep_planner_base_url,
+                "openai_compatible_model": self.settings.deep_planner_model,
+                "openai_compatible_timeout_seconds": self.settings.deep_planner_timeout_seconds,
+                "openai_compatible_reasoning_effort": self.settings.deep_planner_reasoning_effort,
+            }
+        )
+        return ContentPlanner(llm_client=OpenAICompatibleClient(deep_settings))
+
+    def _freeform_template(self) -> TemplateProfile:
+        timestamp = self._timestamp()
+        return TemplateProfile(
+            id=FREEFORM_TEMPLATE_ID,
+            name="Freeform",
+            type="freeform",
+            brand=BrandDNA(),
+            slides=[],
+            source_file="",
+            created_at=timestamp,
+            updated_at=timestamp,
+        )

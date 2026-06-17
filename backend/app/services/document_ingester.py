@@ -1,9 +1,10 @@
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
+from markitdown import FileConversionException
 from markitdown import MarkItDown
 
 from app.models.document import (
@@ -62,8 +63,42 @@ class DocumentIngester:
         return records, bundle
 
     def _convert_to_markdown(self, file_path: Path) -> str:
-        result = self.markitdown.convert(file_path.as_posix())
-        return result.text_content or ""
+        try:
+            result = self.markitdown.convert(file_path.as_posix())
+            return result.text_content or ""
+        except FileConversionException:
+            if file_path.suffix.lower() == ".docx":
+                return self._convert_docx_fallback(file_path)
+            raise
+
+    def _convert_docx_fallback(self, file_path: Path) -> str:
+        from docx import Document
+
+        document = Document(file_path.as_posix())
+        lines: list[str] = []
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            style_name = paragraph.style.name.lower() if paragraph.style else ""
+            if "heading 1" in style_name:
+                lines.append(f"# {text}")
+            elif "heading 2" in style_name:
+                lines.append(f"## {text}")
+            elif "heading 3" in style_name:
+                lines.append(f"### {text}")
+            else:
+                lines.append(text)
+        for table in document.tables:
+            rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+            if not rows:
+                continue
+            header = rows[0]
+            lines.append("| " + " | ".join(header) + " |")
+            lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+            for row in rows[1:]:
+                lines.append("| " + " | ".join(row) + " |")
+        return "\n\n".join(lines)
 
     def _parse_sections(self, doc_id: str, markdown: str) -> list[DocumentSection]:
         sections: list[DocumentSection] = []
@@ -145,7 +180,7 @@ class DocumentIngester:
         return [sentence.strip() for sentence in sentences if sentence.strip()][:20]
 
     def _timestamp(self) -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def fuse_document_bundles(bundles: Iterable[DocumentBundle]) -> DocumentBundle:

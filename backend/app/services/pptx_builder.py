@@ -5,6 +5,7 @@ from typing import Iterable
 from app.models.outline import SlideOutline
 from app.models.template import TemplateProfile
 from app.services.hybrid_assembler import HybridAssembler, SlideReplacement
+from app.services.pptx_renderer import DeterministicPptxRenderer
 from app.services.strict_injector import StrictSlideInjector
 from app.workers.node_runner import NodePptxGenRunner
 
@@ -14,6 +15,7 @@ class PptxBuilder:
         self.node_runner = node_runner
         self.hybrid_assembler = HybridAssembler()
         self.strict_injector = StrictSlideInjector()
+        self.renderer = DeterministicPptxRenderer()
 
     def build_deck(
         self,
@@ -22,9 +24,8 @@ class PptxBuilder:
         output_path: Path,
         working_dir: Path,
     ) -> list[dict[str, str | int]]:
-        if template.type == "brand":
-            deck_json_path = self._write_deck_json(template, outlines, working_dir)
-            self.node_runner.render_deck(deck_json_path, output_path)
+        if template.type in {"freeform", "brand"}:
+            self.renderer.render(outlines, template.brand, output_path)
             return []
 
         strict_output = working_dir / "strict.pptx"
@@ -34,8 +35,11 @@ class PptxBuilder:
         )
 
         flexible_outlines = [outline for outline in outlines if outline.mode == "flexible"]
-        deck_json_path = self._write_deck_json(template, flexible_outlines, working_dir)
-        self.node_runner.render_deck(deck_json_path, flex_output)
+        if not flexible_outlines:
+            output_path.write_bytes(strict_output.read_bytes())
+            return strict_warnings
+
+        self.renderer.render(flexible_outlines, template.brand, flex_output)
 
         replacements = []
         flex_number = 1

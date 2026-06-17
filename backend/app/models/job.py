@@ -3,6 +3,9 @@ from typing import Any, List, Optional
 from pydantic import BaseModel
 
 
+FREEFORM_TEMPLATE_ID = "__freeform__"
+
+
 class JobRecord(BaseModel):
     id: str
     template_id: str
