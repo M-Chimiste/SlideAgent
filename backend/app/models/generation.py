@@ -30,6 +30,17 @@ class SlideQAState(BaseModel):
     issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class DeckBlueprint(BaseModel):
+    deck_title: str
+    audience: str = "Executive audience"
+    core_thesis: str = "The deck should move leaders from context to decision."
+    target_slide_count: int = 8
+    story_beats: list[dict[str, Any]] = Field(default_factory=list)
+    section_plan: list[dict[str, Any]] = Field(default_factory=list)
+    archetype_sequence: list[str] = Field(default_factory=list)
+    source_coverage_map: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class GeneratedSlideSpec(BaseModel):
     slide_number: int
     slide_type: str
@@ -40,6 +51,12 @@ class GeneratedSlideSpec(BaseModel):
     sources: List[str] = Field(default_factory=list)
     speaker_notes: str = ""
     qa: SlideQAState = Field(default_factory=SlideQAState)
+    archetype: Optional[str] = None
+    narrative_role: Optional[str] = None
+    exhibit_spec: Optional[dict[str, Any]] = None
+    diagram_spec: Optional[dict[str, Any]] = None
+    design_intent: Optional[str] = None
+    source_refs: List[str] = Field(default_factory=list)
 
 
 class DeckSpec(BaseModel):
@@ -48,3 +65,4 @@ class DeckSpec(BaseModel):
     goal: str = "Communicate a clear recommendation."
     narrative_arc: str = "Situation -> Complication -> Resolution"
     slides: List[GeneratedSlideSpec]
+    blueprint: Optional[DeckBlueprint] = None

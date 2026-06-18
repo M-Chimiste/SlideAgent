@@ -26,7 +26,7 @@ class BedrockClient:
         model_id: str,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 1200,
+        max_tokens: int = 4096,
         temperature: float = 0.2,
     ) -> str:
         response = self.runtime.converse(
@@ -47,7 +47,7 @@ class BedrockClient:
         user_prompt: str,
         image_bytes: bytes,
         image_format: str = "jpeg",
-        max_tokens: int = 1200,
+        max_tokens: int = 4096,
         temperature: float = 0.2,
     ) -> str:
         encoded = base64.b64encode(image_bytes).decode("utf-8")
@@ -77,7 +77,7 @@ class BedrockClient:
         model_id: str,
         system_prompt: str,
         requests: Iterable[tuple[str, bytes]],
-        max_tokens: int = 1200,
+        max_tokens: int = 4096,
         temperature: float = 0.2,
     ) -> list[str]:
         responses = []

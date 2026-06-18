@@ -16,6 +16,11 @@ from app.models.document import (
     DocumentTable,
 )
 
+MONTH_OR_SEASON_PATTERN = (
+    r"January|February|March|April|May|June|July|August|September|October|"
+    r"November|December|Winter|Spring|Summer|Fall|Autumn"
+)
+
 
 class DocumentIngester:
     def __init__(self) -> None:
@@ -167,13 +172,209 @@ class DocumentIngester:
 
     def _parse_metrics(self, doc_id: str, markdown: str) -> list[DocumentMetric]:
         metrics: list[DocumentMetric] = []
-        for match in re.finditer(r"([A-Za-z][A-Za-z\s]{2,40})[:\s]+(\d+(\.\d+)?)", markdown):
-            label = match.group(1).strip()
-            value = float(match.group(2))
-            metrics.append(
-                DocumentMetric(label=label, value=value, unit=None, source_doc_id=doc_id)
+        seen: set[tuple[str, float, str]] = set()
+        for sentence in self._metric_sentences(markdown):
+            occupied_spans: list[tuple[int, int]] = []
+            for match in re.finditer(
+                r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*"
+                r"(?:to|-|–|—)\s*"
+                r"(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(tokens?)\b",
+                sentence,
+                flags=re.IGNORECASE,
+            ):
+                label = self._metric_label_from_context(sentence, match.start(), match.end(), "tokens")
+                self._append_metric(
+                    metrics,
+                    seen,
+                    f"{label} minimum",
+                    self._parse_metric_value(match.group(1)),
+                    "tokens",
+                    doc_id,
+                )
+                self._append_metric(
+                    metrics,
+                    seen,
+                    f"{label} maximum",
+                    self._parse_metric_value(match.group(2)),
+                    "tokens",
+                    doc_id,
+                )
+                occupied_spans.append(match.span())
+
+            for match in re.finditer(
+                r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*"
+                r"(million\s+tokens?|tokens?)\b",
+                sentence,
+                flags=re.IGNORECASE,
+            ):
+                if self._span_is_occupied(match.span(), occupied_spans):
+                    continue
+                self._append_metric(
+                    metrics,
+                    seen,
+                    self._metric_label_from_context(sentence, match.start(), match.end(), "tokens"),
+                    self._parse_metric_value(match.group(1), match.group(2)),
+                    "tokens",
+                    doc_id,
+                )
+
+            for match in re.finditer(r"(?<![\w.])(\d+(?:\.\d+)?)\s*%", sentence):
+                self._append_metric(
+                    metrics,
+                    seen,
+                    self._metric_label_from_context(sentence, match.start(), match.end(), "%"),
+                    self._parse_metric_value(match.group(1)),
+                    "%",
+                    doc_id,
+                )
+        return metrics[:12]
+
+    def _metric_sentences(self, markdown: str) -> list[str]:
+        compact = re.sub(r"\s+", " ", markdown.replace("|", " "))
+        return [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", compact)
+            if sentence.strip()
+        ]
+
+    def _append_metric(
+        self,
+        metrics: list[DocumentMetric],
+        seen: set[tuple[str, float, str]],
+        label: str,
+        value: float,
+        unit: str | None,
+        doc_id: str,
+    ) -> None:
+        cleaned_label = self._clean_metric_label(label)
+        key = (cleaned_label.casefold(), round(float(value), 4), unit or "")
+        if key in seen:
+            return
+        seen.add(key)
+        metrics.append(
+            DocumentMetric(
+                label=cleaned_label,
+                value=value,
+                unit=unit,
+                source_doc_id=doc_id,
             )
-        return metrics
+        )
+
+    def _parse_metric_value(self, number_text: str, unit_text: str = "") -> float:
+        value = float(number_text.replace(",", ""))
+        if unit_text.lower().startswith("million"):
+            value *= 1_000_000
+        return int(value) if value.is_integer() else value
+
+    def _metric_label_from_context(
+        self, sentence: str, number_start: int, number_end: int, unit: str
+    ) -> str:
+        before = sentence[:number_start].strip(" ,.;:()[]")
+        after = sentence[number_end:].strip(" ,.;:()[]")
+        if unit == "%":
+            return self._percent_metric_label(before, after)
+        if unit == "tokens":
+            return self._token_metric_label(before)
+        return self._noun_phrase_before_metric(before) or after or "Sourced metric"
+
+    def _percent_metric_label(self, before: str, after: str) -> str:
+        after_clean = re.sub(r"^(?:of|for)\s+", "", after, flags=re.IGNORECASE)
+        after_clean = re.split(
+            r"[,.;]|\b(?:by|during|as of)\b",
+            after_clean,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip()
+        noun_phrase = self._noun_phrase_before_metric(before)
+        if after.lower().startswith(("of ", "for ")) and after_clean:
+            return after_clean
+        if after_clean and len(after_clean.split()) <= 4 and noun_phrase:
+            return f"{after_clean} {noun_phrase}"
+        return noun_phrase or after_clean or "Sourced share"
+
+    def _token_metric_label(self, before: str) -> str:
+        noun_phrase = self._noun_phrase_before_metric(before)
+        if "window" in noun_phrase.lower() and (
+            noun_phrase.lower().startswith("this window")
+            or "ranges" in noun_phrase.lower()
+            or noun_phrase.lower().startswith("scaled this window")
+        ):
+            return "Context window"
+        if "context" in noun_phrase.lower() and "window" not in noun_phrase.lower():
+            return f"{noun_phrase} window"
+        return noun_phrase or "Context window"
+
+    def _noun_phrase_before_metric(self, before: str) -> str:
+        cleaned = re.sub(
+            rf"\b(?:{MONTH_OR_SEASON_PATTERN})\s+\d{{1,2}},?\s+\d{{4}}\b",
+            "",
+            before,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            rf"\b(?:{MONTH_OR_SEASON_PATTERN})\s+\d{{4}}\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.split(r"[,.;:]", cleaned)[-1]
+        for marker in (" had ", " has ", " have ", " with "):
+            if marker in cleaned.lower():
+                cleaned = cleaned[cleaned.lower().rfind(marker) + len(marker) :]
+        cleaned = re.sub(
+            r"\b(?:that|which)\s+(?:were|was|are|is)\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:reached|hit|was|were|is|are|had|have|about|roughly|nearly|over|under)\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        words = cleaned.split()
+        return " ".join(words[-7:])
+
+    def _clean_metric_label(self, label: str) -> str:
+        cleaned = re.sub(r"#+", "", str(label))
+        cleaned = re.sub(r"\[[^\]]+\]\([^)]+\)", "", cleaned)
+        cleaned = re.sub(
+            rf"\b(?:{MONTH_OR_SEASON_PATTERN})\s+\d{{1,2}},?\s+\d{{4}}\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            rf"\b(?:{MONTH_OR_SEASON_PATTERN})\s+\d{{4}}\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:by the end of|as of|in|during)\s+(?:19|20)\d{2}\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:were|was|are|is|be|that were|that was)\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = " ".join(cleaned.split()).strip(" .,:;-")
+        if not cleaned:
+            cleaned = "Sourced metric"
+        if len(cleaned) > 64:
+            cleaned = cleaned[:64].rsplit(" ", 1)[0].rstrip(".,;:")
+        return cleaned[:1].upper() + cleaned[1:]
+
+    def _span_is_occupied(
+        self, span: tuple[int, int], occupied_spans: list[tuple[int, int]]
+    ) -> bool:
+        start, end = span
+        return any(start < occupied_end and end > occupied_start for occupied_start, occupied_end in occupied_spans)
 
     def _extract_inventory(self, markdown: str) -> list[str]:
         sentences = re.split(r"[.!?]\s+", markdown)

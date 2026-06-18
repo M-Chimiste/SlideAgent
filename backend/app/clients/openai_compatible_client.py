@@ -22,9 +22,10 @@ class OpenAICompatibleClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         temperature: float = 0.2,
     ) -> str:
+        system_prompt = self._system_prompt(system_prompt)
         payload = {
             "model": self.model,
             "messages": [
@@ -51,7 +52,7 @@ class OpenAICompatibleClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.2,
     ) -> Optional[dict[str, Any]]:
         text = self.complete_text(
@@ -60,7 +61,22 @@ class OpenAICompatibleClient:
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        return self.extract_json(text)
+        payload = self.extract_json(text)
+        if payload is not None:
+            return payload
+        repair_prompt = (
+            f"{user_prompt}\n\n"
+            "Your previous response was not parseable as a JSON object. "
+            "Return the requested JSON object only. Do not include markdown, prose, "
+            "reasoning, or code fences."
+        )
+        repaired = self.complete_text(
+            system_prompt=system_prompt,
+            user_prompt=repair_prompt,
+            max_tokens=max_tokens,
+            temperature=0,
+        )
+        return self.extract_json(repaired)
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     def complete_vision(
@@ -69,9 +85,10 @@ class OpenAICompatibleClient:
         user_prompt: str,
         image_bytes: bytes,
         image_format: str = "jpeg",
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         temperature: float = 0.2,
     ) -> str:
+        system_prompt = self._system_prompt(system_prompt)
         encoded = base64.b64encode(image_bytes).decode("utf-8")
         payload = {
             "model": self.model,
@@ -138,4 +155,23 @@ class OpenAICompatibleClient:
             return ""
         message = choices[0].get("message", {})
         content = message.get("content", "")
-        return content if isinstance(content, str) else ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join(parts)
+        return ""
+
+    def _system_prompt(self, system_prompt: str) -> str:
+        if (
+            self.settings.openai_compatible_reasoning_effort == "none"
+            and "qwen" in self.model.lower()
+            and "/no_think" not in system_prompt
+        ):
+            return f"{system_prompt}\n/no_think"
+        return system_prompt

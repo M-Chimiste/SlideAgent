@@ -3,7 +3,9 @@ from app.models.outline import SlideOutline
 from app.services.rendering import RenderingError
 
 import zipfile
+from io import BytesIO
 
+from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -60,6 +62,26 @@ def test_openai_vision_client_is_used_for_image_inspection(tmp_path) -> None:
 
     assert client.calls == 1
     assert "Looks clean" in report
+
+
+class CapturingVisionClient:
+    def __init__(self) -> None:
+        self.image_bytes = b""
+
+    def complete_vision(self, **kwargs) -> str:
+        self.image_bytes = kwargs["image_bytes"]
+        return '{"issues":[]}'
+
+
+def test_openai_vision_client_receives_downscaled_slide_image(tmp_path) -> None:
+    image_path = tmp_path / "large-slide.jpg"
+    Image.new("RGB", (2400, 1350), "#ffffff").save(image_path)
+    client = CapturingVisionClient()
+
+    VisualQAAgent(openai_client=client)._inspect_image(image_path)
+
+    with Image.open(BytesIO(client.image_bytes)) as inspected:
+        assert max(inspected.size) <= 1280
 
 
 class CriticalVisionClient:
@@ -222,6 +244,86 @@ def test_pptx_structure_checks_detect_text_density(tmp_path) -> None:
     issues = VisualQAAgent()._pptx_structure_checks(pptx_path, [])
 
     assert any(issue.category == "overflow_risk" for issue in issues)
+
+
+def test_pptx_structure_checks_allow_short_structured_exhibit_labels(tmp_path) -> None:
+    pptx_path = tmp_path / "structured-labels.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    labels = [
+        "FILE",
+        "ROLE",
+        "UPDATE TRIGGER",
+        "projectbrief.md",
+        "Purpose and scope",
+        "Scope changes",
+        "productContext.md",
+        "User goals",
+        "Insight changes",
+        "systemPatterns.md",
+        "Architecture rules",
+        "Design changes",
+        "activeContext.md",
+        "Current focus",
+        "Each session",
+    ]
+    for idx, label in enumerate(labels):
+        row = idx // 3
+        col = idx % 3
+        box = slide.shapes.add_textbox(
+            Inches(1 + col * 3.2),
+            Inches(1.2 + row * 0.52),
+            Inches(2.6),
+            Inches(0.3),
+        )
+        box.text = label
+    prs.save(pptx_path.as_posix())
+    outline = SlideOutline(
+        id="outline-1",
+        job_id="job-1",
+        slide_index=0,
+        mode="flexible",
+        label="Reference map",
+        content_json={"archetype": "table_reference", "sources": ["Uploaded source"]},
+        layout_json={"layout": "table_reference"},
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    issues = VisualQAAgent()._pptx_structure_checks(pptx_path, [outline])
+
+    assert not any(issue.category == "scanability" for issue in issues)
+
+
+def test_pptx_structure_checks_still_flags_many_paragraph_objects(tmp_path) -> None:
+    pptx_path = tmp_path / "many-paragraphs.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    paragraph = "This paragraph-style evidence box forces the reader to parse another sentence."
+    for idx in range(12):
+        row = idx // 3
+        col = idx % 3
+        box = slide.shapes.add_textbox(
+            Inches(0.7 + col * 4.0),
+            Inches(1.1 + row * 0.76),
+            Inches(3.2),
+            Inches(0.42),
+        )
+        box.text = paragraph
+    prs.save(pptx_path.as_posix())
+    outline = SlideOutline(
+        id="outline-1",
+        job_id="job-1",
+        slide_index=0,
+        mode="flexible",
+        label="Dense slide",
+        content_json={"archetype": "two_column", "sources": ["Uploaded source"]},
+        layout_json={"layout": "two_column"},
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    issues = VisualQAAgent()._pptx_structure_checks(pptx_path, [outline])
+
+    assert any(issue.category == "scanability" for issue in issues)
 
 
 def test_pptx_structure_checks_allow_valid_package(tmp_path) -> None:

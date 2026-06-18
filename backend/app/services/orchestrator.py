@@ -84,6 +84,8 @@ class JobOrchestrator:
                 bundle,
                 instructions=job.instructions or "",
                 generation_mode=generation_mode,
+                quality_profile=self._quality_profile(job),
+                length_strategy=self._length_strategy(job),
             )
             outlines = self.designer.apply_design(outlines)
             await self.store.add_slide_outlines(outlines)
@@ -101,27 +103,38 @@ class JobOrchestrator:
 
             await self.store.update_job(job.id, status="qa", progress=0.75)
             qa_round = 0
-            qa_result, images = self.qa_agent.inspect_deck(
-                output_path, working_dir / "preview", outlines
-            )
-            self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
-            seen_actionable_signatures: set[tuple[tuple[int | None, str, str], ...]] = set()
-            while qa_round < self.settings.qa_max_rounds:
-                actionable_signature = self._actionable_qa_signature(qa_result)
-                if not actionable_signature or actionable_signature in seen_actionable_signatures:
-                    break
-                seen_actionable_signatures.add(actionable_signature)
-                qa_round += 1
-                outlines = self._apply_qa_fixes(outlines, qa_result)
-                await self._persist_slide_outlines(outlines, qa_result)
-                strict_warnings = self.builder.build_deck(
-                    template, outlines, output_path, working_dir
-                )
-                if strict_warnings:
-                    warnings = self._merge_warnings(warnings, strict_warnings)
-                    await self.store.update_job(job.id, warnings_json=warnings)
+            if self._run_visual_qa(job):
                 qa_result, images = self.qa_agent.inspect_deck(
                     output_path, working_dir / "preview", outlines
+                )
+                self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
+                seen_actionable_signatures: set[tuple[tuple[int | None, str, str], ...]] = set()
+                while qa_round < self.settings.qa_max_rounds:
+                    actionable_signature = self._actionable_qa_signature(qa_result)
+                    if (
+                        not actionable_signature
+                        or actionable_signature in seen_actionable_signatures
+                    ):
+                        break
+                    seen_actionable_signatures.add(actionable_signature)
+                    qa_round += 1
+                    outlines = self._apply_qa_fixes(outlines, qa_result)
+                    await self._persist_slide_outlines(outlines, qa_result)
+                    strict_warnings = self.builder.build_deck(
+                        template, outlines, output_path, working_dir
+                    )
+                    if strict_warnings:
+                        warnings = self._merge_warnings(warnings, strict_warnings)
+                        await self.store.update_job(job.id, warnings_json=warnings)
+                    qa_result, images = self.qa_agent.inspect_deck(
+                        output_path, working_dir / "preview", outlines
+                    )
+                    self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
+            else:
+                qa_result, images = self.qa_agent.inspect_deck(
+                    output_path,
+                    working_dir / "preview",
+                    outlines,
                 )
                 self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
             self.storage.save_preview_images(job.id, images)
@@ -253,6 +266,25 @@ class JobOrchestrator:
             if profile in {"fast", "deep"}:
                 return profile
         return "fast"
+
+    def _quality_profile(self, job: JobRecord) -> str:
+        if job.config_json and job.config_json.get("quality_profile"):
+            profile = str(job.config_json["quality_profile"]).strip().lower()
+            if profile in {"fast", "balanced", "showcase"}:
+                return profile
+        return "balanced"
+
+    def _length_strategy(self, job: JobRecord) -> str:
+        if job.config_json and job.config_json.get("length_strategy"):
+            strategy = str(job.config_json["length_strategy"]).strip().lower()
+            if strategy in {"auto", "concise", "expanded"}:
+                return strategy
+        return "auto"
+
+    def _run_visual_qa(self, job: JobRecord) -> bool:
+        if job.config_json and "run_visual_qa" in job.config_json:
+            return bool(job.config_json["run_visual_qa"])
+        return True
 
     def _build_deep_planner(self) -> ContentPlanner | None:
         if self.settings.llm_provider != "openai_compatible":

@@ -4,7 +4,11 @@ from app.models.qa import QAIssue, QAResult
 from app.services.design_agent import DesignAgent
 from app.tools.all_mode_smoke import (
     _actionable_issue_signature,
+    _has_planner_fallback,
     _model_slug,
+    _normalize_modes,
+    _parse_modes,
+    _planner_fallback_reason,
     deck_report,
     serialize_qa_issues,
     summarize_qa,
@@ -60,6 +64,7 @@ def test_deck_report_shape_is_machine_readable(tmp_path: Path) -> None:
     assert result["qa_passed"] is True
     assert result["qa_rounds"] == 0
     assert result["qa_history"] == [result["qa"]]
+    assert result["planner_fallback"] is False
     assert result["qa_issues"] == [
         {
             "severity": "WARNING",
@@ -69,6 +74,33 @@ def test_deck_report_shape_is_machine_readable(tmp_path: Path) -> None:
         }
     ]
     assert result["preview_images"] == [preview.as_posix()]
+
+
+def test_deck_report_marks_planner_fallback(tmp_path: Path) -> None:
+    result = deck_report(
+        mode="freeform",
+        output_path=tmp_path / "deck.pptx",
+        slide_count=1,
+        titles=["Improve delivery discipline"],
+        layouts=["two_column"],
+        planning_warnings=[
+            {
+                "slide_index": None,
+                "field": "llm_planning",
+                "message": "LLM planning was unavailable or malformed.",
+            }
+        ],
+        build_warnings=[],
+        qa_result=QAResult(issues=[], passed=True),
+        preview_images=[],
+    )
+
+    assert result["planner_fallback"] is True
+    assert _has_planner_fallback(result["planning_warnings"]) is True
+    assert (
+        _planner_fallback_reason(result["planning_warnings"])
+        == "LLM planning was unavailable or malformed."
+    )
 
 
 def test_serialize_qa_issues_preserves_issue_details() -> None:
@@ -92,6 +124,23 @@ def test_serialize_qa_issues_preserves_issue_details() -> None:
 def test_model_slug_is_filesystem_friendly() -> None:
     assert _model_slug("minimax-m2.7") == "minimax-m2-7"
     assert _model_slug("qwen3.6-35b-a3b-mtp") == "qwen3-6-35b-a3b-mtp"
+
+
+def test_parse_modes_deduplicates_and_normalizes() -> None:
+    assert _parse_modes("freeform, brand,freeform") == ["freeform", "brand"]
+
+
+def test_normalize_modes_defaults_to_all_modes() -> None:
+    assert _normalize_modes([]) == ["freeform", "brand", "strict"]
+
+
+def test_normalize_modes_rejects_unknown_mode() -> None:
+    try:
+        _normalize_modes(["freeform", "unknown"])
+    except ValueError as exc:
+        assert "unknown" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported mode to raise ValueError")
 
 
 def test_actionable_issue_signature_sorts_deck_and_slide_level_issues() -> None:
