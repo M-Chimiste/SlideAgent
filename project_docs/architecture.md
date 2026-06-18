@@ -1,7 +1,7 @@
 # SlideAgent / SlideForge Target Architecture
 
-**Date:** 2026-06-17
-**Status:** Implementation-ready architecture direction for the rebuild
+**Date:** 2026-06-18
+**Status:** Target architecture plus current backend module boundaries
 
 ---
 
@@ -49,6 +49,28 @@ User brief + documents + optional template
 - `StrictXMLInjector` updates strict template fields through targeted XML edits.
 - `VisualQA` renders the deck to images and checks visual/compatibility issues.
 - Repair loops modify structured specs, not arbitrary PPTX output.
+
+### Current backend boundaries
+
+The current backend keeps stable public service facades while moving internal
+logic into smaller packages:
+
+- `app.services.content_planner.ContentPlanner` remains the public planner
+  entrypoint. Its implementation is split across `app.services.planning`:
+  `blueprint`, `llm`, `specs`, `repairs`, `grounding`, `outlines`, and
+  `constants`.
+- `app.services.pptx_renderer.DeterministicPptxRenderer` remains the public
+  generated-slide renderer. Its implementation is split across
+  `app.services.pptx_rendering`: `assets`, `chrome`, `core_layouts`,
+  `table_layouts`, `immersive_layouts`, `exhibit_layouts`, `drawing`, and
+  `constants`.
+- `app.services.visual_qa_agent.VisualQAAgent` remains the public VisualQA
+  entrypoint. Its implementation is split across `app.services.visual_qa`:
+  `checks`, `preview`, `vision`, and `constants`.
+
+These package boundaries are behavior-preserving refactors. Public imports,
+request/response shapes, job states, strict-mode preservation, smoke flags, and
+generated PPTX semantics remain stable.
 
 ---
 
@@ -200,15 +222,28 @@ warnings.
 freeform | brand | strict
 ```
 
-### Planner profile
+### Planner and quality controls
+
+Model-routing planner profile:
 
 ```text
 fast | deep
 ```
 
-- `fast`: default low-latency planner profile for iteration.
-- `deep`: higher-latency planner profile for stronger narrative/content
-  planning.
+- `fast`: default local Qwen planner path for iteration.
+- `deep`: optional premium local planner path, currently Minimax/Athena when
+  configured.
+
+Output-quality profile:
+
+```text
+fast | balanced | showcase
+```
+
+- `fast`: lower-latency planner profile for iteration.
+- `balanced`: default quality/cost tradeoff.
+- `showcase`: higher-budget planning for richer source-backed decks.
+- `length_strategy` separately controls `auto | concise | expanded`.
 - Visual QA should be configured separately from planner selection so a
   vision-capable model can inspect rendered slides even when the planner model
   is text-only or slow.
@@ -231,6 +266,8 @@ fast | deep
 {
   "slide_number": 1,
   "slide_type": "executive_summary|content|chart|comparison|matrix|waterfall|process|gantt|framework|appendix",
+  "archetype": "dependency_map|framework_cycle|comparison_table|code_panel|...",
+  "narrative_role": "cover|executive_summary|problem|evidence|framework|implementation|reference|decision|closing",
   "action_title": "Complete sentence stating the conclusion",
   "subheading": "Evidence context, units, period, or segment",
   "content_blocks": [
@@ -241,7 +278,16 @@ fast | deep
       "callouts": []
     }
   ],
+  "exhibit_spec": {},
+  "diagram_spec": {
+    "kind": "dependency_flow|cycle",
+    "nodes": [],
+    "edges": [],
+    "steps": []
+  },
+  "design_intent": "string",
   "chart_spec": null,
+  "source_refs": ["source-id or [source needed]"],
   "sources": ["source-id or [source needed]"],
   "speaker_notes": "string",
   "qa": {
