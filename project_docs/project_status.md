@@ -1,11 +1,11 @@
 # Project Status
 
-**Last updated:** 2026-06-17
+**Last updated:** 2026-06-18
 
 ## Current Reality
 
-This repository currently contains a SlideForge scaffold, not a production-ready
-deck generation system.
+This repository currently contains a strong local SlideForge vertical slice, not
+a finished production deck generation system.
 
 What exists today:
 
@@ -15,10 +15,17 @@ What exists today:
 - Service implementations for template analysis, document ingestion, content
   planning, design planning, deterministic PPTX building, strict injection,
   hybrid assembly, rendering hooks, and visual QA.
+- Backend service hotspots are now split behind stable public facades:
+  `ContentPlanner` delegates to `app.services.planning`, the deterministic PPTX
+  renderer delegates to `app.services.pptx_rendering`, and `VisualQAAgent`
+  delegates to `app.services.visual_qa`.
 - Python deterministic renderer for generated layouts, with the legacy
   PptxGenJS path no longer required for the tested freeform/brand flows.
 - Strict schema validation for simple field values.
-- Focused backend regression tests currently passing: `74 passed`.
+- Focused backend regression tests currently passing: `159 passed`.
+- App coverage after the backend refactor is `78%` overall for `app/*`
+  (`/private/tmp/slideagent-refactor-coverage-after`), up from the 76%
+  pre-refactor baseline.
 - `project_docs/style_guide.md`, the consulting quality guide that now drives
   planner prompts and ConsultingQA checks.
 - Local OpenAI-compatible model integration for LM Studio / Metis using
@@ -29,11 +36,25 @@ What exists today:
 - Jobs now accept `planner_profile=fast|deep`. Fast uses the default Qwen
   planner profile; deep uses the configured Minimax/Athena planner profile.
   VisualQA is configured separately from the planner and defaults to Qwen.
+- Jobs also accept `quality_profile=fast|balanced|showcase` and
+  `length_strategy=auto|concise|expanded` for generated decks.
 - Deterministic generated-slide PPTX rendering for freeform and brand decks,
   including semantic icon rendering with optional `react-icons`/Sharp assets
   and a Pillow fallback, chart rendering from Qwen-style `data_points`, richer
   Claude-inspired layout archetypes, and a cleaner header motif without title
   underlines.
+- `diagram_spec` support in generated slide specs for diagram-capable
+  archetypes.
+- Hermes-inspired deterministic SVG diagram rendering for dependency maps and
+  framework cycles, with flat semantic shapes, arrow validation, safe label
+  budgets, and brand-aware colors.
+- Sharp/Node rasterization of validated SVG diagrams into PNG assets for
+  Office-safe PPTX insertion.
+- SVG, HTML preview, and PNG debug artifacts written next to generated decks in
+  `<output_stem>-diagrams/`.
+- Native PowerPoint shape diagram rendering remains as a fallback and emits
+  explicit `diagram_render` build warnings if asset generation fails.
+- Strict mode remains preserve-first and does not generate diagram assets.
 - XML-level strict field injection for rigid templates.
 - Strict template analysis now discovers PowerPoint table cells as structured
   fields, and the strict injector can update those table cells through OOXML
@@ -68,12 +89,12 @@ What exists today:
   warning-aware QA repair, and visual QA fallback behavior.
 
 Important caveat: this is still a vertical slice, not a finished world-class
-deck engine. Exact rendered visual QA now runs locally after installing
-LibreOffice (`soffice`) and Poppler (`pdftoppm`), and it is exposing the next
-quality frontier: generated layouts still need broader visual systems,
-document-level provenance, and exact-render repair behavior. Some advanced
-template analysis, broader chart-type coverage, and brand fidelity analysis
-also remain future work.
+deck engine. Layout variety, authored slide rhythm, icon rendering, and diagram
+rendering are much better than the original scaffold. The next quality frontier
+is semantic label quality, document-level provenance, broader diagram types,
+exact Office/manual compatibility review, deeper brand fidelity analysis, and
+more exact-render repair behavior. The backend refactor improved module
+manageability without changing those product-quality frontiers.
 
 ## Historical Context
 
@@ -108,41 +129,46 @@ architecture target is documented in [architecture.md](./architecture.md).
    - Keep PRD, architecture, and status docs aligned around the three-mode
      target.
    - Keep current-vs-target status honest for future agents.
+   - Keep `implementation_plan.md` marked as historical where completed
+     vertical-slice work has moved into current implementation status.
 
-2. **Freeform vertical slice**
-   - Generate a 5-slide deck from a short brief.
-   - Add ghost deck/storyline planning with action titles.
-   - Render deterministic PPTX and previews.
-   - Run consulting QA and basic visual QA.
+2. **Source provenance**
+   - Promote source references from generic `Uploaded source` labels to stable
+     document and section IDs.
+   - Carry those stable IDs through slide specs, speaker notes, consulting QA,
+     and rendered source metadata.
 
-3. **Source-grounded content**
-   - Improve document ingestion and provenance tracking.
-   - Require numeric claims to cite source material or show `[source needed]`.
-   - Move from generic `Uploaded source` labels to stable document/section
-     source IDs once ingestion exposes that provenance.
+3. **Diagram expansion**
+   - Add more deterministic diagram kinds, starting with hub-spoke, layered
+     system, and process flow.
+   - Improve diagram/content label QA so diagrams avoid weak, copied, or
+     fragmentary model labels.
 
-4. **Brand-template support**
-   - Extract brand DNA from uploaded PPTX files.
-   - Generate new slides that follow brand colors, fonts, logos, and layout
-     patterns.
+4. **Model and visual smoke coverage**
+   - Run Minimax structural smoke against the new diagram path.
+   - Run Qwen vision smoke against the new diagram path for freeform and brand.
+   - Keep no-fallback behavior as the default acceptance gate for generated
+     modes.
 
-5. **Strict-template hardening**
-   - Replace high-level strict slide writes with targeted XML-level injection.
-   - Extend schema extraction beyond text frames to tables, charts, and status
-     indicators.
-   - Preserve formatting and validate package integrity.
-
-6. **QA and repair loop**
-   - Add ConsultingQA for action titles, horizontal flow, SCR/Pyramid, MECE,
-     one-message-per-slide, and source coverage.
-   - Add VisualQA for rendered overlap, overflow, contrast, layout variety, and
-     Office compatibility warnings.
-   - Feed QA issues back into structured spec repair loops.
+5. **Office and brand fidelity**
+   - Add manual Microsoft Office compatibility checks for generated PPTX files.
+   - Deepen brand-template fidelity analysis beyond colors, fonts, logo reuse,
+     and simple layout notes.
+   - Broaden strict schema extraction for additional charts, status indicators,
+     and other complex PowerPoint objects.
 
 ## Verification Evidence
 
-- Backend tests: `74 passed`.
+- Backend tests: `159 passed`.
 - Backend lint: `ruff check app/ tests/` passes.
+- Backend coverage after refactor:
+  - App total: `78%`.
+  - `ContentPlanner` facade: `92%`; extracted planning modules range from
+    `71%` to `96%`.
+  - `DeterministicPptxRenderer` facade: `97%`; extracted rendering modules
+    range from `65%` to `95%`.
+  - `VisualQAAgent` facade: `92%`; extracted VisualQA modules range from `81%`
+    to `92%`.
 - Frontend production build: `npm run build` passes.
 - Local model list endpoint returned `qwen3.6-35b-a3b-mtp`.
 - Local Qwen text generation works through `/v1/chat/completions`.
@@ -159,6 +185,19 @@ architecture target is documented in [architecture.md](./architecture.md).
   completion budget.
 - `data/Beyond Vibe Coding.docx` generated valid PPTX smoke artifacts with
   exact rendered slide images:
+  - Latest post-refactor exact-code Qwen all-mode smoke
+    (`/private/tmp/slideagent-refactor-smoke`) passed with no planner fallback,
+    no build warnings, and clean final QA:
+    - Freeform: 14 slides, zero final QA issues.
+    - Brand: 14 slides, zero final QA issues after 1 repair round.
+    - Strict: 1 slide, zero final QA issues, no diagram assets.
+    - Freeform and brand each produced 2 SVG/HTML/PNG diagram artifacts in
+      `<output_stem>-diagrams/`; strict produced none.
+    - PPTX package validation passed for all three generated decks.
+    - Report:
+      `/private/tmp/slideagent-refactor-smoke/all-mode-refactor-qwen-smoke-report.json`.
+  - Previous Hermes diagram smoke evidence remains available at
+    `/private/tmp/slideagent-hermes-diagram-smoke-final`.
   - Qwen remains the fast default and works well for development iteration.
     The latest quick exact-render Qwen smoke
     (`qwen-clean-placeholders`, using `http://192.168.50.93:1240/v1` because

@@ -1,7 +1,7 @@
 # SlideAgent Three-Mode Implementation Plan
 
 **Date:** 2026-06-17  
-**Status:** Active implementation plan
+**Status:** Historical vertical-slice plan; see current status notes below
 
 ---
 
@@ -17,6 +17,24 @@ Bring the codebase in line with the updated product docs:
 
 The immediate implementation target is a reliable vertical slice, not every
 future advanced feature from the architecture doc.
+
+## Current Status Note - 2026-06-18
+
+This plan documents the original three-mode vertical-slice work. The current
+codebase has implemented and tested the freeform, brand, and strict local
+vertical slices described here, including deterministic generated-slide
+rendering, strict XML injection, QA repair loops, and all-mode smoke tooling.
+
+The subsequent backend cleanup split the main service hotspots into smaller
+packages while preserving public facades:
+
+- `ContentPlanner` delegates to `app.services.planning`.
+- `DeterministicPptxRenderer` delegates to `app.services.pptx_rendering`.
+- `VisualQAAgent` delegates to `app.services.visual_qa`.
+
+Use [project_status.md](./project_status.md) for current capability and
+verification evidence. Use [architecture.md](./architecture.md) for target and
+actual module boundaries.
 
 ---
 
