@@ -1,4 +1,5 @@
 import uuid
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
@@ -37,6 +38,9 @@ async def create_job(
     template_id: str = Form(""),
     generation_mode: str = Form(""),
     planner_profile: str = Form("fast"),
+    quality_profile: str = Form("balanced"),
+    length_strategy: str = Form("auto"),
+    run_visual_qa: bool = Form(True),
     instructions: str = Form(""),
     documents: Optional[list[UploadFile]] = File(None),
     store: SQLiteStore = Depends(_get_store),
@@ -51,6 +55,12 @@ async def create_job(
     planner_profile = planner_profile.strip().lower() or "fast"
     if planner_profile not in {"fast", "deep"}:
         raise HTTPException(status_code=422, detail="Invalid planner profile.")
+    quality_profile = _form_value(quality_profile, "balanced").strip().lower() or "balanced"
+    if quality_profile not in {"fast", "balanced", "showcase"}:
+        raise HTTPException(status_code=422, detail="Invalid quality profile.")
+    length_strategy = _form_value(length_strategy, "auto").strip().lower() or "auto"
+    if length_strategy not in {"auto", "concise", "expanded"}:
+        raise HTTPException(status_code=422, detail="Invalid length strategy.")
 
     template = None
     if generation_mode == "freeform":
@@ -71,6 +81,9 @@ async def create_job(
         config_json={
             "generation_mode": generation_mode,
             "planner_profile": planner_profile,
+            "quality_profile": quality_profile,
+            "length_strategy": length_strategy,
+            "run_visual_qa": _form_bool(run_visual_qa, True),
         },
         status="queued",
         progress=0.0,
@@ -90,6 +103,22 @@ async def create_job(
 
     await job_queue.enqueue(job.id)
     return job
+
+
+def _form_value(value, default: str) -> str:
+    if hasattr(value, "default"):
+        value = value.default
+    return str(value if value is not None else default)
+
+
+def _form_bool(value, default: bool) -> bool:
+    if hasattr(value, "default"):
+        value = value.default
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @router.get("/jobs", response_model=JobListResponse)
@@ -113,7 +142,32 @@ async def get_job_status(
         preview_images = sorted(
             [image.name for image in preview_dir.glob("slide-*.jpg")]
         )
-    return JobStatusResponse(job=job, warnings=job.warnings, preview_images=preview_images)
+    return JobStatusResponse(
+        job=job,
+        warnings=job.warnings,
+        preview_images=preview_images,
+        qa_summary=_qa_summary(storage, job_id),
+    )
+
+
+def _qa_summary(storage: LocalStorage, job_id: str) -> dict:
+    qa_dir = storage.job_dir(job_id) / "qa"
+    if not qa_dir.exists():
+        return {"critical": 0, "warning": 0, "info": 0, "count": 0}
+    logs = sorted(qa_dir.glob("round-*.json"))
+    if not logs:
+        return {"critical": 0, "warning": 0, "info": 0, "count": 0}
+    try:
+        payload = json.loads(logs[-1].read_text(encoding="utf-8"))
+    except Exception:
+        return {"critical": 0, "warning": 0, "info": 0, "count": 0}
+    issues = payload.get("issues", [])
+    return {
+        "critical": sum(1 for issue in issues if issue.get("severity") == "CRITICAL"),
+        "warning": sum(1 for issue in issues if issue.get("severity") == "WARNING"),
+        "info": sum(1 for issue in issues if issue.get("severity") == "INFO"),
+        "count": len(issues),
+    }
 
 
 @router.get("/jobs/{job_id}/preview")

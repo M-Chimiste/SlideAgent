@@ -38,8 +38,11 @@ export type TemplateProfile = {
 export type JobRecord = {
   id: string;
   template_id: string;
+  config_json?: Record<string, any> | null;
   status: string;
   progress: number;
+  qa_rounds?: number;
+  warnings?: Array<Record<string, any>>;
   result_file?: string | null;
   preview_dir?: string | null;
   created_at: string;

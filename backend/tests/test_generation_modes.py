@@ -1,3 +1,4 @@
+import json
 import zipfile
 from io import BytesIO
 from datetime import UTC, datetime
@@ -13,10 +14,12 @@ from pptx.util import Inches
 from app.config import Settings
 from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.models.brand import BrandDNA
-from app.models.document import DocumentBundle, DocumentMetadata, DocumentSection
+from app.models.document import DocumentBundle, DocumentMetadata, DocumentMetric, DocumentSection
+from app.models.generation import ContentBlock, DeckBlueprint, GeneratedSlideSpec
 from app.models.outline import SlideOutline
 from app.models.template import SlideField, SlideSchema, SlideSpec, TemplateProfile
 from app.services.content_planner import ContentPlanner
+from app.services.document_ingester import DocumentIngester
 from app.services.pptx_builder import PptxBuilder
 from app.services.strict_injector import StrictSlideInjector
 from app.services.template_analyzer import TemplateAnalyzer
@@ -69,6 +72,37 @@ def _bundle(job_id: str = "job-1") -> DocumentBundle:
     )
 
 
+def _rich_bundle(job_id: str = "job-rich") -> DocumentBundle:
+    sections = [
+        DocumentSection(
+            title=f"Chapter {idx}: Agentic Engineering Practice",
+            level=1,
+            content=(
+                "Vibe coding works for early exploration, but teams need persistent "
+                "context, explicit acceptance criteria, source-backed review, and "
+                "repeatable workflow memory before using AI agents on production code. "
+                "The operating model should define ownership, rules, review gates, "
+                "and update triggers so the next session inherits the right context."
+            ),
+            source_doc_id="beyond-vibe",
+        )
+        for idx in range(1, 10)
+    ]
+    return DocumentBundle(
+        job_id=job_id,
+        sections=sections,
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[
+            "Memory bank hierarchy",
+            "Rules files",
+            "Review gates",
+            "Decision log",
+        ],
+    )
+
+
 def test_openai_compatible_client_extracts_json_from_fenced_response() -> None:
     response = """Here is the plan:
 ```json
@@ -76,6 +110,19 @@ def test_openai_compatible_client_extracts_json_from_fenced_response() -> None:
 ```"""
     payload = OpenAICompatibleClient.extract_json(response)
     assert payload == {"deck_title": "Test", "slides": []}
+
+
+def test_planner_repairs_dangling_sentence_fragments() -> None:
+    planner = ContentPlanner()
+
+    cleaned = planner._phrase(
+        "The following architecture is adapted from the Cline Memory Bank methodology, "
+        "which has emerged as a",
+        "",
+    )
+
+    assert cleaned == "The following architecture is adapted from the Cline Memory Bank methodology"
+    assert not cleaned.endswith("as a")
 
 
 def test_openai_compatible_client_sends_reasoning_effort(monkeypatch) -> None:
@@ -117,6 +164,74 @@ def test_openai_compatible_client_sends_reasoning_effort(monkeypatch) -> None:
     assert client.complete_text("", "Reply exactly with OK.", max_tokens=32, temperature=0) == "OK"
     assert FakeHTTPClient.payload is not None
     assert FakeHTTPClient.payload["reasoning_effort"] == "none"
+    assert FakeHTTPClient.payload["messages"][0]["content"].endswith("/no_think")
+
+
+def test_openai_compatible_client_retries_non_json_response(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": self.content}}]}
+
+    class FakeHTTPClient:
+        payloads: list[dict] = []
+
+        def __init__(self, timeout: int) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> "FakeHTTPClient":
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def post(self, url: str, json: dict, headers: dict) -> FakeResponse:
+            self.payloads.append(json)
+            if len(self.payloads) == 1:
+                return FakeResponse("I cannot comply with JSON.")
+            return FakeResponse('{"deck_title":"Recovered","slides":[]}')
+
+    monkeypatch.setattr("app.clients.openai_compatible_client.httpx.Client", FakeHTTPClient)
+
+    client = OpenAICompatibleClient(
+        Settings(
+            OPENAI_COMPATIBLE_BASE_URL="http://metis.local:1240/v1",
+            OPENAI_COMPATIBLE_MODEL="qwen3.6-35b-a3b-mtp",
+            OPENAI_COMPATIBLE_API_KEY="lm-studio",
+            OPENAI_COMPATIBLE_REASONING_EFFORT="none",
+            BEDROCK_VALIDATE=False,
+        )
+    )
+
+    payload = client.complete_json("Return JSON.", "Create a deck.", max_tokens=32)
+
+    assert payload == {"deck_title": "Recovered", "slides": []}
+    assert len(FakeHTTPClient.payloads) == 2
+    assert "previous response was not parseable" in FakeHTTPClient.payloads[1]["messages"][1]["content"]
+
+
+def test_openai_compatible_client_extracts_list_content_text() -> None:
+    text = OpenAICompatibleClient._extract_message_text(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": '{"deck_title":"A"'},
+                            {"type": "text", "text": ',"slides":[]}'},
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+
+    assert text == '{"deck_title":"A"\n,"slides":[]}'
 
 
 def test_freeform_planner_creates_consulting_slide_specs() -> None:
@@ -135,6 +250,344 @@ def test_freeform_planner_creates_consulting_slide_specs() -> None:
     assert not any("generic topic label" in warning["message"].lower() for warning in warnings)
 
 
+def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
+    outlines, warnings = ContentPlanner().plan(
+        _template("freeform"),
+        _rich_bundle(),
+        instructions="Create a consulting deck about moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="showcase",
+        length_strategy="auto",
+    )
+
+    archetypes = [outline.content_json["archetype"] for outline in outlines]
+    titles = [outline.content_json["action_title"] for outline in outlines]
+
+    assert 12 <= len(outlines) <= 16
+    assert len(set(archetypes)) >= 7
+    assert len(set(titles)) == len(titles)
+    assert outlines[0].content_json["narrative_role"] == "cover"
+    assert outlines[0].layout_json["layout"] == "cover"
+    assert all(outline.content_json.get("exhibit_spec") for outline in outlines)
+    assert any(archetype == "comparison_table" for archetype in archetypes)
+    assert any(archetype == "code_panel" for archetype in archetypes)
+    assert sum(
+        archetype in {"code_panel", "table_reference", "reference"}
+        for archetype in archetypes
+    ) >= 4
+    assert any(
+        warning["field"] == "llm_planning"
+        and "not configured" in warning["message"]
+        for warning in warnings
+    )
+
+
+def test_fallback_executive_summary_includes_metric_proof_points() -> None:
+    bundle = _bundle()
+    bundle.metrics = [
+        DocumentMetric(
+            label="Developers regularly using AI tools",
+            value=85,
+            unit="%",
+            source_doc_id="doc-1",
+        ),
+        DocumentMetric(
+            label="AI-generated codebases",
+            value=95,
+            unit="%",
+            source_doc_id="doc-1",
+        ),
+    ]
+    bundle.sections[0].content += " Developers regularly using AI tools reached 85%."
+    bundle.sections[0].content += " AI-generated codebases reached 95%."
+
+    outlines, _warnings = ContentPlanner().plan(
+        _template("freeform"),
+        bundle,
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="showcase",
+        length_strategy="expanded",
+    )
+
+    executive = next(
+        outline
+        for outline in outlines
+        if outline.layout_json["layout"] == "executive_summary"
+    )
+    proof_points = executive.content_json["exhibit_spec"]["proof_points"]
+
+    assert {point["label"] for point in proof_points} >= {
+        "Developers regularly using AI tools",
+        "AI-generated codebases",
+    }
+
+
+def test_planner_enriches_legacy_llm_specs_with_exhibit_metadata() -> None:
+    class LegacySpecLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "checklist",
+                        "action_title": "Adopt the transition through a short checklist",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Create memory files", "Define review gates", "Run pilot"],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the implication.",
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=LegacySpecLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].content_json["archetype"] == "checklist"
+    assert outlines[0].content_json["narrative_role"] == "implementation"
+    assert outlines[0].content_json["exhibit_spec"]["type"] == "checklist"
+    assert outlines[0].layout_json["archetype"] == "checklist"
+    assert not warnings
+
+
+def test_planner_upgrades_generic_memory_bank_reference_tables() -> None:
+    class GenericReferenceLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "reference",
+                        "action_title": "Structure the Memory Bank with Core Files",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "table",
+                                "body": [
+                                    ["Item", "Implication"],
+                                    ["Organize files", "Use a memory-bank directory."],
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the reference artifacts.",
+                        "archetype": "table_reference",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {
+                            "type": "reference_table",
+                            "columns": ["Item", "Implication"],
+                            "rows": [["Organize files", "Use a memory-bank directory."]],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=GenericReferenceLLM()).plan(
+        _template("freeform"),
+        _rich_bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    exhibit = outlines[0].content_json["exhibit_spec"]
+
+    assert warnings == []
+    assert outlines[0].layout_json["layout"] == "table_reference"
+    assert exhibit["columns"] == ["File", "Role", "Update trigger"]
+    assert any(row[0] == "projectbrief.md" for row in exhibit["rows"])
+
+
+def test_planner_ignores_table_width_metadata_for_numeric_grounding() -> None:
+    class ColumnMetadataLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "comparison",
+                        "action_title": "Contrast vibe coding with managed agentic engineering",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["The old model relies on memory; the new model uses structure."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the comparison.",
+                        "archetype": "comparison_table",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {
+                            "type": "comparison_table",
+                            "columns": [
+                                {"name": "Aspect", "width": "20%"},
+                                {"name": "Vibe coding", "width": "40%"},
+                                {"name": "Managed agentic work", "width": "40%"},
+                            ],
+                            "rows": [
+                                {
+                                    "label": "Context",
+                                    "values": ["Chat history", "Persistent memory"],
+                                }
+                            ],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=ColumnMetadataLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    content = outlines[0].content_json
+
+    assert not any(warning["field"] == "source_coverage" for warning in warnings)
+    assert content["sources"] == ["Uploaded source"]
+    assert "[source needed]" not in str(content["exhibit_spec"])
+
+
+def test_planner_builds_contextual_code_panel_specs() -> None:
+    section = DocumentSection(
+        title="3.3 When and How to Update",
+        level=2,
+        content=(
+            "Update memory after meaningful changes so context does not go stale "
+            "during the workflow."
+        ),
+        source_doc_id="beyond-vibe",
+    )
+
+    exhibit = ContentPlanner()._exhibit_for_archetype(
+        "code_panel",
+        section,
+        [section],
+        [],
+    )
+
+    assert exhibit["title"] == "memory-bank/update-protocol.md"
+    assert "activeContext.md" in exhibit["lines"][0]
+    assert "progress.md" in " ".join(exhibit["lines"])
+
+    reference_exhibit = ContentPlanner()._exhibit_for_archetype(
+        "reference",
+        DocumentSection(
+            title="3. The Memory Bank",
+            level=1,
+            content="The memory bank acts as persistent context for future sessions.",
+            source_doc_id="beyond-vibe",
+        ),
+        [section],
+        [],
+    )
+
+    assert reference_exhibit["type"] == "code_panel"
+    assert reference_exhibit["title"] == "memory-bank/README.md"
+
+    cycle_exhibit = ContentPlanner()._exhibit_for_archetype(
+        "reference",
+        DocumentSection(
+            title="4.1 The Six-Phase Loop",
+            level=2,
+            content="The agentic cycle uses phases to frame, prime, generate, review, and reset.",
+            source_doc_id="beyond-vibe",
+        ),
+        [section],
+        [],
+    )
+
+    assert cycle_exhibit["title"] == "agentic-cycle.md"
+    assert "Prime the agent" in cycle_exhibit["lines"][1]
+
+    manager_exhibit = ContentPlanner()._exhibit_for_archetype(
+        "code_panel",
+        DocumentSection(
+            title="2.1 The Developer as Product Manager",
+            level=2,
+            content="The developer manages an AI employee by assigning scoped work.",
+            source_doc_id="beyond-vibe",
+        ),
+        [section],
+        [],
+    )
+
+    assert manager_exhibit["title"] == "agent-brief.md"
+    assert "assigning work" in manager_exhibit["lines"][0]
+
+
+def test_fallback_section_selection_uses_blueprint_source_map() -> None:
+    sections = [
+        DocumentSection(title="Overview", level=1, content="Intro", source_doc_id="doc"),
+        DocumentSection(
+            title="3.3 When and How to Update",
+            level=2,
+            content="Update memory after meaningful changes.",
+            source_doc_id="doc",
+        ),
+    ]
+    blueprint = DeckBlueprint(
+        deck_title="Beyond Vibe Coding",
+        audience="Engineering leaders",
+        core_thesis="Persistent context makes AI work reliable.",
+        target_slide_count=2,
+        story_beats=[{"label": "Open"}, {"label": "Reference"}],
+        section_plan=[{"label": "Open"}, {"label": "Reference"}],
+        archetype_sequence=["cover", "code_panel"],
+        source_coverage_map={"2": ["doc:When and How to Update"]},
+    )
+
+    section = ContentPlanner()._section_for_blueprint_slot(1, sections, blueprint)
+
+    assert section.title == "3.3 When and How to Update"
+
+
 def test_planner_reports_llm_fallback_when_configured_client_fails() -> None:
     class FailingLLM:
         def complete_json(self, **kwargs):
@@ -148,7 +601,71 @@ def test_planner_reports_llm_fallback_when_configured_client_fails() -> None:
         generation_mode="freeform",
     )
 
-    assert any(warning["field"] == "llm_planning" for warning in warnings)
+    assert any(
+        warning["field"] == "llm_planning" and "TimeoutError" in warning["message"]
+        for warning in warnings
+    )
+
+
+def test_planner_ignores_malformed_llm_blueprint_metadata() -> None:
+    class MalformedBlueprintLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "blueprint": {
+                    "deck_title": "Beyond Vibe Coding",
+                    "audience": "Engineering leaders",
+                    "core_thesis": "Persistent context improves reliability.",
+                    "target_slide_count": 1,
+                    "story_beats": ["A malformed but harmless beat"],
+                    "section_plan": [],
+                    "archetype_sequence": ["cover"],
+                    "source_coverage_map": {},
+                },
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "cover",
+                        "action_title": "Adopt Agentic Coding to Manage AI Reliability",
+                        "subheading": "A practical operating model",
+                        "content_blocks": [
+                            {
+                                "type": "text",
+                                "body": ["Persistent context makes AI work reliable."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Open the deck.",
+                        "archetype": "cover",
+                        "narrative_role": "cover",
+                        "exhibit_spec": {"type": "cover"},
+                        "design_intent": "dark editorial cover",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=MalformedBlueprintLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert len(outlines) == 1
+    assert outlines[0].label == "Adopt Agentic Coding to Manage AI Reliability"
+    assert not any(warning["field"] == "llm_planning" for warning in warnings)
 
 
 def test_planner_repairs_compound_llm_action_titles() -> None:
@@ -198,6 +715,903 @@ def test_planner_repairs_compound_llm_action_titles() -> None:
 
     assert outlines[0].label == "Identify structural barriers to scalable AI development"
     assert not warnings
+
+
+def test_planner_repairs_generic_model_action_titles() -> None:
+    class GenericTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "content",
+                        "action_title": "Define Specifications",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": [
+                                    "Acceptance criteria should constrain generation before agents build."
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the operating rule.",
+                        "archetype": "checklist",
+                        "narrative_role": "implementation",
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=GenericTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Define acceptance criteria before execution begins"
+    assert not warnings
+
+
+def test_planner_repairs_repeated_action_titles_without_slide_suffix() -> None:
+    class RepeatedTitleLLM:
+        def complete_json(self, **kwargs):
+            slides = []
+            for idx, archetype in enumerate(["code_panel", "checklist"], start=1):
+                slides.append(
+                    {
+                        "slide_number": idx,
+                        "slide_type": "reference" if archetype == "code_panel" else "checklist",
+                        "action_title": "Define acceptance criteria before execution begins",
+                        "subheading": "Evidence from Quality Risk",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Acceptance criteria make generated work reviewable."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the operating discipline.",
+                        "archetype": archetype,
+                        "narrative_role": "implementation",
+                        "exhibit_spec": {"type": archetype, "items": []},
+                        "design_intent": "acceptance criteria operating rules",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                )
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": slides,
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=RepeatedTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    titles = [outline.label for outline in outlines]
+    assert len(titles) == len(set(titles))
+    assert all("for slide" not in title.lower() for title in titles)
+    assert titles[1] == "Convert acceptance criteria into pre-execution review gates"
+    assert not warnings
+
+
+def test_planner_removes_ellipsis_from_repaired_action_titles() -> None:
+    class EllipsisTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "reference",
+                        "action_title": "Standardize a structured set of markdown files... as a reusable reference",
+                        "subheading": "Evidence from a structured set of markdown files that preserve context",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Memory files preserve decisions across sessions."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the reference.",
+                        "archetype": "table_reference",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {"type": "reference_table", "rows": []},
+                        "design_intent": "compact reference table",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=EllipsisTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert "..." not in outlines[0].label
+    assert "…" not in outlines[0].label
+    assert not warnings
+
+
+def test_planner_repairs_reference_to_titles_for_code_panels() -> None:
+    class ReferenceTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "reference",
+                        "action_title": "Turn reference to the six-phase loop",
+                        "subheading": "Evidence from agentic cycle",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["The cycle uses frame, prime, generate, review, and reset phases."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the cycle reference.",
+                        "archetype": "code_panel",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {
+                            "type": "code_panel",
+                            "lines": ["Frame the request", "Review the output"],
+                        },
+                        "design_intent": "reference the six-phase loop",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=ReferenceTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Codify the operating cycle as reusable rules"
+    assert not warnings
+
+
+def test_planner_repairs_detail_titles_for_code_panels() -> None:
+    class DetailTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "reference",
+                        "action_title": (
+                            "Detail the six-phase loop that guarantees reliable agentic software development"
+                        ),
+                        "subheading": "Evidence from agentic cycle",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["The six-phase loop structures reliable agentic work."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the cycle reference.",
+                        "archetype": "code_panel",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {
+                            "type": "code_panel",
+                            "lines": ["Frame the request", "Review the output"],
+                        },
+                        "design_intent": "reference the six-phase loop",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=DetailTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Codify the operating cycle as reusable rules"
+    assert not warnings
+
+
+def test_planner_repairs_embedded_source_clause_titles() -> None:
+    class EmbeddedClauseTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "chart",
+                        "action_title": (
+                            "Turn context windows are finite even large into an explicit operating decision"
+                        ),
+                        "subheading": "Evidence from context windows",
+                        "content_blocks": [
+                            {
+                                "type": "chart",
+                                "body": [
+                                    {"label": "Context window", "value": "1M", "unit": "tokens"}
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain why external memory is needed.",
+                        "archetype": "metric_chart",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {
+                            "type": "metric_chart",
+                            "metrics": [
+                                {"label": "Context window", "value": "1M", "unit": "tokens"}
+                            ],
+                        },
+                        "design_intent": "metric chart about finite context windows",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=EmbeddedClauseTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Quantify context-window limits before relying on model memory"
+    assert not warnings
+
+
+def test_planner_repairs_embedded_source_clause_reference_titles() -> None:
+    class EmbeddedReferenceClauseLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "reference",
+                        "action_title": (
+                            "Standardize six core files arranged in a as a reusable reference"
+                        ),
+                        "subheading": "Evidence from Memory Bank structure",
+                        "content_blocks": [
+                            {
+                                "type": "table",
+                                "body": [
+                                    ["File", "Role", "Update trigger"],
+                                    ["projectbrief.md", "Foundation", "Scope changes"],
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the reference table.",
+                        "archetype": "table_reference",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {
+                            "type": "reference_table",
+                            "columns": ["File", "Role", "Update trigger"],
+                            "rows": [["projectbrief.md", "Foundation", "Scope changes"]],
+                        },
+                        "design_intent": "compact memory bank reference table",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=EmbeddedReferenceClauseLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Standardize Memory Bank files as a reusable reference"
+    assert not warnings
+
+
+def test_planner_repairs_awry_memory_reference_titles() -> None:
+    class AwryReferenceTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "reference",
+                        "action_title": (
+                            "Standardize the core files six-file hierarchy as a reusable reference"
+                        ),
+                        "subheading": "Evidence from Memory Bank structure",
+                        "content_blocks": [
+                            {
+                                "type": "table",
+                                "body": [
+                                    ["File", "Role", "Update trigger"],
+                                    ["projectbrief.md", "Foundation", "Scope changes"],
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the reference table.",
+                        "archetype": "table_reference",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {
+                            "type": "reference_table",
+                            "columns": ["File", "Role", "Update trigger"],
+                            "rows": [["projectbrief.md", "Foundation", "Scope changes"]],
+                        },
+                        "design_intent": "compact memory bank reference table",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=AwryReferenceTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Standardize Memory Bank files as a reusable reference"
+    assert not warnings
+
+
+def test_planner_repairs_process_titles_on_closing_slides() -> None:
+    class ProcessClosingTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "closing",
+                        "action_title": "Run the operating cycle with explicit review gates",
+                        "subheading": "Reset sessions after updating memory",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Adopt the cycle as the default operating cadence."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Close with the decision.",
+                        "archetype": "closing_recommendation",
+                        "narrative_role": "closing",
+                        "exhibit_spec": {
+                            "type": "recommendation",
+                            "recommendation": "Adopt the operating cycle",
+                            "next_steps": ["Name owner"],
+                        },
+                        "design_intent": "closing recommendation",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=ProcessClosingTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Commit to persistent context as the operating default"
+    assert not warnings
+
+
+def test_planner_repairs_wordy_section_divider_titles() -> None:
+    class WordyDividerTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "section",
+                        "action_title": (
+                            "Translate why ephemeral conversations fail into an explicit operating decision"
+                        ),
+                        "subheading": "Why ephemeral conversations fail professional software development",
+                        "content_blocks": [
+                            {
+                                "type": "text",
+                                "body": ["Ephemeral prompting loses context between sessions."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Introduce the next section.",
+                        "archetype": "section_divider",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {"type": "section_divider"},
+                        "design_intent": "dark editorial divider",
+                        "source_refs": ["Uploaded source"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=WordyDividerTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Shift From Ephemeral Chat to Persistent Context"
+    assert not warnings
+
+
+def test_planner_removes_meta_exhibit_language_from_action_titles() -> None:
+    class MetaTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "checklist",
+                        "action_title": "Use step-by-step guide to establishing memory bank as a distinct exhibit",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Create files", "Assign owners", "Refresh memory"],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the checklist.",
+                        "archetype": "checklist",
+                        "narrative_role": "implementation",
+                        "exhibit_spec": {
+                            "type": "checklist",
+                            "items": [
+                                {"action": "Create files", "owner": "Lead", "timing": "Initial"},
+                                {"action": "Assign owners", "owner": "EM", "timing": "Initial"},
+                                {"action": "Refresh memory", "owner": "Team", "timing": "Ongoing"},
+                            ],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=MetaTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert "distinct exhibit" not in outlines[0].label.lower()
+    assert outlines[0].label == "Implement the memory bank through a short operating checklist"
+    assert not warnings
+
+
+def test_planner_replaces_meta_storyline_action_titles() -> None:
+    class MetaStorylineTitleLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "table_reference",
+                        "action_title": "Advance the Storyline with Source-Grounded Evidence",
+                        "subheading": "Six-phase operating loop",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": [
+                                    "Plan work",
+                                    "Generate code",
+                                    "Review output",
+                                    "Update memory",
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the reusable reference.",
+                        "archetype": "table_reference",
+                        "narrative_role": "reference",
+                        "design_intent": "compact reference table for the six-phase operating loop",
+                        "exhibit_spec": {
+                            "type": "table_reference",
+                            "columns": ["Phase", "Rule"],
+                            "rows": [
+                                ["Plan", "Set acceptance criteria"],
+                                ["Generate", "Use current context"],
+                                ["Review", "Check against source"],
+                            ],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=MetaStorylineTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    assert outlines[0].label == "Standardize six-phase operating loop as a reusable reference"
+    assert "source-grounded" not in outlines[0].label.lower()
+    assert "storyline" not in outlines[0].label.lower()
+    assert not warnings
+
+
+def test_planner_rewrites_soft_beat_titles_before_consulting_qa() -> None:
+    class SoftBeatTitleLLM:
+        def complete_json(self, **kwargs):
+            common = {
+                "subheading": "Evidence from uploaded source",
+                "content_blocks": [
+                    {
+                        "type": "bullets",
+                        "body": [
+                            "Teams need explicit context.",
+                            "Review gates improve reliability.",
+                            "Shared artifacts preserve decisions.",
+                        ],
+                        "annotations": [],
+                        "callouts": [],
+                    }
+                ],
+                "chart_spec": None,
+                "sources": ["Uploaded source"],
+                "speaker_notes": "Explain the exhibit.",
+                "qa": {
+                    "consulting_status": "pending",
+                    "visual_status": "pending",
+                    "issues": [],
+                },
+            }
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        **common,
+                        "slide_number": 1,
+                        "slide_type": "framework",
+                        "action_title": "Provide an operating cycle leaders can manage for reliability",
+                        "archetype": "framework_cycle",
+                        "narrative_role": "framework",
+                        "exhibit_spec": {"type": "cycle", "steps": [{"label": "Plan"}]},
+                    },
+                    {
+                        **common,
+                        "slide_number": 2,
+                        "slide_type": "checklist",
+                        "action_title": "Make the next steps executable for immediate adoption",
+                        "archetype": "checklist",
+                        "narrative_role": "implementation",
+                        "exhibit_spec": {
+                            "type": "checklist",
+                            "items": [
+                                {"action": "Create artifacts"},
+                                {"action": "Assign owner"},
+                                {"action": "Run review"},
+                            ],
+                        },
+                    },
+                    {
+                        **common,
+                        "slide_number": 3,
+                        "slide_type": "reference",
+                        "action_title": "Provide a compact reference leaders can reuse",
+                        "subheading": "Core operating artifacts",
+                        "archetype": "table_reference",
+                        "narrative_role": "reference",
+                        "exhibit_spec": {
+                            "type": "reference_table",
+                            "columns": ["Artifact", "Role"],
+                            "rows": [["rules.md", "Constrains execution"]],
+                        },
+                    },
+                    {
+                        **common,
+                        "slide_number": 4,
+                        "slide_type": "closing",
+                        "action_title": "End with a clear recommendation",
+                        "archetype": "closing_recommendation",
+                        "narrative_role": "closing",
+                        "exhibit_spec": {
+                            "type": "recommendation",
+                            "recommendation": "Approve a governed pilot",
+                            "next_steps": ["Name owner"],
+                        },
+                    },
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=SoftBeatTitleLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    titles = [outline.label for outline in outlines]
+
+    assert "Run the operating cycle with explicit review gates" in titles
+    assert "Implement next steps through a short operating checklist" in titles
+    assert "Standardize core operating artifacts as a reusable reference" in titles
+    assert "Commit to the recommendation with named ownership" in titles
+    cycle_spec = outlines[0].content_json["diagram_spec"]
+    assert cycle_spec["kind"] == "cycle"
+    assert len(cycle_spec["steps"]) >= 4
+    assert not any(warning["field"] == "consulting_qa" for warning in warnings)
+
+
+def test_planner_repairs_sparse_anti_pattern_exhibits() -> None:
+    class SparseAntiPatternLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "anti_pattern",
+                        "action_title": "Identify anti-patterns before AI work scales",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Context disappears between sessions."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the failure modes.",
+                        "archetype": "anti_patterns",
+                        "narrative_role": "problem",
+                        "exhibit_spec": {
+                            "type": "anti_patterns",
+                            "patterns": [
+                                {
+                                    "name": "Context rot",
+                                    "symptom": "Context disappears between sessions.",
+                                    "better_behavior": "Persist context outside the chat.",
+                                }
+                            ],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=SparseAntiPatternLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    patterns = outlines[0].content_json["exhibit_spec"]["patterns"]
+
+    assert len(patterns) >= 3
+    assert all(pattern["name"] and pattern["symptom"] for pattern in patterns[:3])
+    assert not warnings
+
+
+def test_repeated_reference_titles_repair_to_code_panel_action() -> None:
+    class DuplicateReferenceLLM:
+        def complete_json(self, **kwargs):
+            slide = {
+                "slide_type": "reference",
+                "action_title": "Reference the Six-Phase Loop for Continuous Improvement",
+                "subheading": "Evidence from uploaded source",
+                "content_blocks": [
+                    {
+                        "type": "bullets",
+                        "body": [
+                            "The six-phase loop provides a comprehensive framework.",
+                            "Each phase feeds the next, creating a reliable delivery pattern.",
+                        ],
+                        "annotations": [],
+                        "callouts": [],
+                    }
+                ],
+                "chart_spec": None,
+                "sources": ["Uploaded source"],
+                "speaker_notes": "Explain the reusable loop.",
+                "archetype": "reference",
+                "narrative_role": "reference",
+                "exhibit_spec": {
+                    "type": "code_panel",
+                    "title": "agentic-cycle.md",
+                    "lines": [
+                        "Frame the request with an explicit outcome.",
+                        "Prime the agent with memory and constraints.",
+                        "Review output before updating memory.",
+                    ],
+                },
+                "qa": {
+                    "consulting_status": "pending",
+                    "visual_status": "pending",
+                    "issues": [],
+                },
+            }
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {"slide_number": 1, **slide},
+                    {"slide_number": 2, **slide},
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=DuplicateReferenceLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    titles = [outline.label for outline in outlines]
+
+    assert "Codify the operating cycle as reusable rules" in titles
+    assert not any("..." in title for title in titles)
+    assert not any("focused recommendation" in title.lower() for title in titles)
+    assert not any(warning["field"] == "consulting_qa" for warning in warnings)
 
 
 def test_planner_varies_generic_llm_slide_layouts() -> None:
@@ -650,6 +2064,49 @@ def test_planner_prompt_includes_allowed_numeric_tokens() -> None:
     assert "Do not invent document names" in llm.prompt
 
 
+def test_showcase_planner_uses_richer_source_packet_and_output_budget() -> None:
+    class CapturingLLM:
+        kwargs = {}
+
+        def complete_json(self, **kwargs):
+            self.kwargs = kwargs
+            return None
+
+    sections = [
+        DocumentSection(
+            title=f"Section {idx}",
+            level=1,
+            content=(
+                f"Section {idx} explains the operating model, evidence base, "
+                "review gate, ownership model, and implementation implications. "
+                "It includes enough detail to support a distinct authored slide."
+            ),
+            source_doc_id="doc-1",
+        )
+        for idx in range(1, 19)
+    ]
+    bundle = _bundle()
+    bundle.sections = sections
+    llm = CapturingLLM()
+
+    ContentPlanner(llm_client=llm).plan(
+        _template("freeform"),
+        bundle,
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="showcase",
+        length_strategy="expanded",
+    )
+
+    assert llm.kwargs["max_tokens"] == 40000
+    prompt = llm.kwargs["user_prompt"]
+    packet = json.loads(prompt.split("Source packet: ", 1)[1].split("\nMetrics:", 1)[0])
+    assert packet["section_count"] == 18
+    assert packet["included_section_count"] == 18
+    assert packet["sections"][-1]["id"] == "doc-1:Section 18"
+    assert "key_points" in packet["sections"][0]
+
+
 def test_planner_extracts_chart_metrics_from_qwen_data_points() -> None:
     class ChartSpecLLM:
         def complete_json(self, **kwargs):
@@ -700,10 +2157,13 @@ def test_planner_extracts_chart_metrics_from_qwen_data_points() -> None:
     )
 
     assert outlines[0].layout_json["layout"] == "chart"
-    assert outlines[0].content_json["metrics"] == [
-        {"label": "Developers", "value": 85, "unit": "%"},
-        {"label": "AI-generated code", "value": 95, "unit": "%"},
-    ]
+    assert {
+        (metric["label"], metric["value"], metric["unit"])
+        for metric in outlines[0].content_json["metrics"]
+    } == {
+        ("Developers", 85, "%"),
+        ("AI-generated code", 95, "%"),
+    }
     assert not warnings
 
 
@@ -759,6 +2219,236 @@ def test_planner_promotes_numeric_chart_slide_without_chart_spec() -> None:
         {"label": "Minimum context tokens reached", "value": 32000, "unit": None},
     ]
     assert not warnings
+
+
+def test_document_ingester_extracts_metrics_without_dates() -> None:
+    markdown = (
+        "February 2026 update. On February 3, 2025, the market was still shifting. "
+        "By the end of 2025, roughly 85% of developers were regularly using AI "
+        "tools for coding. Y Combinator reported that a quarter of its Winter 2025 "
+        "batch had codebases that were 95% AI-generated. The context window ranges "
+        "from roughly 32,000 to 200,000 tokens, and some modern advancements have "
+        "scaled this window to 1 million tokens."
+    )
+
+    metrics = DocumentIngester()._parse_metrics("doc-1", markdown)
+
+    values = {(metric.value, metric.unit) for metric in metrics}
+    labels = [metric.label for metric in metrics]
+    assert (85, "%") in values
+    assert (95, "%") in values
+    assert (32_000, "tokens") in values
+    assert (200_000, "tokens") in values
+    assert (1_000_000, "tokens") in values
+    assert not any(metric.unit is None and metric.value in {3, 2025, 2026} for metric in metrics)
+    assert any("Developers" in label for label in labels)
+    assert "AI-generated codebases" in labels
+
+
+def test_planner_metric_selection_filters_date_like_values() -> None:
+    metrics = [
+        DocumentMetric(label="February", value=2026, unit=None, source_doc_id="doc-1"),
+        DocumentMetric(label="on February", value=3, unit=None, source_doc_id="doc-1"),
+        DocumentMetric(label="Developers using AI tools", value=85, unit="%", source_doc_id="doc-1"),
+        DocumentMetric(label="AI-generated codebases", value=95, unit="%", source_doc_id="doc-1"),
+        DocumentMetric(label="Context window maximum", value=200_000, unit="tokens", source_doc_id="doc-1"),
+    ]
+
+    selected = ContentPlanner()._pick_metrics(metrics, count=3)
+
+    assert selected == [
+        {"label": "AI-generated codebases", "value": 95, "unit": "%"},
+        {"label": "Developers using AI tools", "value": 85, "unit": "%"},
+        {"label": "Context window maximum", "value": 200_000, "unit": "tokens"},
+    ]
+
+
+def test_planner_chart_metric_extraction_skips_leading_years() -> None:
+    slide = GeneratedSlideSpec(
+        slide_number=1,
+        slide_type="chart",
+        action_title="Visualize adoption before scaling AI delivery",
+        content_blocks=[
+            ContentBlock(
+                type="bullets",
+                body=["By 2025, 85% of developers were regularly using AI tools."],
+            )
+        ],
+    )
+
+    metrics = ContentPlanner()._metrics_from_slide(slide)
+
+    assert metrics == [
+        {"label": "developers were regularly using AI tools", "value": 85, "unit": "%"}
+    ]
+
+
+def test_planner_repairs_sparse_comparison_exhibits_before_render() -> None:
+    class SparseComparisonLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "comparison",
+                        "action_title": "Contrast vibe coding with managed agentic engineering",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "table",
+                                "body": [
+                                    ["Aspect", "Vibe coding", "Agentic engineering"],
+                                    ["Context", "", ""],
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the comparison.",
+                        "archetype": "comparison_table",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {
+                            "type": "comparison_table",
+                            "columns": ["Aspect", "Vibe coding", "Agentic engineering"],
+                            "rows": [{"label": "Context", "values": ["", ""]}],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    outlines, warnings = ContentPlanner(llm_client=SparseComparisonLLM()).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    exhibit = outlines[0].content_json["exhibit_spec"]
+    body = outlines[0].content_json["content_blocks"][0]["body"]
+
+    assert warnings == []
+    assert exhibit["columns"] == ["Dimension", "Current state", "Target state"]
+    assert len(exhibit["rows"]) == 3
+    assert all(row["values"][0] and row["values"][1] for row in exhibit["rows"])
+    assert body[0] == ["Dimension", "Current state", "Target state"]
+    assert len(body) == 4
+
+
+def test_planner_enriches_single_metric_chart_from_source_metrics() -> None:
+    class SparseMetricLLM:
+        def complete_json(self, **kwargs):
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "chart",
+                        "action_title": "Quantify adoption pressure before redesigning delivery",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "chart",
+                                "body": [
+                                    {
+                                        "label": "Developers using AI tools",
+                                        "value": 85,
+                                        "unit": "%",
+                                    }
+                                ],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": {
+                            "type": "bar_chart",
+                            "data_points": [
+                                {
+                                    "label": "Developers using AI tools",
+                                    "value": 85,
+                                    "unit": "%",
+                                }
+                            ],
+                        },
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the adoption pressure.",
+                        "archetype": "metric_chart",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {
+                            "type": "metric_chart",
+                            "metrics": [
+                                    {
+                                        "label": "Developers using AI tools",
+                                        "value": 85,
+                                        "unit": "%",
+                                    }
+                            ],
+                        },
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                ],
+            }
+
+    bundle = _bundle()
+    bundle.metrics = [
+        DocumentMetric(
+            label="Developers regularly using AI tools",
+            value=85,
+            unit="%",
+            source_doc_id="doc-1",
+        ),
+        DocumentMetric(
+            label="AI-generated codebases",
+            value=95,
+            unit="%",
+            source_doc_id="doc-1",
+        ),
+        DocumentMetric(
+            label="Context window",
+            value=1_000_000,
+            unit="tokens",
+            source_doc_id="doc-1",
+        ),
+    ]
+    bundle.sections[0].content += " Developers regularly using AI tools reached 85%."
+    bundle.sections[0].content += " AI-generated codebases reached 95%."
+
+    outlines, warnings = ContentPlanner(llm_client=SparseMetricLLM()).plan(
+        _template("freeform"),
+        bundle,
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+    )
+
+    metrics = outlines[0].content_json["metrics"]
+    exhibit_metrics = outlines[0].content_json["exhibit_spec"]["metrics"]
+
+    assert warnings == []
+    assert len(exhibit_metrics) == 3
+    assert {metric["label"] for metric in exhibit_metrics} == {
+        "Developers using AI tools",
+        "AI-generated codebases",
+        "Context window",
+    }
+    assert len({(metric["value"], metric["unit"]) for metric in exhibit_metrics}) == 3
+    assert metrics == exhibit_metrics
 
 
 def test_brand_builder_outputs_valid_pptx(tmp_path: Path) -> None:

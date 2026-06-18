@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 import tempfile
 from collections import Counter
 from datetime import UTC, datetime
@@ -35,13 +36,19 @@ def run_smoke(
     out_dir: Path = DEFAULT_OUT_DIR,
     instructions: str = DEFAULT_INSTRUCTIONS,
     use_vision: bool = False,
+    quality_profile: str = "balanced",
+    length_strategy: str = "auto",
     settings: Settings | None = None,
     vision_settings: Settings | None = None,
     run_label: str | None = None,
+    modes: list[str] | None = None,
+    progress: bool = False,
+    allow_planner_fallback: bool = False,
 ) -> dict[str, Any]:
     settings = settings or Settings(BEDROCK_VALIDATE=False)
     out_dir.mkdir(parents=True, exist_ok=True)
     label = run_label or _model_slug(settings.openai_compatible_model)
+    selected_modes = _normalize_modes(modes)
 
     client = OpenAICompatibleClient(settings)
     planner = ContentPlanner(llm_client=client)
@@ -56,17 +63,33 @@ def run_smoke(
         ("freeform", _template("freeform")),
         ("brand", _template("brand", _brand())),
     ]:
+        if mode not in selected_modes:
+            continue
+        _progress(progress, f"[{mode}] planning")
         outlines, planning_warnings = planner.plan(
             template,
             bundle,
             instructions=instructions,
             generation_mode=mode,
+            quality_profile=quality_profile,
+            length_strategy=length_strategy,
         )
+        if _has_planner_fallback(planning_warnings) and not allow_planner_fallback:
+            reason = _planner_fallback_reason(planning_warnings)
+            raise RuntimeError(
+                f"{mode} planner used deterministic fallback. "
+                f"{reason} "
+                "Fix the model invocation or rerun with --allow-planner-fallback "
+                "only when intentionally inspecting fallback behavior."
+            )
+        _progress(progress, f"[{mode}] applying design")
         outlines = designer.apply_design(outlines)
         output_path = out_dir / f"{mode}-beyond-vibe-{label}.pptx"
+        _progress(progress, f"[{mode}] building {output_path.name}")
         build_warnings = builder.build_deck(
             template, outlines, output_path, out_dir / f"{mode}-{label}-work"
         )
+        _progress(progress, f"[{mode}] visual QA")
         qa_result, preview_images = qa_agent.inspect_deck(
             output_path, out_dir / f"{mode}-{label}-preview", outlines
         )
@@ -82,6 +105,7 @@ def run_smoke(
                 break
             seen_actionable_signatures.add(actionable_signature)
             qa_rounds += 1
+            _progress(progress, f"[{mode}] repair round {qa_rounds}")
             outlines = designer.revise_deck_for_qa(outlines, qa_result.issues)
             repair_warnings = builder.build_deck(
                 template, outlines, output_path, out_dir / f"{mode}-{label}-work"
@@ -92,6 +116,7 @@ def run_smoke(
             )
             qa_history.append(summarize_qa(qa_result.issues))
         rendered = Presentation(output_path.as_posix())
+        _progress(progress, f"[{mode}] done: {len(rendered.slides)} slides")
         results[mode] = deck_report(
             mode=mode,
             output_path=output_path,
@@ -106,34 +131,41 @@ def run_smoke(
             qa_history=qa_history,
         )
 
-    strict_template = _strict_template(out_dir, label)
-    strict_outlines, strict_planning_warnings = ContentPlanner().plan(
-        strict_template,
-        bundle,
-        instructions="Populate the strict executive summary fields from the uploaded source.",
-        generation_mode="strict",
-    )
-    strict_output = out_dir / f"strict-beyond-vibe-{label}.pptx"
-    strict_build_warnings = builder.build_deck(
-        strict_template, strict_outlines, strict_output, out_dir / f"strict-{label}-work"
-    )
-    strict_qa_result, strict_images = qa_agent.inspect_deck(
-        strict_output, out_dir / f"strict-{label}-preview", strict_outlines
-    )
-    strict_rendered = Presentation(strict_output.as_posix())
-    results["strict"] = deck_report(
-        mode="strict",
-        output_path=strict_output,
-        slide_count=len(strict_rendered.slides),
-        titles=[outline.label for outline in strict_outlines],
-        layouts=[outline.layout_json.get("layout", "") for outline in strict_outlines],
-        planning_warnings=strict_planning_warnings,
-        build_warnings=strict_build_warnings,
-        qa_result=strict_qa_result,
-        preview_images=strict_images,
-        qa_rounds=0,
-        qa_history=[summarize_qa(strict_qa_result.issues)],
-    )
+    if "strict" in selected_modes:
+        _progress(progress, "[strict] planning")
+        strict_template = _strict_template(out_dir, label)
+        strict_outlines, strict_planning_warnings = ContentPlanner().plan(
+            strict_template,
+            bundle,
+            instructions="Populate the strict executive summary fields from the uploaded source.",
+            generation_mode="strict",
+            quality_profile=quality_profile,
+            length_strategy=length_strategy,
+        )
+        strict_output = out_dir / f"strict-beyond-vibe-{label}.pptx"
+        _progress(progress, f"[strict] building {strict_output.name}")
+        strict_build_warnings = builder.build_deck(
+            strict_template, strict_outlines, strict_output, out_dir / f"strict-{label}-work"
+        )
+        _progress(progress, "[strict] visual QA")
+        strict_qa_result, strict_images = qa_agent.inspect_deck(
+            strict_output, out_dir / f"strict-{label}-preview", strict_outlines
+        )
+        strict_rendered = Presentation(strict_output.as_posix())
+        _progress(progress, f"[strict] done: {len(strict_rendered.slides)} slides")
+        results["strict"] = deck_report(
+            mode="strict",
+            output_path=strict_output,
+            slide_count=len(strict_rendered.slides),
+            titles=[outline.label for outline in strict_outlines],
+            layouts=[outline.layout_json.get("layout", "") for outline in strict_outlines],
+            planning_warnings=strict_planning_warnings,
+            build_warnings=strict_build_warnings,
+            qa_result=strict_qa_result,
+            preview_images=strict_images,
+            qa_rounds=0,
+            qa_history=[summarize_qa(strict_qa_result.issues)],
+        )
 
     report = {
         "doc_path": doc_path.as_posix(),
@@ -148,6 +180,9 @@ def run_smoke(
         "vision_base_url": (vision_settings or settings).openai_compatible_base_url
         if use_vision
         else None,
+        "selected_modes": selected_modes,
+        "quality_profile": quality_profile,
+        "length_strategy": length_strategy,
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "modes": results,
     }
@@ -155,6 +190,42 @@ def run_smoke(
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     report["report_path"] = report_path.as_posix()
     return report
+
+
+def _progress(enabled: bool, message: str) -> None:
+    if enabled:
+        print(message, file=sys.stderr, flush=True)
+
+
+def _has_planner_fallback(warnings: list[dict[str, Any]]) -> bool:
+    return any(warning.get("field") == "llm_planning" for warning in warnings)
+
+
+def _planner_fallback_reason(warnings: list[dict[str, Any]]) -> str:
+    for warning in warnings:
+        if warning.get("field") == "llm_planning" and warning.get("message"):
+            return str(warning["message"])
+    return "No fallback reason was reported."
+
+
+def _normalize_modes(modes: list[str] | None) -> list[str]:
+    allowed = ["freeform", "brand", "strict"]
+    if not modes:
+        return allowed
+    normalized: list[str] = []
+    for mode in modes:
+        value = mode.strip().lower()
+        if not value:
+            continue
+        if value not in allowed:
+            raise ValueError(f"Unsupported smoke mode: {mode}")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized or allowed
+
+
+def _parse_modes(raw_modes: str) -> list[str]:
+    return _normalize_modes(raw_modes.split(","))
 
 
 def deck_report(
@@ -176,6 +247,7 @@ def deck_report(
         "slides": slide_count,
         "titles": titles,
         "layouts": layouts,
+        "planner_fallback": _has_planner_fallback(planning_warnings),
         "planning_warnings": planning_warnings,
         "build_warnings": build_warnings,
         "qa_rounds": qa_rounds,
@@ -326,9 +398,37 @@ def main() -> None:
     parser.add_argument("--vision-timeout-seconds", type=int, default=None)
     parser.add_argument("--label", default=None)
     parser.add_argument(
+        "--modes",
+        default="freeform,brand,strict",
+        help="Comma-separated modes to run: freeform, brand, strict.",
+    )
+    parser.add_argument(
+        "--quality-profile",
+        choices=["fast", "balanced", "showcase"],
+        default="balanced",
+    )
+    parser.add_argument(
+        "--length-strategy",
+        choices=["auto", "concise", "expanded"],
+        default="auto",
+    )
+    parser.add_argument(
         "--vision",
         action="store_true",
         help="Run local OpenAI-compatible vision QA over generated previews.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress logs on stderr.",
+    )
+    parser.add_argument(
+        "--allow-planner-fallback",
+        action="store_true",
+        help=(
+            "Allow freeform/brand smoke runs to continue if the LLM planner "
+            "falls back to deterministic specs. Intended for fallback debugging only."
+        ),
     )
     args = parser.parse_args()
     settings_kwargs: dict[str, Any] = {"BEDROCK_VALIDATE": False}
@@ -360,9 +460,14 @@ def main() -> None:
         out_dir=args.out_dir,
         instructions=args.instructions,
         use_vision=args.vision,
+        quality_profile=args.quality_profile,
+        length_strategy=args.length_strategy,
         settings=settings,
         vision_settings=vision_settings,
         run_label=args.label,
+        modes=_parse_modes(args.modes),
+        progress=not args.quiet,
+        allow_planner_fallback=args.allow_planner_fallback,
     )
     print(json.dumps(report, indent=2))
 

@@ -2,6 +2,7 @@ import json
 import posixpath
 import re
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -127,18 +128,39 @@ class VisualQAAgent:
             return self.openai_client.complete_vision(
                 system_prompt=QA_SYSTEM_PROMPT,
                 user_prompt="Inspect this slide for layout, overlap, text-wall, contrast, and spacing issues. Return JSON only.",
-                image_bytes=image_path.read_bytes(),
+                image_bytes=self._vision_image_bytes(image_path, image_format),
                 image_format=image_format,
-                max_tokens=1200,
+                max_tokens=2400,
                 temperature=0,
             )
-        image_bytes = image_path.read_bytes()
+        image_format = image_path.suffix.lower().lstrip(".") or "jpeg"
+        if image_format == "jpg":
+            image_format = "jpeg"
         return self.bedrock.converse_vision(
             model_id=self.model_id,
             system_prompt=QA_SYSTEM_PROMPT,
             user_prompt="Inspect this slide for layout, overlap, or text-wall issues.",
-            image_bytes=image_bytes,
+            image_bytes=self._vision_image_bytes(image_path, image_format),
         )
+
+    def _vision_image_bytes(
+        self,
+        image_path: Path,
+        image_format: str,
+        max_edge: int = 1280,
+    ) -> bytes:
+        try:
+            with Image.open(image_path) as image:
+                image = image.convert("RGB")
+                if max(image.size) <= max_edge:
+                    return image_path.read_bytes()
+                image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+                buffer = BytesIO()
+                output_format = "JPEG" if image_format.lower() in {"jpg", "jpeg"} else "PNG"
+                image.save(buffer, format=output_format, quality=88)
+                return buffer.getvalue()
+        except Exception:
+            return image_path.read_bytes()
 
     def _parse_report(self, report: str, slide_index: int) -> list[QAIssue]:
         if not report.strip():
@@ -226,6 +248,8 @@ class VisualQAAgent:
                     )
                 )
         issues.extend(self._layout_variety_checks(outlines))
+        issues.extend(self._narrative_rhythm_checks(outlines))
+        issues.extend(self._exhibit_checks(outlines))
         return issues
 
     def _layout_variety_checks(self, outlines: list[SlideOutline]) -> list[QAIssue]:
@@ -255,6 +279,137 @@ class VisualQAAgent:
                     )
                 )
                 break
+        return issues
+
+    def _narrative_rhythm_checks(self, outlines: list[SlideOutline]) -> list[QAIssue]:
+        flexible = [outline for outline in outlines if outline.mode == "flexible"]
+        if len(flexible) < 6:
+            return []
+        archetypes = [
+            str(
+                outline.layout_json.get("archetype")
+                or outline.content_json.get("archetype")
+                or outline.layout_json.get("layout", "")
+            )
+            for outline in flexible
+        ]
+        roles = [
+            str(outline.content_json.get("narrative_role") or outline.layout_json.get("narrative_role") or "")
+            for outline in flexible
+        ]
+        issues: list[QAIssue] = []
+        if len(set(archetypes)) < min(6, len(flexible)):
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    message="Deck uses too few distinct archetypes for authored narrative rhythm.",
+                    category="narrative_rhythm",
+                )
+            )
+        for idx in range(1, len(archetypes)):
+            if archetypes[idx] == archetypes[idx - 1]:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Adjacent slides repeat the same archetype.",
+                        slide_index=flexible[idx].slide_index,
+                        category="archetype_repetition",
+                    )
+                )
+                break
+        if len(flexible) >= 10:
+            required = {"reference", "implementation"}
+            missing = sorted(role for role in required if role not in set(roles))
+            if missing:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Source-rich deck is missing narrative beats: " + ", ".join(missing),
+                        category="narrative_beats",
+                    )
+                )
+        bullet_layouts = {"two_column", "icon_rows", "icon_grid", "callouts"}
+        bullet_count = sum(
+            1 for outline in flexible if outline.layout_json.get("layout") in bullet_layouts
+        )
+        if bullet_count > len(flexible) * 0.55:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    message="Deck relies too heavily on bullet-card layouts.",
+                    category="bullet_card_usage",
+                )
+            )
+        return issues
+
+    def _exhibit_checks(self, outlines: list[SlideOutline]) -> list[QAIssue]:
+        issues: list[QAIssue] = []
+        for outline in outlines:
+            if outline.mode != "flexible":
+                continue
+            role = str(outline.content_json.get("narrative_role") or "")
+            archetype = str(outline.content_json.get("archetype") or "")
+            if role == "cover" or archetype == "cover":
+                continue
+            exhibit = outline.content_json.get("exhibit_spec")
+            if not isinstance(exhibit, dict) or not exhibit.get("type"):
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Non-cover slide is missing a primary exhibit spec.",
+                        slide_index=outline.slide_index,
+                        category="missing_exhibit",
+                    )
+                )
+                continue
+            exhibit_text = json.dumps(exhibit, sort_keys=True).lower()
+            if "diagram description" in exhibit_text or "placeholder" in exhibit_text:
+                issues.append(
+                    QAIssue(
+                        severity="CRITICAL",
+                        message="Exhibit spec contains placeholder or meta text.",
+                        slide_index=outline.slide_index,
+                        category="exhibit_placeholder",
+                    )
+                )
+            exhibit_type = str(exhibit.get("type") or "").lower()
+            if exhibit_type == "comparison_table":
+                if not exhibit.get("columns") or not exhibit.get("rows"):
+                    issues.append(
+                        QAIssue(
+                            severity="WARNING",
+                            message="Comparison exhibit needs clear columns and rows.",
+                            slide_index=outline.slide_index,
+                            category="comparison_axes",
+                        )
+                    )
+            if exhibit_type == "dependency_map" and len(exhibit.get("middle_nodes", [])) < 2:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Dependency map needs at least two structured middle nodes.",
+                        slide_index=outline.slide_index,
+                        category="exhibit_structure",
+                    )
+                )
+            if exhibit_type == "cycle" and len(exhibit.get("steps", [])) < 3:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Cycle exhibit needs at least three ordered steps.",
+                        slide_index=outline.slide_index,
+                        category="exhibit_structure",
+                    )
+                )
+            if exhibit_type == "checklist" and len(exhibit.get("items", [])) < 3:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Checklist exhibit needs at least three action items.",
+                        slide_index=outline.slide_index,
+                        category="exhibit_structure",
+                    )
+                )
         return issues
 
     def _pptx_structure_checks(
@@ -322,7 +477,8 @@ class VisualQAAgent:
         slide_width = self._emu_to_inches(prs.slide_width)
         slide_height = self._emu_to_inches(prs.slide_height)
         for idx, slide in enumerate(prs.slides):
-            issues.extend(self._slide_geometry_checks(slide, idx, slide_width, slide_height))
+            outline = outlines[idx] if idx < len(outlines) else None
+            issues.extend(self._slide_geometry_checks(slide, idx, slide_width, slide_height, outline))
         return issues
 
     def _content_type_checks(self, pptx_path: Path, names: set[str]) -> list[QAIssue]:
@@ -422,11 +578,24 @@ class VisualQAAgent:
         return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target))
 
     def _slide_geometry_checks(
-        self, slide, slide_index: int, slide_width: float, slide_height: float
+        self,
+        slide,
+        slide_index: int,
+        slide_width: float,
+        slide_height: float,
+        outline: SlideOutline | None = None,
     ) -> list[QAIssue]:
         issues: list[QAIssue] = []
         body_chars = 0
-        body_text_shape_count = 0
+        scan_text_shape_count = 0
+        archetype = ""
+        if outline:
+            archetype = str(
+                outline.content_json.get("archetype")
+                or outline.layout_json.get("archetype")
+                or outline.layout_json.get("layout")
+                or ""
+            )
         for shape in slide.shapes:
             left = self._emu_to_inches(shape.left)
             top = self._emu_to_inches(shape.top)
@@ -457,7 +626,8 @@ class VisualQAAgent:
                 continue
             if top < 0.95 or top > slide_height - 0.7:
                 continue
-            body_text_shape_count += 1
+            if self._counts_toward_scanability(text, archetype):
+                scan_text_shape_count += 1
             body_chars += len(text)
             area = max(width * height, 0.1)
             if len(text) / area > 180:
@@ -478,7 +648,8 @@ class VisualQAAgent:
                     category="text_density",
                 )
             )
-        if body_text_shape_count > 10:
+        object_threshold = self._scanability_object_threshold(archetype)
+        if scan_text_shape_count > object_threshold:
             issues.append(
                 QAIssue(
                     severity="WARNING",
@@ -488,6 +659,41 @@ class VisualQAAgent:
                 )
             )
         return issues
+
+    def _counts_toward_scanability(self, text: str, archetype: str) -> bool:
+        normalized = " ".join(text.split()).strip()
+        if len(normalized) < 24:
+            return False
+        if re.fullmatch(r"[\d\s.,/%$KMBkmb+-]+(?:tokens|pts|x)?", normalized):
+            return False
+        if normalized.isupper() and len(normalized) <= 48:
+            return False
+        structured_archetypes = {
+            "checklist",
+            "code_panel",
+            "comparison_table",
+            "executive_summary",
+            "framework_cycle",
+            "metric_chart",
+            "quote_sidebar",
+            "table_reference",
+        }
+        if archetype in structured_archetypes and len(normalized) <= 52:
+            return False
+        return True
+
+    def _scanability_object_threshold(self, archetype: str) -> int:
+        thresholds = {
+            "checklist": 14,
+            "code_panel": 14,
+            "comparison_table": 14,
+            "executive_summary": 12,
+            "framework_cycle": 14,
+            "metric_chart": 14,
+            "quote_sidebar": 12,
+            "table_reference": 16,
+        }
+        return thresholds.get(archetype, 10)
 
     def _render_pptx_preview_fallback(self, pptx_path: Path, output_dir: Path) -> list[Path]:
         if not pptx_path.exists():

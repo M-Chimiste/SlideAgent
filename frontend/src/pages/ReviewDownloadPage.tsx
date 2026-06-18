@@ -56,10 +56,23 @@ export default function ReviewDownloadPage({ jobId }: Props) {
     <div className="card">
       <h2>Review & Download</h2>
       {status && (
-        <p className="status">
-          Status: {status.job.status} • Progress:{" "}
-          {Math.round(status.job.progress * 100)}%
-        </p>
+        <div className="status">
+          <p>
+            Status: {status.job.status} • Progress:{" "}
+            {Math.round(status.job.progress * 100)}%
+          </p>
+          <p>
+            Mode: {status.job.config_json?.generation_mode || "n/a"} • Planner:{" "}
+            {status.job.config_json?.planner_profile || "n/a"} • Quality:{" "}
+            {status.job.config_json?.quality_profile || "n/a"}
+          </p>
+          <p>
+            Slides: {status.preview_images?.length || 0} • QA rounds:{" "}
+            {status.job.qa_rounds || 0} • Critical:{" "}
+            {status.qa_summary?.critical || 0} • Warnings:{" "}
+            {status.qa_summary?.warning || 0}
+          </p>
+        </div>
       )}
       {status?.job?.result_file && (
         <div className="row">

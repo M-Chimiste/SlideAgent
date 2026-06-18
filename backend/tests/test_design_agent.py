@@ -45,9 +45,10 @@ def test_revise_for_qa_condenses_text_wall_and_adds_visual_structure() -> None:
     revised = DesignAgent().revise_for_qa(outline, [issue])
 
     assert revised is not outline
-    assert revised.layout_json["layout"] == "icon_grid"
-    assert revised.layout_json["visual_elements"] == ["icons", "shapes"]
+    assert revised.layout_json["layout"] == "checklist"
+    assert revised.layout_json["visual_elements"] == ["checklist", "steps"]
     assert revised.layout_json["qa_repair"]["applied"] is True
+    assert revised.content_json["exhibit_spec"]["type"] == "checklist"
     assert len(revised.content_json["bullets"]) == 4
     assert len(revised.content_json["bullets"][0]) <= 145
     assert len(outline.content_json["bullets"]) == 6
@@ -69,6 +70,32 @@ def test_revise_deck_for_qa_repairs_layout_repetition() -> None:
     assert any(outline.layout_json.get("qa_repair") for outline in revised)
 
 
+def test_revise_for_qa_rewrites_exhibit_spec() -> None:
+    outline = _outline(layout="two_column")
+    outline.content_json["exhibit_spec"] = {
+        "type": "checklist",
+        "items": [
+            {
+                "action": " ".join(["Create a persistent memory bank"] * 12),
+                "owner": "Engineering manager",
+                "timing": "Week 1",
+            }
+        ],
+    }
+    issue = QAIssue(
+        severity="WARNING",
+        category="missing_exhibit",
+        message="Non-cover slide is missing a primary exhibit spec.",
+        slide_index=0,
+    )
+
+    revised = DesignAgent().revise_for_qa(outline, [issue])
+
+    assert revised.content_json["exhibit_repair_applied"] is True
+    assert len(revised.content_json["exhibit_spec"]["items"]) >= 1
+    assert len(revised.content_json["exhibit_spec"]["items"][0]["action"]) <= 96
+
+
 def test_apply_design_enforces_deck_level_layout_variety() -> None:
     outlines = [_outline(index=idx, layout="icon_grid") for idx in range(5)]
 
@@ -77,6 +104,60 @@ def test_apply_design_enforces_deck_level_layout_variety() -> None:
 
     assert len(set(layouts)) >= 3
     assert not any(left == right for left, right in zip(layouts, layouts[1:]))
+
+
+def test_apply_design_preserves_explicit_mid_deck_section_divider() -> None:
+    outlines = [_outline(index=idx, layout="two_column") for idx in range(6)]
+    outlines[3].content_json["archetype"] = "section_divider"
+    outlines[3].content_json["narrative_role"] = "framework"
+    outlines[3].layout_json["layout"] = "section_divider"
+    outlines[3].layout_json["archetype"] = "section_divider"
+
+    designed = DesignAgent().apply_design(outlines)
+
+    assert designed[3].layout_json["layout"] == "section_divider"
+    assert designed[3].layout_json["visual_elements"] == ["section_marker", "typography"]
+
+
+def test_apply_design_preserves_explicit_post_cover_executive_summary() -> None:
+    outlines = [_outline(index=idx, layout="two_column") for idx in range(4)]
+    outlines[0].content_json["archetype"] = "cover"
+    outlines[0].layout_json["layout"] = "cover"
+    outlines[0].layout_json["archetype"] = "cover"
+    outlines[1].content_json["archetype"] = "executive_summary"
+    outlines[1].content_json["narrative_role"] = "executive_summary"
+    outlines[1].content_json["exhibit_spec"] = {
+        "type": "executive_summary",
+        "messages": [
+            {"label": "Situation", "text": "AI coding is moving into production work."},
+            {"label": "Complication", "text": "Context and review gaps reduce reliability."},
+            {"label": "Resolution", "text": "Manage agents with context, rules, and QA."},
+        ],
+    }
+    outlines[1].layout_json["layout"] = "executive_summary"
+    outlines[1].layout_json["archetype"] = "executive_summary"
+
+    designed = DesignAgent().apply_design(outlines)
+
+    assert designed[1].layout_json["layout"] == "executive_summary"
+    assert designed[1].layout_json["visual_elements"] == ["structured_text"]
+
+
+def test_apply_design_routes_explicit_reference_archetype_to_code_panel() -> None:
+    outlines = [_outline(index=idx, layout="two_column") for idx in range(4)]
+    outlines[2].content_json["archetype"] = "reference"
+    outlines[2].content_json["action_title"] = "Document the Memory Bank update protocol"
+    outlines[2].content_json["bullets"] = [
+        "Update activeContext.md after each meaningful change.",
+        "Record decisions before starting the next session.",
+        "Keep progress.md synchronized with implementation status.",
+    ]
+    outlines[2].layout_json["archetype"] = "reference"
+
+    designed = DesignAgent().apply_design(outlines)
+
+    assert designed[2].layout_json["layout"] == "code_panel"
+    assert designed[2].layout_json["visual_elements"] == ["reference_panel", "code"]
 
 
 def test_layout_repair_does_not_use_executive_summary_as_generic_fallback() -> None:

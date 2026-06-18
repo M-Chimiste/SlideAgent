@@ -52,6 +52,7 @@ class DesignAgent:
             (("risk", "failure", "rot"), "risk"),
         ]
         self.layout_fallbacks = [
+            "cover",
             "icon_grid",
             "two_column",
             "quote_sidebar",
@@ -59,8 +60,11 @@ class DesignAgent:
             "checklist",
             "callouts",
             "framework_cycle",
+            "comparison_table",
             "code_panel",
             "anti_patterns",
+            "table_reference",
+            "closing_recommendation",
             "icon_rows",
             "process",
             "chart",
@@ -86,6 +90,7 @@ class DesignAgent:
         current = revised.layout_json.get("layout", "icon_rows")
         if self._needs_content_condensing(issue_text):
             self._condense_content(revised)
+        self._repair_exhibit_spec(revised, issue_text)
         if self._needs_more_visual_structure(issue_text):
             revised.layout_json["layout"] = self._best_visual_layout(revised, current)
         elif self._needs_layout_change(issue_text):
@@ -181,6 +186,11 @@ class DesignAgent:
                 "missing visuals",
                 "scanability",
                 "content_quality",
+                "missing_exhibit",
+                "exhibit",
+                "narrative_rhythm",
+                "archetype",
+                "bullet_card_usage",
             )
         )
 
@@ -217,17 +227,31 @@ class DesignAgent:
                 "text-wall",
                 "text wall",
                 "content_quality",
+                "missing_exhibit",
+                "exhibit",
+                "bullet_card_usage",
             )
         )
 
     def _needs_layout_change(self, issue_text: str) -> bool:
         return any(
             token in issue_text
-            for token in ("layout", "repetition", "repeated", "contrast", "spacing")
+            for token in (
+                "layout",
+                "repetition",
+                "repeated",
+                "contrast",
+                "spacing",
+                "narrative_rhythm",
+                "archetype",
+            )
         )
 
     def _best_visual_layout(self, outline: SlideOutline, current: str) -> str:
         content = outline.content_json
+        exhibit_layout = self._layout_from_exhibit(content.get("exhibit_spec"))
+        if exhibit_layout and exhibit_layout != current:
+            return exhibit_layout
         if content.get("metrics"):
             return "chart" if current != "chart" else "callouts"
         if self._has_table(content):
@@ -237,12 +261,33 @@ class DesignAgent:
             return "callouts" if current != "callouts" else "icon_grid"
         return "icon_grid" if current != "icon_grid" else "two_column"
 
+    def _layout_from_exhibit(self, exhibit_spec) -> str | None:
+        if not isinstance(exhibit_spec, dict):
+            return None
+        exhibit_type = str(exhibit_spec.get("type") or "").lower().replace("-", "_")
+        mapping = {
+            "comparison_table": "comparison_table",
+            "dependency_map": "dependency_map",
+            "cycle": "framework_cycle",
+            "process": "framework_cycle",
+            "checklist": "checklist",
+            "code_panel": "code_panel",
+            "anti_patterns": "anti_patterns",
+            "quote_sidebar": "quote_sidebar",
+            "reference_table": "table_reference",
+            "recommendation": "closing_recommendation",
+            "metric_chart": "chart",
+        }
+        return mapping.get(exhibit_type)
+
     def _next_layout(self, current: str | None, outline: SlideOutline) -> str:
         preferred = self._normalize_layout(current or "icon_rows", outline)
         for layout in self.layout_fallbacks:
+            if layout in {"cover", "executive_summary", "section_divider", "closing_recommendation"}:
+                continue
             if layout != preferred and self._layout_is_suitable(layout, outline):
                 return layout
-        return self.layout_fallbacks[0]
+        return "two_column"
 
     def _layout_is_suitable(self, layout: str, outline: SlideOutline) -> bool:
         if layout == "chart" and not outline.content_json.get("metrics"):
@@ -262,8 +307,10 @@ class DesignAgent:
             "quote_sidebar",
             "dependency_map",
             "framework_cycle",
+            "comparison_table",
             "code_panel",
             "checklist",
+            "table_reference",
             "callouts",
             "icon_grid",
             "two_column",
@@ -275,8 +322,8 @@ class DesignAgent:
             revised = outline.model_copy(deep=True)
             current = str(revised.layout_json.get("layout") or "two_column")
             intended = self._intent_layout(revised, index) or current
-            if index > 0 and intended in {"executive_summary", "section_divider"}:
-                intended = current if current not in {"executive_summary", "section_divider"} else "two_column"
+            if index > 0 and intended == "executive_summary" and current != "executive_summary":
+                intended = current if current != "executive_summary" else "two_column"
             if (
                 intended == last_layout
                 or seen_counts.get(intended, 0) >= 2
@@ -307,6 +354,8 @@ class DesignAgent:
         outline: SlideOutline,
     ) -> str:
         for layout in fallback_cycle:
+            if layout in {"cover", "executive_summary", "section_divider"}:
+                continue
             if layout == last_layout:
                 continue
             if seen_counts.get(layout, 0) >= 2:
@@ -314,12 +363,19 @@ class DesignAgent:
             if self._layout_is_suitable(layout, outline):
                 return layout
         for layout in fallback_cycle:
+            if layout in {"cover", "executive_summary", "section_divider"}:
+                continue
             if layout != last_layout and self._layout_is_suitable(layout, outline):
                 return layout
         return "two_column"
 
     def _intent_layout(self, outline: SlideOutline, index: int) -> str | None:
         current = str(outline.layout_json.get("layout") or "")
+        explicit = self._explicit_archetype_layout(outline)
+        if explicit:
+            return explicit
+        if index == 0 and current == "cover":
+            return "cover"
         if index == 0 and current == "executive_summary":
             return "executive_summary"
         if current == "chart" and outline.content_json.get("metrics"):
@@ -339,6 +395,31 @@ class DesignAgent:
             return "checklist"
         if any(token in text for token in ("cycle", "workflow", "workflows", "operating model")):
             return "framework_cycle"
+        return None
+
+    def _explicit_archetype_layout(self, outline: SlideOutline) -> str | None:
+        archetype = str(
+            outline.layout_json.get("archetype")
+            or outline.content_json.get("archetype")
+            or ""
+        )
+        normalized = archetype.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "cycle": "framework_cycle",
+            "process": "framework_cycle",
+            "comparison": "comparison_table",
+            "reference": "code_panel",
+            "reference_table": "table_reference",
+            "chart": "chart",
+            "metric_chart": "chart",
+            "anti_pattern": "anti_patterns",
+            "quote": "quote_sidebar",
+            "closing": "closing_recommendation",
+            "recommendation": "closing_recommendation",
+        }
+        layout = aliases.get(normalized, normalized)
+        if layout in self.layout_fallbacks:
+            return layout
         return None
 
     def _outline_text(self, outline: SlideOutline) -> str:
@@ -381,6 +462,97 @@ class DesignAgent:
                     if str(item).strip()
                 ]
 
+    def _repair_exhibit_spec(self, outline: SlideOutline, issue_text: str) -> None:
+        if outline.mode != "flexible":
+            return
+        content = outline.content_json
+        exhibit = content.get("exhibit_spec")
+        if not isinstance(exhibit, dict):
+            if not self._needs_more_visual_structure(issue_text):
+                return
+            bullets = self._content_bullets(content)[:4]
+            content["exhibit_spec"] = {
+                "type": "checklist",
+                "items": self._ensure_min_items(
+                    [
+                    {"action": self._truncate_text(bullet, 92), "owner": "Owner", "timing": "Next"}
+                    for bullet in bullets
+                    ],
+                    [
+                        {"action": "Confirm source context", "owner": "Lead", "timing": "Next"},
+                        {"action": "Define review gate", "owner": "Manager", "timing": "Next"},
+                        {"action": "Run pilot workflow", "owner": "Team", "timing": "Next"},
+                    ],
+                    min_count=3,
+                ),
+            }
+            content["archetype"] = "checklist"
+            outline.layout_json["archetype"] = "checklist"
+            outline.layout_json["exhibit_type"] = "checklist"
+            return
+        content["exhibit_spec"] = self._condense_exhibit(exhibit)
+        content["exhibit_repair_applied"] = True
+
+    def _condense_exhibit(self, value):
+        if isinstance(value, str):
+            return self._truncate_text(value, 96)
+        if isinstance(value, list):
+            return [self._condense_exhibit(item) for item in value[:6]]
+        if isinstance(value, dict):
+            condensed = {
+                key: self._condense_exhibit(item)
+                for key, item in value.items()
+                if not self._is_placeholder_text(item)
+            }
+            exhibit_type = str(condensed.get("type") or "")
+            if exhibit_type == "anti_patterns":
+                condensed["patterns"] = self._ensure_min_items(
+                    condensed.get("patterns"),
+                    [
+                        {"name": "Context rot", "symptom": "Memory disappears", "better_behavior": "Persist context"},
+                        {"name": "Thin review", "symptom": "Outputs pass too quickly", "better_behavior": "Use QA gates"},
+                    ],
+                )
+            if exhibit_type == "checklist":
+                condensed["items"] = self._ensure_min_items(
+                    condensed.get("items"),
+                    [
+                        {"action": "Confirm source context", "owner": "Lead", "timing": "Next"},
+                        {"action": "Define review gate", "owner": "Manager", "timing": "Next"},
+                        {"action": "Run pilot workflow", "owner": "Team", "timing": "Next"},
+                    ],
+                    min_count=3,
+                )
+            if exhibit_type == "cycle":
+                condensed["steps"] = self._ensure_min_items(
+                    condensed.get("steps"),
+                    [
+                        {"label": "Frame", "description": "Define the ask"},
+                        {"label": "Prime", "description": "Load context"},
+                        {"label": "Review", "description": "Check against evidence"},
+                    ],
+                    min_count=3,
+                )
+            if exhibit_type == "dependency_map":
+                condensed["middle_nodes"] = self._ensure_min_items(
+                    condensed.get("middle_nodes"),
+                    ["Context", "Rules", "Review"],
+                    min_count=2,
+                )
+            return condensed
+        return value
+
+    def _ensure_min_items(self, items, fallback: list, min_count: int = 2) -> list:
+        if isinstance(items, list) and len(items) >= min_count:
+            return items
+        return fallback
+
+    def _is_placeholder_text(self, value) -> bool:
+        if isinstance(value, str):
+            normalized = value.lower()
+            return "diagram description" in normalized or "placeholder" in normalized
+        return False
+
     def _condense_table(self, rows: list[Any]) -> list[Any]:
         condensed: list[Any] = []
         for row in rows[:6]:
@@ -406,8 +578,8 @@ class DesignAgent:
         source_marker = " [source needed]" if "[source needed]" in cleaned.lower() else ""
         working_limit = limit - len(source_marker)
         cleaned = cleaned.replace("[source needed]", "").strip()
-        truncated = cleaned[: max(20, working_limit - 3)].rsplit(" ", 1)[0].rstrip(".,;:")
-        return f"{truncated}...{source_marker}"
+        truncated = cleaned[: max(20, working_limit)].rsplit(" ", 1)[0].rstrip(".,;:")
+        return f"{truncated}{source_marker}"
 
     def _content_bullets(self, content: dict[str, Any]) -> list[str]:
         bullets = content.get("bullets")
@@ -449,8 +621,12 @@ class DesignAgent:
         return layout
 
     def _visuals_for_layout(self, layout: str) -> list[str]:
+        if layout == "cover":
+            return ["hero_typography", "section_marker"]
         if layout == "chart":
             return ["charts", "callouts"]
+        if layout == "comparison_table":
+            return ["tables", "comparison"]
         if layout == "callouts":
             return ["callouts"]
         if layout == "process":
@@ -471,6 +647,10 @@ class DesignAgent:
             return ["anti_pattern_cards", "icons"]
         if layout == "executive_summary":
             return ["structured_text"]
+        if layout == "table_reference":
+            return ["tables", "reference"]
+        if layout == "closing_recommendation":
+            return ["recommendation", "checklist"]
         return ["icons", "shapes"]
 
     def _select_icons(self, outline: SlideOutline) -> list[str]:

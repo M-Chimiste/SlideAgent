@@ -25,8 +25,7 @@ class PptxBuilder:
         working_dir: Path,
     ) -> list[dict[str, str | int]]:
         if template.type in {"freeform", "brand"}:
-            self.renderer.render(outlines, template.brand, output_path)
-            return []
+            return self.renderer.render(outlines, template.brand, output_path)
 
         strict_output = working_dir / "strict.pptx"
         flex_output = working_dir / "flexible.pptx"
@@ -39,7 +38,9 @@ class PptxBuilder:
             output_path.write_bytes(strict_output.read_bytes())
             return strict_warnings
 
-        self.renderer.render(flexible_outlines, template.brand, flex_output)
+        render_warnings = self.renderer.render(
+            flexible_outlines, template.brand, flex_output, enable_diagrams=False
+        )
 
         replacements = []
         flex_number = 1
@@ -56,7 +57,7 @@ class PptxBuilder:
         self.hybrid_assembler.assemble(
             strict_output, flex_output, replacements, output_path
         )
-        return strict_warnings
+        return [*strict_warnings, *render_warnings]
 
     def _write_deck_json(
         self,

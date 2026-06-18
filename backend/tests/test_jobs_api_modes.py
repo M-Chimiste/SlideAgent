@@ -66,6 +66,9 @@ async def test_create_freeform_job_without_template() -> None:
     assert job.config_json == {
         "generation_mode": "freeform",
         "planner_profile": "fast",
+        "quality_profile": "balanced",
+        "length_strategy": "auto",
+        "run_visual_qa": True,
     }
     assert store.created == [job]
     assert queue.enqueued == [job.id]
@@ -125,6 +128,9 @@ async def test_create_brand_job_uses_template_mode() -> None:
     assert job.config_json == {
         "generation_mode": "brand",
         "planner_profile": "fast",
+        "quality_profile": "balanced",
+        "length_strategy": "auto",
+        "run_visual_qa": True,
     }
     assert queue.enqueued == [job.id]
 
@@ -148,4 +154,35 @@ async def test_create_brand_job_accepts_deep_planner_profile() -> None:
     assert job.config_json == {
         "generation_mode": "brand",
         "planner_profile": "deep",
+        "quality_profile": "balanced",
+        "length_strategy": "auto",
+        "run_visual_qa": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_job_accepts_quality_and_length_controls() -> None:
+    store = DummyStore()
+    queue = DummyQueue()
+
+    job = await create_job(
+        template_id="",
+        generation_mode="freeform",
+        planner_profile="fast",
+        quality_profile="showcase",
+        length_strategy="expanded",
+        run_visual_qa=False,
+        instructions="Create a showcase deck.",
+        documents=None,
+        store=store,
+        storage=DummyStorage(),
+        job_queue=queue,
+    )
+
+    assert job.config_json == {
+        "generation_mode": "freeform",
+        "planner_profile": "fast",
+        "quality_profile": "showcase",
+        "length_strategy": "expanded",
+        "run_visual_qa": False,
     }

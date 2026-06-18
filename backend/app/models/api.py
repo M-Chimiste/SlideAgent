@@ -18,3 +18,4 @@ class JobStatusResponse(BaseModel):
     job: JobRecord
     warnings: List[dict[str, Any]]
     preview_images: Optional[List[str]] = None
+    qa_summary: Optional[dict[str, Any]] = None
