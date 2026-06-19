@@ -21,6 +21,14 @@ class PlanningRepairMixin:
         cleaned = " ".join(str(text).split()).strip(" -:;")
         if not cleaned:
             return ""
+        adjacent_connector = re.search(
+            r"\b(?:as|at|by|for|from|in|into|of|on|to|with|without)\s+"
+            r"(?:as|at|by|for|from|in|into|of|on|to|with|without)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if adjacent_connector and adjacent_connector.start() >= 12:
+            cleaned = cleaned[: adjacent_connector.start()].rstrip(" ,;:")
         clause_match = re.search(
             r",\s+(?:which|that|where|while|because|as)\b[^,.;:]*$",
             cleaned,
@@ -67,13 +75,14 @@ class PlanningRepairMixin:
             "while",
             "because",
             "than",
+            "prior",
+            "optimal",
         }
 
     def _truncate_title(self, title: str) -> str:
         words = title.rstrip(".").split()
-        if len(words) <= 15:
-            return " ".join(words)
-        return " ".join(words[:15]).rstrip(".,;:")
+        truncated = " ".join(words[:15] if len(words) > 15 else words).rstrip(".,;:")
+        return self._repair_dangling_fragment(truncated)
 
     def _default_pattern(self, index: int) -> str:
         return [
@@ -121,6 +130,9 @@ class PlanningRepairMixin:
             "comparison": "comparison_table",
             "metric": "metric_chart",
             "chart": "metric_chart",
+            "matrix": "matrix_2x2",
+            "2x2": "matrix_2x2",
+            "2x2_matrix": "matrix_2x2",
             "anti_pattern": "anti_patterns",
             "quote": "quote_sidebar",
             "closing": "closing_recommendation",
@@ -212,6 +224,7 @@ class PlanningRepairMixin:
         cleaned = self._strip_meta_title_text(title).strip()
         cleaned = cleaned.replace("...", " ").replace("…", " ")
         cleaned = " ".join(cleaned.split())
+        cleaned = self._repair_dangling_fragment(cleaned)
         if " and " in cleaned.lower():
             cleaned = cleaned.split(" and ", 1)[0]
         return self._truncate_title(cleaned)
@@ -598,4 +611,3 @@ class PlanningRepairMixin:
                 flags=re.IGNORECASE,
             )
         )
-

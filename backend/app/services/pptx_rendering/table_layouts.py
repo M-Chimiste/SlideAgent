@@ -119,7 +119,7 @@ class TableLayoutRenderingMixin:
             self._add_body_text(slide, target, 8.88, y + 0.17, 3.02, 0.3, brand, size=10)
 
         self._add_card(slide, 4.92, 6.0, 7.32, 0.42, self._tint(brand.colors.accent, 0.88), self._tint(brand.colors.accent, 0.74))
-        self._add_body_text(slide, "TARGET TEST", 5.18, 6.11, 1.16, 0.16, brand, size=7)
+        self._add_body_text(slide, "TARGET TEST", 5.18, 6.1, 1.3, 0.18, brand, size=8)
         self._add_body_text(
             slide,
             "Every row should make the behavior change explicit enough to inspect or assign.",
@@ -192,13 +192,13 @@ class TableLayoutRenderingMixin:
         )
         self._add_dark_text(
             slide,
-            "Use as the source of truth for ownership, purpose, and refresh triggers.",
+            "Use as the source of truth for owner and refresh triggers.",
             1.22,
             5.24,
             2.28,
-            0.62,
+            0.44,
             brand,
-            size=9,
+            size=8,
             color=self._tint(brand.colors.primary, 0.68),
         )
 
@@ -245,7 +245,7 @@ class TableLayoutRenderingMixin:
             )
             self._add_body_text(
                 slide,
-                self._truncate_at_word(cells[1], 76),
+                self._truncate_at_word(cells[1], 52),
                 x + col_w[0] + 0.36,
                 row_y + 0.16,
                 col_w[1] - 0.22,
@@ -255,7 +255,7 @@ class TableLayoutRenderingMixin:
             )
             self._add_body_text(
                 slide,
-                self._truncate_at_word(cells[2], 58),
+                self._truncate_at_word(cells[2], 42),
                 x + col_w[0] + col_w[1] + 0.54,
                 row_y + 0.16,
                 col_w[2] - 0.28,
@@ -264,7 +264,7 @@ class TableLayoutRenderingMixin:
                 size=9,
             )
         self._add_card(slide, 4.35, 6.02, 8.26, 0.42, self._tint(brand.colors.accent, 0.88), self._tint(brand.colors.accent, 0.74))
-        self._add_body_text(slide, "UPDATE CADENCE", 4.62, 6.13, 1.45, 0.16, brand, size=7)
+        self._add_body_text(slide, "UPDATE CADENCE", 4.62, 6.12, 1.6, 0.18, brand, size=8)
         self._add_body_text(
             slide,
             "Refresh the artifact when source evidence, ownership, or risk changes.",
@@ -408,4 +408,3 @@ class TableLayoutRenderingMixin:
                 [str(index + 1), bullet] for index, bullet in enumerate(bullets)
             ]
         return [["Action", "Owner", "Timing"], ["Align", "Sponsor", "Week 1"], ["Execute", "Team", "Week 2"]]
-

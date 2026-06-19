@@ -84,6 +84,14 @@ def run_smoke(
             )
         _progress(progress, f"[{mode}] applying design")
         outlines = designer.apply_design(outlines)
+        outlines, consulting_warnings = _run_consulting_repairs(
+            planner,
+            designer,
+            outlines,
+            bundle,
+            settings.qa_max_rounds,
+        )
+        planning_warnings.extend(consulting_warnings)
         output_path = out_dir / f"{mode}-beyond-vibe-{label}.pptx"
         _progress(progress, f"[{mode}] building {output_path.name}")
         build_warnings = builder.build_deck(
@@ -107,6 +115,14 @@ def run_smoke(
             qa_rounds += 1
             _progress(progress, f"[{mode}] repair round {qa_rounds}")
             outlines = designer.revise_deck_for_qa(outlines, qa_result.issues)
+            outlines, consulting_warnings = _run_consulting_repairs(
+                planner,
+                designer,
+                outlines,
+                bundle,
+                settings.qa_max_rounds,
+            )
+            planning_warnings.extend(consulting_warnings)
             repair_warnings = builder.build_deck(
                 template, outlines, output_path, out_dir / f"{mode}-{label}-work"
             )
@@ -226,6 +242,48 @@ def _normalize_modes(modes: list[str] | None) -> list[str]:
 
 def _parse_modes(raw_modes: str) -> list[str]:
     return _normalize_modes(raw_modes.split(","))
+
+
+def _run_consulting_repairs(
+    planner: ContentPlanner,
+    designer: DesignAgent,
+    outlines,
+    bundle,
+    max_rounds: int,
+) -> tuple[list, list[dict[str, Any]]]:
+    repaired = outlines
+    warnings: list[dict[str, Any]] = []
+    seen_signatures: set[tuple[tuple[int, str, str], ...]] = set()
+    for round_index in range(max(1, max_rounds)):
+        issues = planner.consulting_issues_for_outlines(repaired, bundle)
+        signature = tuple(
+            sorted(
+                (
+                    -1 if issue.slide_index is None else issue.slide_index,
+                    issue.category or "",
+                    " ".join(issue.message.lower().split())[:160],
+                )
+                for issue in issues
+                if issue.severity in {"CRITICAL", "WARNING"}
+            )
+        )
+        if not signature:
+            break
+        warnings.extend(
+            {
+                "slide_index": issue.slide_index,
+                "field": "consulting_qa",
+                "message": f"Round {round_index}: {issue.message}",
+            }
+            for issue in issues
+            if issue.severity in {"CRITICAL", "WARNING"}
+        )
+        if signature in seen_signatures:
+            break
+        seen_signatures.add(signature)
+        repaired = planner.repair_outlines_for_consulting(repaired, issues, bundle)
+        repaired = designer.apply_design(repaired)
+    return repaired, warnings
 
 
 def deck_report(

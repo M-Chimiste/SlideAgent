@@ -3,7 +3,7 @@ import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from lxml import etree
 from pptx import Presentation
@@ -98,7 +98,126 @@ class TemplateAnalyzer:
         if logo:
             brand.logo = logo
         brand.design_notes = self._design_notes(template_path)
+        brand.layout_profile = self._layout_profile(template_path)
         return brand
+
+    def _layout_profile(self, template_path: Path) -> dict[str, Any]:
+        presentation = Presentation(template_path.as_posix())
+        title_boxes = []
+        footer_boxes = []
+        body_boxes = []
+        logo_boxes = []
+        fills: list[str] = []
+        table_fills: list[str] = []
+        chart_fills: list[str] = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                bounds = self._shape_bounds(shape)
+                fill = self._shape_fill(shape)
+                if fill:
+                    fills.append(fill)
+                if getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE:
+                    logo_boxes.append(bounds)
+                    continue
+                if getattr(shape, "has_chart", False):
+                    chart_fills.extend(self._chart_colors(shape))
+                    continue
+                if getattr(shape, "has_table", False):
+                    table_fills.extend(self._table_colors(shape))
+                text = self._shape_text(shape).strip()
+                if not text:
+                    continue
+                if bounds["y"] < 1.4 and bounds["h"] <= 1.4:
+                    title_boxes.append(bounds)
+                elif bounds["y"] > 6.2:
+                    footer_boxes.append(bounds)
+                else:
+                    body_boxes.append(bounds)
+        profile: dict[str, Any] = {}
+        if title_boxes:
+            profile["title_box"] = self._average_box(title_boxes)
+        if footer_boxes:
+            profile["footer_box"] = self._average_box(footer_boxes)
+        if body_boxes:
+            profile["body_box"] = self._bounding_box(body_boxes)
+        if logo_boxes:
+            profile["logo_box"] = self._average_box(logo_boxes)
+        dominant_fill = self._most_common(fills)
+        if dominant_fill:
+            profile["dominant_fill"] = dominant_fill
+        if table_fills:
+            profile["table_colors"] = self._unique_colors(table_fills)[:4]
+        if chart_fills:
+            profile["chart_colors"] = self._unique_colors(chart_fills)[:4]
+        return profile
+
+    def _shape_bounds(self, shape) -> dict[str, float]:
+        return {
+            "x": round(int(shape.left) / 914400, 3),
+            "y": round(int(shape.top) / 914400, 3),
+            "w": round(int(shape.width) / 914400, 3),
+            "h": round(int(shape.height) / 914400, 3),
+        }
+
+    def _shape_fill(self, shape) -> str | None:
+        try:
+            rgb = shape.fill.fore_color.rgb
+        except Exception:
+            return None
+        return str(rgb) if rgb else None
+
+    def _table_colors(self, shape) -> list[str]:
+        colors = []
+        try:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    rgb = cell.fill.fore_color.rgb
+                    if rgb:
+                        colors.append(str(rgb))
+        except Exception:
+            return []
+        return colors
+
+    def _chart_colors(self, shape) -> list[str]:
+        colors = []
+        try:
+            for series in shape.chart.series:
+                rgb = series.format.fill.fore_color.rgb
+                if rgb:
+                    colors.append(str(rgb))
+        except Exception:
+            return []
+        return colors
+
+    def _average_box(self, boxes: list[dict[str, float]]) -> dict[str, float]:
+        return {
+            key: round(sum(box[key] for box in boxes) / len(boxes), 3)
+            for key in ("x", "y", "w", "h")
+        }
+
+    def _bounding_box(self, boxes: list[dict[str, float]]) -> dict[str, float]:
+        left = min(box["x"] for box in boxes)
+        top = min(box["y"] for box in boxes)
+        right = max(box["x"] + box["w"] for box in boxes)
+        bottom = max(box["y"] + box["h"] for box in boxes)
+        return {
+            "x": round(left, 3),
+            "y": round(top, 3),
+            "w": round(right - left, 3),
+            "h": round(bottom - top, 3),
+        }
+
+    def _most_common(self, values: list[str]) -> str | None:
+        if not values:
+            return None
+        return max(set(values), key=values.count)
+
+    def _unique_colors(self, values: list[str]) -> list[str]:
+        unique = []
+        for value in values:
+            if value not in unique:
+                unique.append(value)
+        return unique
 
     def _extract_logo(self, template_path: Path) -> BrandLogo | None:
         presentation = Presentation(template_path.as_posix())

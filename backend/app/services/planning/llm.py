@@ -13,6 +13,7 @@ from app.services.planning.constants import (
     PLANNER_SYSTEM_PROMPT,
     SOURCE_NEEDED_LABEL,
     UPLOADED_SOURCE_LABEL,
+    build_planner_system_prompt,
 )
 
 
@@ -29,7 +30,12 @@ class LLMPlanningMixin:
             return None
         source_packet = self._planner_source_packet(bundle, blueprint, quality_profile)
         metrics = [
-            {"label": metric.label, "value": metric.value, "unit": metric.unit}
+            {
+                "id": getattr(metric, "source_id", ""),
+                "label": metric.label,
+                "value": metric.value,
+                "unit": metric.unit,
+            }
             for metric in bundle.metrics[:8]
         ]
         allowed_numbers = sorted(self._supported_numeric_tokens(bundle))[:50]
@@ -57,7 +63,7 @@ class LLMPlanningMixin:
             "\"exhibit_spec\":{\"type\":\"comparison_table|dependency_map|cycle|checklist|code_panel|anti_patterns|quote_sidebar|metric_chart|reference_table|recommendation\"},"
             "\"diagram_spec\":null,"
             "\"design_intent\":\"short renderer guidance\","
-            "\"source_refs\":[\"stable source section id or Uploaded source\"],"
+            "\"source_refs\":[\"one of the source packet section ids, table ids, metric ids, or [source needed]\"],"
             "\"speaker_notes\":\"short presenter note\",\"qa\":{\"consulting_status\":\"pending\","
             "\"visual_status\":\"pending\",\"issues\":[]}}]}. "
             "Every non-cover slide should have exactly one primary exhibit_spec. "
@@ -67,7 +73,7 @@ class LLMPlanningMixin:
             "Action titles must avoid the word 'and'; split the idea instead. "
             "Only use numeric claims that appear in the allowed numeric tokens. "
             "If an unsupported numeric claim is necessary, write [source needed] beside it. "
-            "Sources may only be Uploaded source or [source needed]. "
+            "Use source_refs for exact source packet ids. Sources may only be Uploaded source, a short label copied from source_refs, or [source needed]. "
             "Do not invent document names, reports, URLs, people, companies, or dates as sources. "
             "Do not include markdown, comments, reasoning, or text outside the JSON. "
             f"Generation mode: {mode}. Quality profile: {quality_profile}. "
@@ -77,13 +83,15 @@ class LLMPlanningMixin:
             f"Source packet: {json.dumps(source_packet, ensure_ascii=True)}\n"
             f"Metrics: {json.dumps(metrics, ensure_ascii=True)}"
         )
+        system_prompt = build_planner_system_prompt(quality_profile)
+        max_tokens = self._planner_max_tokens(
+            quality_profile, blueprint.target_slide_count
+        )
         try:
             payload = self.llm_client.complete_json(
-                system_prompt=PLANNER_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=self._planner_max_tokens(
-                    quality_profile, blueprint.target_slide_count
-                ),
+                max_tokens=max_tokens,
                 temperature=0.2,
             )
         except Exception as exc:
@@ -92,14 +100,47 @@ class LLMPlanningMixin:
         if payload is None:
             self._last_planning_error = "model response did not contain a JSON object"
             return None
+        deck = self._validate_deck_payload(payload, blueprint)
+        if deck is not None:
+            return deck
+        # One schema-repair retry: re-prompt with the validation error before
+        # giving up and falling back to the deterministic deck.
+        repair_prompt = (
+            f"{user_prompt}\n\n"
+            "Your previous response did not satisfy the required schema. "
+            f"Validation error: {self._last_planning_error}. "
+            "Return a corrected JSON object that matches the requested shape exactly. "
+            "Keep every slide action_title a complete sentence with a verb, and emit no "
+            "markdown, comments, or prose outside the JSON object."
+        )
+        try:
+            payload = self.llm_client.complete_json(
+                system_prompt=system_prompt,
+                user_prompt=repair_prompt,
+                max_tokens=max_tokens,
+                temperature=0,
+            )
+        except Exception as exc:
+            self._last_planning_error = f"{type(exc).__name__}: {exc}"
+            return None
+        if payload is None:
+            self._last_planning_error = (
+                "model repair response did not contain a JSON object"
+            )
+            return None
+        return self._validate_deck_payload(payload, blueprint)
+
+    def _validate_deck_payload(
+        self, payload: dict[str, Any], blueprint: DeckBlueprint
+    ) -> DeckSpec | None:
         payload = self._normalize_llm_payload(payload, blueprint)
         try:
             deck = DeckSpec.model_validate(payload)
-            self._repair_model_titles(deck)
-            return deck
         except Exception as exc:
             self._last_planning_error = f"DeckSpec validation failed: {exc}"
             return None
+        self._repair_model_titles(deck)
+        return deck
 
     def _normalize_llm_payload(
         self, payload: dict[str, Any], blueprint: DeckBlueprint
@@ -135,6 +176,7 @@ class LLMPlanningMixin:
             "content_inventory": bundle.content_inventory[:24],
             "tables": [
                 {
+                    "id": getattr(table, "source_id", ""),
                     "title": table.title or "Untitled table",
                     "headers": table.headers[:8],
                     "row_count": len(table.rows),
@@ -143,6 +185,7 @@ class LLMPlanningMixin:
                 }
                 for table in bundle.tables[:6]
             ],
+            "source_index": bundle.source_index,
         }
 
     def _planner_section_limit(
@@ -197,4 +240,3 @@ class LLMPlanningMixin:
             if len(points) >= 4:
                 break
         return points
-

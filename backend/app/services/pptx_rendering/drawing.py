@@ -9,6 +9,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+from pptx.enum.text import MSO_AUTO_SIZE
 from pptx.util import Inches, Pt
 
 from app.models.brand import BrandDNA
@@ -50,9 +51,11 @@ class DrawingMixin:
     ) -> None:
         box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
         frame = box.text_frame
-        frame.word_wrap = True
         frame.clear()
-        run = frame.paragraphs[0].add_run()
+        self._autofit(frame)
+        para = frame.paragraphs[0]
+        para.line_spacing = 1.12
+        run = para.add_run()
         run.text = text[:360]
         run.font.name = brand.fonts.heading if bold else brand.fonts.body
         run.font.size = Pt(size)
@@ -71,16 +74,17 @@ class DrawingMixin:
     ) -> None:
         box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
         frame = box.text_frame
-        frame.word_wrap = True
         frame.clear()
+        self._autofit(frame)
         for idx, line in enumerate(lines[:8]):
             para = frame.paragraphs[0] if idx == 0 else frame.add_paragraph()
+            para.line_spacing = 1.0
             run = para.add_run()
             run.text = line
             run.font.name = "Courier New"
             run.font.size = Pt(10)
             run.font.color.rgb = self._rgb(brand.colors.text_light)
-            para.space_after = Pt(4)
+            para.space_after = Pt(2)
 
     def _add_arrow(
         self,
@@ -156,7 +160,7 @@ class DrawingMixin:
         run.font.name = brand.fonts.heading
         run.font.size = Pt(max(10, int(size * 22)))
         run.font.bold = True
-        run.font.color.rgb = self._rgb(brand.colors.text_light)
+        run.font.color.rgb = self._rgb(self._readable_text_color(fill, brand))
 
     def _add_body_text(
         self,
@@ -172,9 +176,10 @@ class DrawingMixin:
     ) -> None:
         box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
         frame = box.text_frame
-        frame.word_wrap = True
         frame.clear()
+        self._autofit(frame)
         para = frame.paragraphs[0]
+        para.line_spacing = 1.15
         if center:
             para.alignment = 1
         run = para.add_run()
@@ -186,8 +191,8 @@ class DrawingMixin:
     def _add_bullets(self, slide, bullets: list[str], x: float, y: float, w: float, h: float, brand: BrandDNA) -> None:
         box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
         frame = box.text_frame
-        frame.word_wrap = True
         frame.clear()
+        self._autofit(frame)
         for idx, bullet in enumerate(bullets[:4]):
             para = frame.paragraphs[0] if idx == 0 else frame.add_paragraph()
             para.level = 0
@@ -195,12 +200,14 @@ class DrawingMixin:
             para.font.name = brand.fonts.body
             para.font.size = Pt(13)
             para.font.color.rgb = self._rgb(brand.colors.text_dark)
-            para.space_after = Pt(7)
+            para.line_spacing = 1.12
+            para.space_after = Pt(6)
 
     def _add_big_number(self, slide, text: str, x: float, y: float, w: float, brand: BrandDNA) -> None:
         box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(0.8))
         frame = box.text_frame
         frame.clear()
+        self._autofit(frame)
         para = frame.paragraphs[0]
         para.alignment = 1
         run = para.add_run()
@@ -221,8 +228,8 @@ class DrawingMixin:
         center: bool = False,
     ) -> None:
         frame = shape.text_frame
-        frame.word_wrap = True
         frame.clear()
+        self._autofit(frame)
         frame.margin_left = Inches(0.05)
         frame.margin_right = Inches(0.05)
         para = frame.paragraphs[0]
@@ -233,7 +240,15 @@ class DrawingMixin:
         run.font.name = brand.fonts.body
         run.font.size = Pt(size)
         run.font.bold = bold
-        run.font.color.rgb = self._rgb(color or brand.colors.text_dark)
+        fill_hex = self._shape_fill_hex(shape)
+        if fill_hex:
+            if color and self._contrast_ratio(color, fill_hex) >= 4.5:
+                chosen = color
+            else:
+                chosen = self._readable_text_color(fill_hex, brand)
+        else:
+            chosen = color or brand.colors.text_dark
+        run.font.color.rgb = self._rgb(chosen)
 
     def _exhibit(self, outline: SlideOutline) -> dict[str, Any]:
         exhibit = outline.content_json.get("exhibit_spec")
@@ -440,6 +455,93 @@ class DrawingMixin:
             for channel in (red, green, blue)
         ]
         return "".join(f"{channel:02X}" for channel in tinted)
+
+    def _relative_luminance(self, hex_color: str) -> float:
+        cleaned = self._clean_hex(hex_color)
+        channels = []
+        for offset in (0, 2, 4):
+            value = int(cleaned[offset : offset + 2], 16) / 255.0
+            value = (
+                value / 12.92
+                if value <= 0.03928
+                else ((value + 0.055) / 1.055) ** 2.4
+            )
+            channels.append(value)
+        red, green, blue = channels
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+    def _contrast_ratio(self, fg_hex: str, bg_hex: str) -> float:
+        light = self._relative_luminance(fg_hex)
+        dark = self._relative_luminance(bg_hex)
+        lighter, darker = max(light, dark), min(light, dark)
+        return (lighter + 0.05) / (darker + 0.05)
+
+    def _readable_text_color(
+        self,
+        background_hex: str,
+        brand: BrandDNA,
+        light: str | None = None,
+        dark: str | None = None,
+        min_ratio: float = 4.5,
+    ) -> str:
+        """Pick the most legible text color for a given background.
+
+        Prefer the brand's light/dark text color that best contrasts with the
+        background; if neither clears AA (4.5:1), fall back to the higher-contrast
+        of white/near-black so text on a light brand fill never goes illegible.
+        """
+        bg = self._clean_hex(background_hex)
+        light_hex = self._clean_hex(light or brand.colors.text_light)
+        dark_hex = self._clean_hex(dark or brand.colors.text_dark)
+        brand_best = max(
+            (light_hex, dark_hex), key=lambda candidate: self._contrast_ratio(candidate, bg)
+        )
+        if self._contrast_ratio(brand_best, bg) >= min_ratio:
+            return brand_best
+        return (
+            "FFFFFF"
+            if self._contrast_ratio("FFFFFF", bg) >= self._contrast_ratio("111111", bg)
+            else "111111"
+        )
+
+    def _shape_fill_hex(self, shape) -> str | None:
+        try:
+            rgb = shape.fill.fore_color.rgb
+        except Exception:
+            return None
+        if rgb is None:
+            return None
+        return str(rgb)
+
+    def _fit_font_size(
+        self,
+        text: str,
+        box_width_in: float,
+        sizes: list[int],
+        max_lines: int = 2,
+        char_factor: float = 0.52,
+    ) -> int:
+        """Pick the largest size (from sizes, largest-first) whose wrapped text fits.
+
+        Width-aware: estimates characters-per-line from the box width and point
+        size instead of the raw character count, so a wide box keeps large type.
+        Pair with a TEXT_TO_FIT_SHAPE autofit frame to absorb any residual overflow.
+        """
+        length = len(" ".join(str(text).split()))
+        if length == 0 or not sizes:
+            return sizes[0] if sizes else 12
+        for size in sizes:
+            chars_per_line = max(1, int((box_width_in * 72) / (char_factor * size)))
+            if chars_per_line * max_lines >= length:
+                return size
+        return sizes[-1]
+
+    def _autofit(self, frame) -> None:
+        try:
+            frame.word_wrap = True
+            frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        except Exception:
+            pass
 
     def _rgba(self, hex_color: str) -> tuple[int, int, int, int]:
         cleaned = self._clean_hex(hex_color)

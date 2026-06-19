@@ -57,8 +57,8 @@ logic into smaller packages:
 
 - `app.services.content_planner.ContentPlanner` remains the public planner
   entrypoint. Its implementation is split across `app.services.planning`:
-  `blueprint`, `llm`, `specs`, `repairs`, `grounding`, `outlines`, and
-  `constants`.
+  `blueprint`, `llm`, `specs`, `repairs`, `grounding`, `outlines`,
+  `exhibits`, and `constants`.
 - `app.services.pptx_renderer.DeterministicPptxRenderer` remains the public
   generated-slide renderer. Its implementation is split across
   `app.services.pptx_rendering`: `assets`, `chrome`, `core_layouts`,
@@ -287,8 +287,8 @@ fast | balanced | showcase
   },
   "design_intent": "string",
   "chart_spec": null,
-  "source_refs": ["source-id or [source needed]"],
-  "sources": ["source-id or [source needed]"],
+  "source_refs": ["canonical source-id or [source needed]"],
+  "sources": ["human-readable footer label or [source needed]"],
   "speaker_notes": "string",
   "qa": {
     "consulting_status": "pending",
@@ -318,12 +318,16 @@ fast | balanced | showcase
 
 ### Consulting QA gate
 
-Runs on deck plans and slide specs before rendering. Critical failures include:
+Runs on deck plans, generated specs, and repaired outlines before rendering.
+For generated decks it also re-runs after each visual repair. Critical failures
+include:
 
 - Topic-label titles instead of action titles.
 - No coherent horizontal flow.
 - Multiple messages on one slide.
 - Unsupported quantitative claims.
+- Missing canonical source references on source-backed generated slides.
+- Missing primary exhibits on non-cover generated slides.
 - Missing Resolution weight in the deck narrative.
 - Non-MECE breakdowns where structure is central to the slide.
 
@@ -358,10 +362,12 @@ template slides should only be changed through approved strict field mappings.
 - Ingest documents with provenance.
 - Require source references or `[source needed]` for quantitative claims.
 - Add consulting QA checks for unsupported metrics.
+- Resolve generated `source_refs` to rendered section-level source labels.
+- Compile source-shaped sections, tables, and metrics into exhibit specs.
 
 ### Milestone 3: Brand templates
 
-- Extract theme colors, fonts, logo, and layout patterns.
+- Extract theme colors, fonts, logo, and layout-profile patterns.
 - Render generated slides using brand-aware specs.
 - Validate brand consistency in VisualQA.
 

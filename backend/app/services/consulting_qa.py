@@ -1,6 +1,8 @@
 import re
 
 from app.models.generation import DeckSpec, GeneratedSlideSpec
+from app.models.outline import SlideOutline
+from app.models.qa import QAIssue
 
 
 GENERIC_TITLE_PATTERNS = {
@@ -65,6 +67,17 @@ ACTION_VERBS = {
     "use",
 }
 
+GENERIC_FILLER_PATTERNS = {
+    "preserve context before work begins",
+    "make review criteria explicit before execution",
+    "keep decisions traceable across handoffs",
+    "turn lessons into durable operating rules",
+    "assign one clear owner for each step of the workflow",
+    "validate every output against the original intent",
+    "capture assumptions so they can be revisited later",
+    "close the loop with a short, honest retrospective",
+}
+
 
 class ConsultingQA:
     def inspect(self, deck: DeckSpec) -> tuple[DeckSpec, list[dict]]:
@@ -88,6 +101,73 @@ class ConsultingQA:
         if flow_issue:
             warnings.append(flow_issue)
         return deck, warnings
+
+    def inspect_outlines(
+        self,
+        outlines: list[SlideOutline],
+        has_source_material: bool = True,
+    ) -> list[QAIssue]:
+        issues: list[QAIssue] = []
+        flexible = [outline for outline in outlines if outline.mode == "flexible"]
+        titles: dict[str, int] = {}
+        bullets_seen: dict[str, int] = {}
+        roles = []
+        for outline in flexible:
+            content = outline.content_json
+            title = str(
+                content.get("action_title") or content.get("title") or outline.label
+            ).strip()
+            roles.append(str(content.get("narrative_role") or "").lower())
+            issues.extend(self._outline_title_issues(outline, title))
+            normalized_title = self._normalize_text(title)
+            if normalized_title:
+                if normalized_title in titles:
+                    issues.append(
+                        QAIssue(
+                            severity="WARNING",
+                            category="horizontal_flow",
+                            message="Repeated or near-duplicate action title weakens the storyline.",
+                            slide_index=outline.slide_index,
+                        )
+                    )
+                titles[normalized_title] = outline.slide_index
+            bullets = self._outline_bullets(outline)
+            issues.extend(self._outline_content_issues(outline, title, bullets))
+            for bullet in bullets:
+                normalized_bullet = self._normalize_text(bullet)
+                if not normalized_bullet:
+                    continue
+                if normalized_bullet in bullets_seen:
+                    issues.append(
+                        QAIssue(
+                            severity="WARNING",
+                            category="repeated_bullet",
+                            message="Repeated evidence bullet appears on multiple slides.",
+                            slide_index=outline.slide_index,
+                        )
+                    )
+                    break
+                bullets_seen[normalized_bullet] = outline.slide_index
+            if has_source_material and not self._outline_source_refs(outline):
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        category="source_refs",
+                        message="Source-backed slide is missing canonical source references.",
+                        slide_index=outline.slide_index,
+                    )
+                )
+            if self._needs_exhibit(outline) and not self._has_primary_exhibit(outline):
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        category="missing_exhibit",
+                        message="Non-cover slide is missing a primary exhibit spec.",
+                        slide_index=outline.slide_index,
+                    )
+                )
+        issues.extend(self._outline_flow_issues(flexible, roles))
+        return issues
 
     def inspect_slide(self, slide: GeneratedSlideSpec) -> list[dict]:
         issues: list[dict] = []
@@ -137,6 +217,218 @@ class ConsultingQA:
         if words & ACTION_VERBS:
             return True
         return any(word.endswith(("ing", "ed", "es")) for word in words if len(word) > 4)
+
+    def _outline_title_issues(
+        self, outline: SlideOutline, title: str
+    ) -> list[QAIssue]:
+        issues: list[QAIssue] = []
+        if not title:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="action_title",
+                    message="Missing action title.",
+                    slide_index=outline.slide_index,
+                )
+            )
+            return issues
+        if title.lower() in GENERIC_TITLE_PATTERNS:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="action_title",
+                    message="Action title is a generic topic label.",
+                    slide_index=outline.slide_index,
+                )
+            )
+        if len(title.split()) > 16:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="action_title",
+                    message="Action title should be 15 words or fewer.",
+                    slide_index=outline.slide_index,
+                )
+            )
+        if " and " in title.lower():
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="one_message",
+                    message="Title may contain multiple messages; split or sharpen it.",
+                    slide_index=outline.slide_index,
+                )
+            )
+        if self._has_dangling_connector(title):
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="action_title",
+                    message="Action title has a dangling connector phrase.",
+                    slide_index=outline.slide_index,
+                )
+            )
+        if not self._has_action_signal(title):
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="action_title",
+                    message="Action title should state a conclusion with a verb.",
+                    slide_index=outline.slide_index,
+                )
+            )
+        return issues
+
+    def _has_dangling_connector(self, title: str) -> bool:
+        normalized = " ".join(str(title).split())
+        if re.search(
+            r"\b(?:as|at|by|for|from|in|into|of|on|to|with|without)\s+"
+            r"(?:as|at|by|for|from|in|into|of|on|to|with|without)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        words = normalized.rstrip(".,;:").split()
+        return bool(
+            words
+            and words[-1].lower()
+            in {"as", "for", "into", "of", "optimal", "prior", "to", "with"}
+        )
+
+    def _outline_content_issues(
+        self, outline: SlideOutline, title: str, bullets: list[str]
+    ) -> list[QAIssue]:
+        issues: list[QAIssue] = []
+        title_tokens = self._meaningful_tokens(title)
+        body_tokens = self._meaningful_tokens(" ".join(bullets))
+        if title_tokens and body_tokens and len(title_tokens & body_tokens) == 0:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="title_body_support",
+                    message="Slide body does not clearly support the action title.",
+                    slide_index=outline.slide_index,
+                )
+            )
+        for bullet in bullets:
+            if self._normalize_text(bullet) in GENERIC_FILLER_PATTERNS:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        category="generic_filler",
+                        message="Generic filler bullet should be replaced with source-specific evidence.",
+                        slide_index=outline.slide_index,
+                    )
+                )
+                break
+        return issues
+
+    def _outline_flow_issues(
+        self, outlines: list[SlideOutline], roles: list[str]
+    ) -> list[QAIssue]:
+        if len(outlines) < 6:
+            return []
+        compact_roles = [role for role in roles if role]
+        issues: list[QAIssue] = []
+        if compact_roles and compact_roles[0] not in {"cover", "executive_summary"}:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="scr_flow",
+                    message="Deck should open with a cover or executive summary beat.",
+                )
+            )
+        if len(outlines) >= 8 and "closing" not in compact_roles[-2:]:
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="scr_flow",
+                    message="Deck should end with a recommendation or decision beat.",
+                )
+            )
+        return issues
+
+    def _outline_bullets(self, outline: SlideOutline) -> list[str]:
+        content = outline.content_json
+        bullets = content.get("bullets")
+        if isinstance(bullets, list) and bullets:
+            return [str(item) for item in bullets if str(item).strip()]
+        collected: list[str] = []
+        blocks = content.get("content_blocks")
+        if isinstance(blocks, list):
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                for item in block.get("body", []):
+                    if isinstance(item, str) and item.strip():
+                        collected.append(item)
+                    elif isinstance(item, list):
+                        text = " | ".join(str(value) for value in item)
+                        if text.strip():
+                            collected.append(text)
+        return collected
+
+    def _outline_source_refs(self, outline: SlideOutline) -> list[str]:
+        refs = outline.content_json.get("source_refs")
+        if not isinstance(refs, list):
+            return []
+        return [
+            str(ref)
+            for ref in refs
+            if str(ref).strip()
+            and "source needed" not in str(ref).lower()
+            and str(ref).strip() != "Uploaded source"
+        ]
+
+    def _needs_exhibit(self, outline: SlideOutline) -> bool:
+        role = str(outline.content_json.get("narrative_role") or "").lower()
+        archetype = str(outline.content_json.get("archetype") or "").lower()
+        return role != "cover" and archetype != "cover"
+
+    def _has_primary_exhibit(self, outline: SlideOutline) -> bool:
+        exhibit = outline.content_json.get("exhibit_spec")
+        return isinstance(exhibit, dict) and bool(exhibit.get("type"))
+
+    def _normalize_text(self, text: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(text).lower())
+        return " ".join(normalized.split())
+
+    def _meaningful_tokens(self, text: str) -> set[str]:
+        stop = {
+            "a",
+            "an",
+            "and",
+            "as",
+            "by",
+            "for",
+            "from",
+            "in",
+            "into",
+            "of",
+            "on",
+            "or",
+            "the",
+            "to",
+            "with",
+            "without",
+            "should",
+            "must",
+            "can",
+            "will",
+            "use",
+            "uses",
+            "using",
+            "make",
+            "makes",
+            "slide",
+            "source",
+            "evidence",
+        }
+        return {
+            token
+            for token in self._normalize_text(text).split()
+            if len(token) > 3 and token not in stop
+        }
 
     def _inspect_horizontal_flow(self, deck: DeckSpec) -> dict | None:
         if len(deck.slides) < 3:

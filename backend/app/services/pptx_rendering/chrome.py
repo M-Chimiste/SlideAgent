@@ -27,6 +27,7 @@ class ChromeRenderingMixin:
         outline: SlideOutline,
         slide_number: int,
     ) -> None:
+        subheading = "" if self._looks_like_meta_subheading(subheading) else subheading
         reserved_logo_width = brand.logo.size_w + 0.35 if brand.logo else 0
         section_number, section_label = self._section_marker(outline, slide_number)
         kicker = slide.shapes.add_textbox(Inches(0.68), Inches(0.18), Inches(5.4), Inches(0.2))
@@ -77,39 +78,46 @@ class ChromeRenderingMixin:
         rule.fill.solid()
         rule.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.secondary, 0.82))
         rule.line.color.rgb = rule.fill.fore_color.rgb
-        title_font_size = 24
-        title_height = 0.55
-        title_limit = 112
-        show_subheading = True
-        if len(title) > 58:
-            title_font_size = 20
-            title_height = 0.82
-            title_limit = 105
-            show_subheading = False
-        if len(title) > 96:
-            title_font_size = 18
-            title_height = 0.95
-            title_limit = 98
-            show_subheading = False
+        title_profile = self._profile_box(brand, "title_box")
+        title_x = title_profile.get("x", 0.68)
+        title_y = title_profile.get("y", 0.48)
+        title_width = title_profile.get("w", 12.1 - reserved_logo_width)
+        title_font_size = self._fit_font_size(title, title_width, [24, 20, 18], max_lines=2)
+        one_line_chars = max(1, int((title_width * 72) / (0.52 * title_font_size)))
+        wraps_two_lines = len(" ".join(title.split())) > one_line_chars
+        if not wraps_two_lines:
+            title_height, show_subheading = 0.55, True
+        elif title_font_size >= 20:
+            title_height, show_subheading = 0.86, False
+        else:
+            title_height, show_subheading = 0.98, False
+        title_height = max(title_height, min(float(title_profile.get("h", title_height)), 1.1))
         title_box = slide.shapes.add_textbox(
-            Inches(0.68),
-            Inches(0.48),
-            Inches(12.1 - reserved_logo_width),
+            Inches(title_x),
+            Inches(title_y),
+            Inches(title_width),
             Inches(title_height),
         )
         frame = title_box.text_frame
-        frame.word_wrap = True
         frame.clear()
+        self._autofit(frame)
         para = frame.paragraphs[0]
+        para.line_spacing = 1.04
         run = para.add_run()
-        run.text = self._truncate_at_word(title, title_limit)
+        run.text = self._truncate_at_word(title, 120)
         run.font.name = brand.fonts.heading
         run.font.size = Pt(title_font_size)
         run.font.bold = True
         run.font.color.rgb = self._rgb(brand.colors.text_dark)
         if subheading and show_subheading:
-            sub_y = 0.88 if title_height <= 0.55 else 0.48 + title_height + 0.04
-            sub_box = slide.shapes.add_textbox(Inches(0.68), Inches(sub_y), Inches(10.6), Inches(0.22))
+            sub_y = (
+                title_y + title_height + 0.04
+                if title_profile
+                else 0.88 if title_height <= 0.55 else 0.48 + title_height + 0.04
+            )
+            sub_box = slide.shapes.add_textbox(
+                Inches(title_x), Inches(sub_y), Inches(min(10.6, title_width)), Inches(0.22)
+            )
             sub_frame = sub_box.text_frame
             sub_frame.clear()
             sub = sub_frame.paragraphs[0].add_run()
@@ -117,6 +125,21 @@ class ChromeRenderingMixin:
             sub.font.name = brand.fonts.body
             sub.font.size = Pt(9)
             sub.font.color.rgb = self._rgb(brand.colors.secondary)
+
+    def _looks_like_meta_subheading(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").lower().split())
+        return any(
+            marker in normalized
+            for marker in (
+                "quote sidebar",
+                "layout instruction",
+                "diagram description",
+                "placeholder",
+                "visually tied",
+                "compact reference block",
+                "distinct exhibit",
+            )
+        )
 
     def _section_marker(self, outline: SlideOutline, slide_number: int) -> tuple[str, str]:
         role = str(
@@ -169,22 +192,36 @@ class ChromeRenderingMixin:
         slide_number: int,
         total_slides: int,
     ) -> None:
-        sources = outline.content_json.get("sources") or []
-        source_text = "Source: " + "; ".join(sources[:2]) if sources else "Source: [source needed]"
-        footer = slide.shapes.add_textbox(Inches(0.6), Inches(7.0), Inches(10.8), Inches(0.25))
+        source_text = self._footer_source_text(outline)
+        footer_box = self._profile_box(brand, "footer_box")
+        footer = slide.shapes.add_textbox(
+            Inches(footer_box.get("x", 0.68)),
+            Inches(footer_box.get("y", 7.0)),
+            Inches(footer_box.get("w", 10.7)),
+            Inches(footer_box.get("h", 0.26)),
+        )
         frame = footer.text_frame
         frame.clear()
         run = frame.paragraphs[0].add_run()
         run.text = source_text[:180]
         run.font.name = brand.fonts.body
-        run.font.size = Pt(8)
+        run.font.size = Pt(10)
         run.font.color.rgb = self._rgb(brand.colors.secondary)
-        page = slide.shapes.add_textbox(Inches(12.1), Inches(7.0), Inches(0.8), Inches(0.25))
+        page = slide.shapes.add_textbox(
+            Inches(11.52),
+            Inches(footer_box.get("y", 7.0)),
+            Inches(0.9),
+            Inches(footer_box.get("h", 0.26)),
+        )
         page_frame = page.text_frame
         page_frame.clear()
-        page_run = page_frame.paragraphs[0].add_run()
+        page_para = page_frame.paragraphs[0]
+        page_para.alignment = 2
+        page_run = page_para.add_run()
         page_run.text = f"{slide_number}/{total_slides}"
-        page_run.font.size = Pt(8)
+        page_run.font.name = brand.fonts.body
+        page_run.font.size = Pt(10)
+        page_run.font.bold = True
         page_run.font.color.rgb = self._rgb(brand.colors.secondary)
 
     def _add_dark_slide_chrome(
@@ -212,6 +249,7 @@ class ChromeRenderingMixin:
             or outline.label
         )
         subheading = outline.content_json.get("subheading") or outline.content_json.get("summary", "")
+        subheading = "" if self._looks_like_meta_subheading(subheading) else subheading
         section_number, _section_label = self._section_marker(outline, slide_number)
         self._add_dark_text(
             slide,
@@ -235,14 +273,9 @@ class ChromeRenderingMixin:
         rail.fill.solid()
         rail.fill.fore_color.rgb = self._rgb(brand.colors.accent)
         rail.line.color.rgb = rail.fill.fore_color.rgb
-        title_size = 27
-        title_height = 0.72
-        if len(title) > 72:
-            title_size = 23
-            title_height = 0.92
-        if len(title) > 112:
-            title_size = 20
-            title_height = 1.05
+        title_size = self._fit_font_size(title, 8.8, [27, 23, 20], max_lines=2)
+        one_line_chars = max(1, int((8.8 * 72) / (0.52 * title_size)))
+        title_height = 0.72 if len(" ".join(title.split())) <= one_line_chars else 1.04
         self._add_dark_text(
             slide,
             self._truncate_at_word(title, 130),
@@ -287,28 +320,53 @@ class ChromeRenderingMixin:
         slide_number: int,
         total_slides: int,
     ) -> None:
-        sources = outline.content_json.get("sources") or []
-        source_text = "Source: " + "; ".join(sources[:2]) if sources else "Source: [source needed]"
+        source_text = self._footer_source_text(outline)
         self._add_dark_text(
             slide,
             source_text[:180],
-            0.72,
-            6.96,
+            0.78,
+            6.95,
             8.4,
-            0.22,
+            0.24,
             brand,
-            size=7,
-            color=self._tint(brand.colors.primary, 0.58),
+            size=9,
+            color=self._tint(brand.colors.primary, 0.66),
         )
         self._add_dark_text(
             slide,
             f"{slide_number}/{total_slides}",
-            12.0,
-            6.96,
-            0.64,
-            0.22,
+            11.45,
+            6.95,
+            0.88,
+            0.24,
             brand,
-            size=7,
-            color=self._tint(brand.colors.primary, 0.58),
+            size=9,
+            bold=True,
+            color=self._tint(brand.colors.primary, 0.66),
         )
 
+    def _footer_source_text(self, outline: SlideOutline) -> str:
+        sources = (
+            outline.content_json.get("source_labels")
+            or outline.content_json.get("sources")
+            or []
+        )
+        cleaned = [
+            str(source)
+            for source in sources
+            if str(source).strip()
+        ]
+        return "Source: " + "; ".join(cleaned[:2]) if cleaned else "Source: [source needed]"
+
+    def _profile_box(self, brand: BrandDNA, key: str) -> dict[str, float]:
+        box = (brand.layout_profile or {}).get(key)
+        if not isinstance(box, dict):
+            return {}
+        try:
+            return {
+                item: float(box[item])
+                for item in ("x", "y", "w", "h")
+                if item in box
+            }
+        except (TypeError, ValueError):
+            return {}

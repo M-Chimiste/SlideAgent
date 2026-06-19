@@ -88,6 +88,11 @@ class JobOrchestrator:
                 length_strategy=self._length_strategy(job),
             )
             outlines = self.designer.apply_design(outlines)
+            outlines, consulting_warnings = self._run_consulting_qa_repairs(
+                outlines, bundle
+            )
+            if consulting_warnings:
+                warnings = self._merge_warnings(warnings, consulting_warnings)
             await self.store.add_slide_outlines(outlines)
 
             await self.store.update_job(
@@ -119,6 +124,12 @@ class JobOrchestrator:
                     seen_actionable_signatures.add(actionable_signature)
                     qa_round += 1
                     outlines = self._apply_qa_fixes(outlines, qa_result)
+                    outlines, consulting_warnings = self._run_consulting_qa_repairs(
+                        outlines, bundle
+                    )
+                    if consulting_warnings:
+                        warnings = self._merge_warnings(warnings, consulting_warnings)
+                        await self.store.update_job(job.id, warnings_json=warnings)
                     await self._persist_slide_outlines(outlines, qa_result)
                     strict_warnings = self.builder.build_deck(
                         template, outlines, output_path, working_dir
@@ -192,6 +203,31 @@ class JobOrchestrator:
     def _apply_qa_fixes(self, outlines: list[SlideOutline], qa_result) -> list[SlideOutline]:
         return self.designer.revise_deck_for_qa(outlines, qa_result.issues)
 
+    def _run_consulting_qa_repairs(
+        self,
+        outlines: list[SlideOutline],
+        bundle,
+    ) -> tuple[list[SlideOutline], list[dict]]:
+        warnings: list[dict] = []
+        seen_signatures: set[tuple[tuple[int, str, str], ...]] = set()
+        repaired = outlines
+        for round_index in range(max(1, self.settings.qa_max_rounds)):
+            issues = self.planner.consulting_issues_for_outlines(repaired, bundle)
+            signature = self._consulting_issue_signature(issues)
+            if not signature:
+                break
+            warnings.extend(self._consulting_warnings(issues, round_index))
+            if signature in seen_signatures:
+                break
+            seen_signatures.add(signature)
+            repaired = self.planner.repair_outlines_for_consulting(
+                repaired,
+                issues,
+                bundle,
+            )
+            repaired = self.designer.apply_design(repaired)
+        return repaired, warnings
+
     def _has_actionable_qa_issues(self, qa_result) -> bool:
         return bool(self._actionable_qa_signature(qa_result))
 
@@ -210,6 +246,32 @@ class JobOrchestrator:
                 or self.designer.is_actionable_qa_issue(issue)
             )
         )
+
+    def _consulting_issue_signature(
+        self, issues
+    ) -> tuple[tuple[int, str, str], ...]:
+        return tuple(
+            sorted(
+                (
+                    -1 if issue.slide_index is None else issue.slide_index,
+                    issue.category or "",
+                    " ".join(issue.message.lower().split())[:160],
+                )
+                for issue in issues
+                if issue.severity in {"CRITICAL", "WARNING"}
+            )
+        )
+
+    def _consulting_warnings(self, issues, round_index: int) -> list[dict]:
+        return [
+            {
+                "slide_index": issue.slide_index,
+                "field": "consulting_qa",
+                "message": f"Round {round_index}: {issue.message}",
+            }
+            for issue in issues
+            if issue.severity in {"CRITICAL", "WARNING"}
+        ]
 
     async def _persist_slide_outlines(
         self, outlines: list[SlideOutline], qa_result

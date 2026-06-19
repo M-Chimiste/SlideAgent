@@ -45,6 +45,7 @@ class SlideSpecPlanningMixin:
                 metrics=metrics,
                 source_label=source_label,
                 blueprint=blueprint,
+                bundle=bundle,
             )
             slides.append(slide)
         return DeckSpec(
@@ -65,6 +66,9 @@ class SlideSpecPlanningMixin:
         fallback = sections[min(max(index - 1, 0), len(sections) - 1)]
         source_refs = blueprint.source_coverage_map.get(str(index + 1), [])
         for source_ref in source_refs:
+            for section in sections:
+                if getattr(section, "source_id", "") == str(source_ref):
+                    return section
             title = str(source_ref).split(":", 1)[-1]
             normalized_title = self._clean_section_title(title).casefold()
             if not normalized_title:
@@ -85,20 +89,29 @@ class SlideSpecPlanningMixin:
         metrics: list[dict[str, Any]],
         source_label: str,
         blueprint: DeckBlueprint,
+        bundle: DocumentBundle | None = None,
     ) -> GeneratedSlideSpec:
-        exhibit_spec = self._exhibit_for_archetype(archetype, section, sections, metrics)
+        exhibit_spec = self._exhibit_for_archetype(
+            archetype,
+            section,
+            sections,
+            metrics,
+            bundle.tables if bundle else None,
+            bundle.metrics if bundle else None,
+        )
         content_blocks = self._content_blocks_from_exhibit(archetype, exhibit_spec, section)
         action_title = self._fallback_action_title(archetype, title, section)
         source_refs = blueprint.source_coverage_map.get(str(index + 1), [source_label])
+        chart_spec = self.exhibit_compiler.chart_spec(exhibit_spec)
+        if chart_spec is None and archetype == "metric_chart" and metrics:
+            chart_spec = {"type": "bar", "metrics": metrics[:5]}
         return GeneratedSlideSpec(
             slide_number=index + 1,
             slide_type=self._slide_type_for_archetype(archetype),
             action_title=action_title,
             subheading=self._subheading_for_archetype(archetype, section),
             content_blocks=content_blocks,
-            chart_spec={"type": "bar", "metrics": metrics[:5]}
-            if archetype == "metric_chart" and metrics
-            else None,
+            chart_spec=chart_spec,
             sources=[source_label],
             speaker_notes=self._beat_message(archetype, title),
             archetype=archetype,
@@ -119,12 +132,14 @@ class SlideSpecPlanningMixin:
         section: DocumentSection,
         sections: list[DocumentSection],
         metrics: list[dict[str, Any]],
+        tables: list[Any] | None = None,
+        source_metrics: list[DocumentMetric] | None = None,
     ) -> dict[str, Any]:
         bullets = self._section_phrases(section, 4)
         if archetype == "cover":
             return {
                 "type": "cover",
-                "thesis": self._phrase(section.content, "A managed operating model improves AI work."),
+                "thesis": self._phrase(section.content, "A clear operating model improves execution quality."),
                 "signals": [self._clean_section_title(item.title) for item in sections[:3]],
             }
         if archetype == "executive_summary":
@@ -134,7 +149,9 @@ class SlideSpecPlanningMixin:
                     {"label": "Situation", "text": bullets[0]},
                     {
                         "label": "Complication",
-                        "text": bullets[1] if len(bullets) > 1 else "AI speed exposes review gaps.",
+                        "text": bullets[1]
+                        if len(bullets) > 1
+                        else "The current approach exposes execution gaps.",
                     },
                     {
                         "label": "Resolution",
@@ -197,6 +214,16 @@ class SlideSpecPlanningMixin:
                 "reset_label": "Update the shared record before the next task.",
             }
         if archetype == "comparison_table":
+            if tables or source_metrics:
+                compiled = self.exhibit_compiler.compile(
+                    archetype,
+                    "evidence",
+                    section,
+                    tables or [],
+                    source_metrics or [],
+                )
+                if compiled.get("type") == "comparison_table":
+                    return compiled
             return {
                 "type": "comparison_table",
                 "columns": ["Dimension", "Current model", "Target model"],
@@ -238,8 +265,26 @@ class SlideSpecPlanningMixin:
                 "quote": "Make the standard explicit before asking the team to move faster.",
             }
         if archetype == "table_reference":
+            if tables:
+                compiled = self.exhibit_compiler.compile(
+                    archetype,
+                    "reference",
+                    section,
+                    tables,
+                    source_metrics or [],
+                )
+                if compiled.get("type") == "reference_table":
+                    return compiled
             return self._reference_spec_for_section(section, bullets)
         if archetype == "metric_chart":
+            if source_metrics:
+                return self.exhibit_compiler.compile(
+                    archetype,
+                    "evidence",
+                    section,
+                    tables or [],
+                    source_metrics,
+                )
             return {"type": "metric_chart", "metrics": metrics[:5]}
         if archetype == "closing_recommendation":
             return {
@@ -505,7 +550,7 @@ class SlideSpecPlanningMixin:
 
     def _subheading_for_archetype(self, archetype: str, section: DocumentSection) -> str:
         if archetype == "cover":
-            return "A practical operating model for reliable AI-assisted software work"
+            return "A practical operating model for a source-backed executive decision"
         if archetype == "section_divider":
             return "The second half of the story turns diagnosis into repeatable execution."
         return f"Evidence from {section.title}"
@@ -537,16 +582,29 @@ class SlideSpecPlanningMixin:
         ]
         if not phrases:
             phrases = [self._phrase(section.content or section.title, section.title)]
-        while len(phrases) < count:
-            phrases.append(
-                [
-                    "Preserve context before work begins.",
-                    "Make review criteria explicit before execution.",
-                    "Keep decisions traceable across handoffs.",
-                    "Turn lessons into durable operating rules.",
-                ][len(phrases) % 4]
-            )
+        if len(phrases) < count:
+            for filler in self._filler_phrases(section, count - len(phrases)):
+                if filler not in phrases:
+                    phrases.append(filler)
+                if len(phrases) >= count:
+                    break
         return phrases[:count]
+
+    def _filler_phrases(self, section: DocumentSection, needed: int) -> list[str]:
+        # Draw deterministic filler from a wider pool, offset by the section so two
+        # thin slides do not surface the identical bullets side by side.
+        pool = (
+            "Preserve context before work begins.",
+            "Make review criteria explicit before execution.",
+            "Keep decisions traceable across handoffs.",
+            "Turn lessons into durable operating rules.",
+            "Assign one clear owner for each step of the workflow.",
+            "Validate every output against the original intent.",
+            "Capture assumptions so they can be revisited later.",
+            "Close the loop with a short, honest retrospective.",
+        )
+        seed = sum(ord(char) for char in (section.title or "section")) % len(pool)
+        return [pool[(seed + index) % len(pool)] for index in range(needed)]
 
     def _phrase(self, text: str, fallback: str, limit: int = 105) -> str:
         cleaned = self._clean_generated_visual_placeholder(text or fallback)
@@ -1131,4 +1189,3 @@ class SlideSpecPlanningMixin:
         if len(words) >= 2:
             return " ".join(words[:3])
         return self._short_label(text)
-

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -32,6 +32,7 @@ class BrandDNA(BaseModel):
     fonts: BrandFonts = Field(default_factory=BrandFonts)
     logo: Optional[BrandLogo] = None
     design_notes: Optional[str] = None
+    layout_profile: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod

@@ -140,12 +140,15 @@ class ImmersiveLayoutRenderingMixin:
         ][:4] or self._bullets(outline)[:4]
         if not bullets:
             bullets = ["Shift the operating model from ad hoc execution to managed discipline."]
-        quote = (
-            exhibit.get("quote")
-            or exhibit.get("key_idea")
-            or outline.content_json.get("summary")
-            or outline.content_json.get("subheading")
-            or bullets[0]
+        quote = self._first_content_text(
+            [
+                exhibit.get("quote"),
+                exhibit.get("key_idea"),
+                outline.content_json.get("summary"),
+                outline.content_json.get("subheading"),
+                bullets[0],
+            ],
+            fallback=bullets[0],
         )
         callout = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
@@ -423,5 +426,14 @@ class ImmersiveLayoutRenderingMixin:
         number.fill.fore_color.rgb = self._rgb(brand.colors.accent)
         number.line.color.rgb = self._rgb(brand.colors.accent)
         self._add_text_in_shape(number, f"{slide_number:02d}", brand, size=15, bold=True, color=brand.colors.text_light, center=True)
-        self._add_dark_text(slide, "Source: " + "; ".join((outline.content_json.get("sources") or ["Uploaded source"])[:1]), 0.8, 6.92, 6.0, 0.25, brand, size=8, color=self._tint(brand.colors.primary, 0.72))
-
+        self._add_dark_text(
+            slide,
+            self._footer_source_text(outline),
+            0.8,
+            6.92,
+            6.0,
+            0.25,
+            brand,
+            size=8,
+            color=self._tint(brand.colors.primary, 0.72),
+        )

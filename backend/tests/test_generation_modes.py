@@ -123,6 +123,12 @@ def test_planner_repairs_dangling_sentence_fragments() -> None:
 
     assert cleaned == "The following architecture is adapted from the Cline Memory Bank methodology"
     assert not cleaned.endswith("as a")
+    assert planner._truncate_title(
+        "The Memory Bank architecture provides the AI with everything needed to work effectively without prior"
+    ).endswith("without") is False
+    assert planner._truncate_title(
+        "The Memory Bank consists of six core files arranged in a dependency hierarchy for optimal"
+    ).endswith("optimal") is False
 
 
 def test_openai_compatible_client_sends_reasoning_effort(monkeypatch) -> None:
@@ -1938,7 +1944,7 @@ def test_planner_normalizes_invented_source_labels() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].content_json["sources"] == ["Uploaded source"]
+    assert outlines[0].content_json["sources"] == ["[source needed]"]
     assert any(warning["field"] == "source_label" for warning in warnings)
     assert "McKinsey" in warnings[0]["message"]
 
@@ -2060,7 +2066,7 @@ def test_planner_prompt_includes_allowed_numeric_tokens() -> None:
 
     assert "Allowed numeric tokens" in llm.prompt
     assert "42%" in llm.prompt
-    assert "Sources may only be Uploaded source or [source needed]" in llm.prompt
+    assert "Use source_refs for exact source packet ids" in llm.prompt
     assert "Do not invent document names" in llm.prompt
 
 

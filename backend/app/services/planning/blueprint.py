@@ -32,7 +32,7 @@ class BlueprintPlanningMixin:
             quality_profile=quality_profile,
             length_strategy=length_strategy,
         )
-        archetype_sequence = self._archetype_sequence(target_slide_count)
+        archetype_sequence = self._archetype_sequence(target_slide_count, bundle)
         if not bundle.metrics:
             archetype_sequence = [
                 "table_reference" if archetype == "metric_chart" else archetype
@@ -115,39 +115,59 @@ class BlueprintPlanningMixin:
             return max(1, requested)
         return min(target, 16)
 
-    def _archetype_sequence(self, target_slide_count: int) -> list[str]:
-        source = [
-            "cover",
-            "executive_summary",
-            "anti_patterns",
-            "dependency_map",
-            "framework_cycle",
-            "section_divider",
-            "comparison_table",
-            "code_panel",
-            "checklist",
-            "quote_sidebar",
-            "table_reference",
-            "metric_chart",
-            "code_panel",
-            "comparison_table",
-            "reference",
-            "quote_sidebar",
-            "code_panel",
-        ]
-        if target_slide_count <= 8:
-            compact = [
-                "cover",
-                "executive_summary",
-                "anti_patterns",
-                "dependency_map",
-                "framework_cycle",
+    def _archetype_sequence(
+        self, target_slide_count: int, bundle: DocumentBundle | None = None
+    ) -> list[str]:
+        has_source = bool(
+            bundle
+            and (
+                bundle.sections
+                or bundle.tables
+                or bundle.metrics
+                or bundle.content_inventory
+            )
+        )
+        has_tables = bool(bundle and bundle.tables)
+        has_metrics = bool(bundle and bundle.metrics)
+        has_inventory = bool(bundle and bundle.content_inventory)
+        sequence = ["cover", "executive_summary"]
+        if not has_source:
+            candidates = [
+                "comparison_table",
                 "checklist",
                 "quote_sidebar",
+                "table_reference",
                 "closing_recommendation",
             ]
-            return compact[:target_slide_count]
-        return source[: max(target_slide_count - 1, 1)] + ["closing_recommendation"]
+        else:
+            candidates = ["anti_patterns"]
+            if has_tables:
+                candidates.extend(["comparison_table", "table_reference"])
+            elif has_inventory:
+                candidates.extend(["table_reference", "reference"])
+            candidates.extend(["dependency_map", "framework_cycle"])
+            if has_metrics:
+                candidates.append("metric_chart")
+            candidates.extend(
+                [
+                    "checklist",
+                    "quote_sidebar",
+                    "code_panel",
+                    "comparison_table" if not has_tables else "reference",
+                    "table_reference",
+                    "dependency_map",
+                    "framework_cycle",
+                ]
+            )
+        for archetype in candidates:
+            if len(sequence) >= max(target_slide_count - 1, 1):
+                break
+            sequence.append(archetype)
+        while len(sequence) < max(target_slide_count - 1, 1):
+            sequence.append(["comparison_table", "checklist", "table_reference"][len(sequence) % 3])
+        if target_slide_count == 1:
+            return ["cover"]
+        return sequence[: target_slide_count - 1] + ["closing_recommendation"]
 
     def _narrative_roles_for_sequence(self, archetypes: list[str]) -> list[str]:
         role_map = {
@@ -184,6 +204,8 @@ class BlueprintPlanningMixin:
         return source_map
 
     def _source_ref(self, section: DocumentSection, index: int) -> str:
+        if getattr(section, "source_id", ""):
+            return section.source_id
         title = self._clean_section_title(section.title) or f"Section {index + 1}"
         source = section.source_doc_id or "source"
         return f"{source}:{title}"
@@ -192,12 +214,12 @@ class BlueprintPlanningMixin:
         messages = {
             "cover": f"Introduce {title} as a leadership decision.",
             "executive_summary": "Summarize the thesis, risks, and recommendation.",
-            "anti_patterns": "Show the failure modes that make ad hoc work fragile.",
-            "dependency_map": "Map the context dependencies that determine reliability.",
+            "anti_patterns": "Show the failure modes that put the decision at risk.",
+            "dependency_map": "Map the dependencies that determine the outcome.",
             "framework_cycle": "Give leaders an operating cycle they can manage.",
             "section_divider": "Reset attention before the implementation half of the story.",
-            "comparison_table": "Contrast the old behavior with the target operating model.",
-            "code_panel": "Translate principles into durable rules and reference artifacts.",
+            "comparison_table": "Contrast the current state with the target state.",
+            "code_panel": "Translate the recommendation into reusable operating rules.",
             "checklist": "Make the next steps executable.",
             "quote_sidebar": "Name the mental model shift for the audience.",
             "table_reference": "Provide a compact reference leaders can reuse.",
@@ -212,4 +234,3 @@ class BlueprintPlanningMixin:
         if bundle.sections:
             return self._summarize(bundle.sections[0].content)
         return instructions or "Leaders should move from broad intent to a specific operating decision."
-

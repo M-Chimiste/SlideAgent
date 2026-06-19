@@ -205,7 +205,7 @@ class ConceptDiagramRenderer:
             36,
         )
         middle_nodes = [
-            self._fit_label(self._clean_label(str(item)), 54)
+            self._dependency_node_label(str(item))
             for item in spec.get("middle_nodes", [])
             if self._clean_label(str(item))
         ][:4]
@@ -232,6 +232,16 @@ class ConceptDiagramRenderer:
                     )
                 )
         return "\n".join(parts)
+
+    def _dependency_node_label(self, text: str) -> str:
+        fitted = self._fit_label(self._clean_label(text), 42)
+        words = fitted.split()
+        if len(words) > 5:
+            fitted = " ".join(words[:5])
+        trailing = {"a", "an", "and", "as", "for", "from", "in", "of", "the", "to", "when", "where", "why", "with"}
+        while fitted.split() and fitted.split()[-1].lower() in trailing:
+            fitted = " ".join(fitted.split()[:-1]).strip(" ,;:.")
+        return fitted or self._fit_label(text, 30)
 
     def _cycle_svg(self, spec: dict[str, Any], brand: BrandDNA, dark: bool) -> str:
         steps = [
@@ -397,7 +407,27 @@ class ConceptDiagramRenderer:
             first_clause = cleaned.split(delimiter, 1)[0].strip(" ,;:.")
             if max(12, int(limit * 0.35)) <= len(first_clause) <= limit:
                 return first_clause
-        return cleaned[:limit].rsplit(" ", 1)[0].strip(" ,;:.") or cleaned[:limit]
+        fitted = cleaned[:limit].rsplit(" ", 1)[0].strip(" ,;:.") or cleaned[:limit]
+        stop_words = {
+            "a",
+            "an",
+            "and",
+            "as",
+            "at",
+            "by",
+            "for",
+            "from",
+            "in",
+            "of",
+            "or",
+            "that",
+            "the",
+            "to",
+            "with",
+        }
+        while fitted.split() and fitted.split()[-1].lower() in stop_words:
+            fitted = " ".join(fitted.split()[:-1]).strip(" ,;:.")
+        return fitted or cleaned[:limit]
 
     def _wrap(self, text: str, max_chars: int, max_lines: int) -> list[str]:
         words = self._fit_label(text, max_chars * max_lines).split()

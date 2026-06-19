@@ -18,6 +18,73 @@ from app.services.pptx_rendering.constants import ICON_SCALE, SLIDE_H, SLIDE_W
 
 
 class ExhibitLayoutRenderingMixin:
+    def _add_matrix_2x2(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
+        exhibit = self._exhibit(outline)
+        quadrants = exhibit.get("quadrants") if exhibit.get("type") == "matrix_2x2" else []
+        if not isinstance(quadrants, list) or len(quadrants) < 4:
+            bullets = self._bullets(outline)[:4]
+            quadrants = [
+                {"label": label, "description": bullets[idx] if idx < len(bullets) else label}
+                for idx, label in enumerate(
+                    [
+                        "High impact / high readiness",
+                        "High impact / low readiness",
+                        "Low impact / high readiness",
+                        "Low impact / low readiness",
+                    ]
+                )
+            ]
+        x0, y0, w, h = 0.92, 1.58, 10.95, 4.55
+        x_mid, y_mid = x0 + w / 2, y0 + h / 2
+        fills = [
+            self._tint(brand.colors.accent, 0.82),
+            "FFFFFF",
+            "FFFFFF",
+            self._tint(brand.colors.secondary, 0.86),
+        ]
+        positions = [
+            (x0, y0, w / 2, h / 2),
+            (x_mid, y0, w / 2, h / 2),
+            (x0, y_mid, w / 2, h / 2),
+            (x_mid, y_mid, w / 2, h / 2),
+        ]
+        for idx, item in enumerate(quadrants[:4]):
+            x, y, qw, qh = positions[idx]
+            rect = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(x),
+                Inches(y),
+                Inches(qw),
+                Inches(qh),
+            )
+            rect.fill.solid()
+            rect.fill.fore_color.rgb = self._rgb(fills[idx])
+            rect.line.color.rgb = self._rgb(brand.colors.background_light)
+            label = str(item.get("label") if isinstance(item, dict) else item)
+            description = str(item.get("description", "") if isinstance(item, dict) else "")
+            self._add_body_text(
+                slide,
+                self._truncate_at_word(label, 46),
+                x + 0.28,
+                y + 0.32,
+                qw - 0.55,
+                0.32,
+                brand,
+                size=12,
+            )
+            self._add_body_text(
+                slide,
+                self._truncate_at_word(description, 96),
+                x + 0.28,
+                y + 0.86,
+                qw - 0.55,
+                0.78,
+                brand,
+                size=10,
+            )
+        self._add_label(slide, str(exhibit.get("y_axis") or "Impact"), 0.88, 1.26, 1.4, brand, bold=True)
+        self._add_label(slide, str(exhibit.get("x_axis") or "Readiness"), 5.25, 6.28, 1.8, brand, bold=True)
+
     def _add_table_or_process(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         rows = self._table_rows(outline)
         x, y, w = 0.85, 1.55, 11.75
@@ -48,12 +115,15 @@ class ExhibitLayoutRenderingMixin:
         ][:4] or self._bullets(outline)[:4]
         if not bullets:
             bullets = ["Shift the operating model from ad hoc execution to managed discipline."]
-        quote = (
-            exhibit.get("quote")
-            or exhibit.get("key_idea")
-            or outline.content_json.get("summary")
-            or outline.content_json.get("subheading")
-            or bullets[0]
+        quote = self._first_content_text(
+            [
+                exhibit.get("quote"),
+                exhibit.get("key_idea"),
+                outline.content_json.get("summary"),
+                outline.content_json.get("subheading"),
+                bullets[0],
+            ],
+            fallback=bullets[0],
         )
         panel = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(8.4), Inches(1.48), Inches(3.75), Inches(4.85))
         panel.fill.solid()
@@ -346,18 +416,18 @@ class ExhibitLayoutRenderingMixin:
                 brand,
                 size=11,
             )
-        key_rule = bullets[0]
+        key_rule = self._supporting_rule_text(outline, bullets)
         self._add_card(slide, 0.88, 5.12, 5.68, 0.74, self._tint(brand.colors.accent, 0.86), self._tint(brand.colors.accent, 0.7))
-        self._add_body_text(slide, "OPERATING RULE", 1.16, 5.28, 1.65, 0.24, brand, size=8)
+        self._add_body_text(slide, "OPERATING TEST", 1.16, 5.22, 1.65, 0.2, brand, size=8)
         self._add_body_text(
             slide,
-            self._truncate_at_word(key_rule, 92),
-            2.82,
-            5.24,
-            3.32,
-            0.3,
+            self._truncate_at_word(key_rule, 88),
+            1.16,
+            5.42,
+            5.0,
+            0.24,
             brand,
-            size=10,
+            size=8,
         )
 
         panel = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(7.02), Inches(1.5), Inches(5.18), Inches(4.18))
@@ -414,6 +484,44 @@ class ExhibitLayoutRenderingMixin:
             chip.line.color.rgb = self._rgb(self._tint("111827", 0.22))
             self._add_dark_text(slide, label, x + 0.12, 4.97, 1.02, 0.14, brand, size=6, color=brand.colors.accent)
             self._add_dark_text(slide, value, x + 0.12, 5.13, 1.16, 0.16, brand, size=7, color=self._tint("111827", 0.78))
+
+    def _supporting_rule_text(
+        self,
+        outline: SlideOutline,
+        bullets: list[str],
+    ) -> str:
+        if len(bullets) > 3:
+            return bullets[3]
+        if len(bullets) > 1:
+            return bullets[-1]
+        title = str(
+            outline.content_json.get("action_title")
+            or outline.content_json.get("title")
+            or outline.label
+        )
+        return f"Test every rule against the slide decision: {title}"
+
+    def _first_content_text(self, values: list, fallback: str) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text and not self._looks_like_meta_instruction(text):
+                return text
+        return fallback
+
+    def _looks_like_meta_instruction(self, text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        return any(
+            marker in normalized
+            for marker in (
+                "quote sidebar",
+                "layout instruction",
+                "diagram description",
+                "placeholder",
+                "visually tied",
+                "source-grounded evidence",
+                "highlighting",
+            )
+        )
 
     def _complete_operating_rules(
         self,
@@ -578,4 +686,3 @@ class ExhibitLayoutRenderingMixin:
                 self._icon_fill(brand, idx),
             )
             self._add_body_text(slide, text, 2.24, y + 0.25, 9.55, 0.48, brand, size=14)
-

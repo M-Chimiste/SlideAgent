@@ -34,6 +34,7 @@ class DocumentIngester:
         tables: list[DocumentTable] = []
         metrics: list[DocumentMetric] = []
         inventory: list[str] = []
+        source_index: dict[str, dict[str, str]] = {}
         metadata = DocumentMetadata()
 
         for file_path in file_paths:
@@ -50,9 +51,16 @@ class DocumentIngester:
             )
             records.append(record)
             parsed_sections = self._parse_sections(record_id, markdown)
+            self._assign_section_source_ids(
+                parsed_sections, record, source_index
+            )
             sections.extend(parsed_sections)
-            tables.extend(self._parse_tables(record_id, markdown))
-            metrics.extend(self._parse_metrics(record_id, markdown))
+            parsed_tables = self._parse_tables(record_id, markdown)
+            self._assign_table_source_ids(parsed_tables, record, source_index)
+            tables.extend(parsed_tables)
+            parsed_metrics = self._parse_metrics(record_id, markdown)
+            self._assign_metric_source_ids(parsed_metrics, record, source_index)
+            metrics.extend(parsed_metrics)
             inventory.extend(self._extract_inventory(markdown))
             if not metadata.title:
                 metadata.title = file_path.stem
@@ -64,8 +72,70 @@ class DocumentIngester:
             metrics=metrics,
             metadata=metadata,
             content_inventory=inventory,
+            source_index=source_index,
         )
         return records, bundle
+
+    def _assign_section_source_ids(
+        self,
+        sections: list[DocumentSection],
+        record: DocumentRecord,
+        source_index: dict[str, dict[str, str]],
+    ) -> None:
+        for index, section in enumerate(sections, start=1):
+            title = self._clean_source_title(section.title) or f"Section {index}"
+            source_id = f"{record.id}:section:{index}:{self._slug(title)}"
+            section.source_id = source_id
+            source_index[source_id] = {
+                "kind": "section",
+                "source_doc_id": record.id,
+                "filename": record.filename,
+                "title": title,
+                "label": f"{Path(record.filename).stem} > {title}",
+            }
+
+    def _assign_table_source_ids(
+        self,
+        tables: list[DocumentTable],
+        record: DocumentRecord,
+        source_index: dict[str, dict[str, str]],
+    ) -> None:
+        for index, table in enumerate(tables, start=1):
+            title = self._clean_source_title(table.title or "") or f"Table {index}"
+            source_id = f"{record.id}:table:{index}:{self._slug(title)}"
+            table.source_id = source_id
+            source_index[source_id] = {
+                "kind": "table",
+                "source_doc_id": record.id,
+                "filename": record.filename,
+                "title": title,
+                "label": f"{Path(record.filename).stem} > {title}",
+            }
+
+    def _assign_metric_source_ids(
+        self,
+        metrics: list[DocumentMetric],
+        record: DocumentRecord,
+        source_index: dict[str, dict[str, str]],
+    ) -> None:
+        for index, metric in enumerate(metrics, start=1):
+            title = self._clean_source_title(metric.label) or f"Metric {index}"
+            source_id = f"{record.id}:metric:{index}:{self._slug(title)}"
+            metric.source_id = source_id
+            source_index[source_id] = {
+                "kind": "metric",
+                "source_doc_id": record.id,
+                "filename": record.filename,
+                "title": title,
+                "label": f"{Path(record.filename).stem} > {title}",
+            }
+
+    def _clean_source_title(self, title: str) -> str:
+        return " ".join(str(title or "").split()).strip(" #|")
+
+    def _slug(self, text: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+        return cleaned[:48] or "source"
 
     def _convert_to_markdown(self, file_path: Path) -> str:
         try:

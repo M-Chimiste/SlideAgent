@@ -11,6 +11,7 @@ from app.infra.sqlite_store import SQLiteStore
 from app.models.brand import BrandDNA
 from app.models.document import DocumentBundle, DocumentMetadata, DocumentSection
 from app.models.job import FREEFORM_TEMPLATE_ID, JobRecord
+from app.models.outline import SlideOutline
 from app.models.qa import QAIssue, QAResult
 from app.models.template import SlideField, SlideSchema, SlideSpec, TemplateProfile
 from app.services.content_planner import ContentPlanner
@@ -76,6 +77,58 @@ class WarningThenCleanQAAgent:
 
     def export_pdf(self, output_path, working_dir):
         return None
+
+
+class CleanQAAgent:
+    def inspect_deck(self, output_path, output_dir, outlines):
+        return QAResult(passed=True, issues=[]), []
+
+    def export_pdf(self, output_path, working_dir):
+        return None
+
+
+class DuplicateOutlinePlanner(ContentPlanner):
+    def plan(
+        self,
+        template: TemplateProfile,
+        bundle: DocumentBundle,
+        instructions: str = "",
+        generation_mode: str | None = None,
+        quality_profile: str = "balanced",
+        length_strategy: str = "auto",
+    ):
+        created_at = "2026-01-01T00:00:00Z"
+        outlines = []
+        for index in range(2):
+            outlines.append(
+                SlideOutline(
+                    id=f"weak-outline-{index}",
+                    job_id=bundle.job_id,
+                    slide_index=index,
+                    mode="flexible",
+                    label="Overview",
+                    content_json={
+                        "action_title": "Overview",
+                        "title": "Overview",
+                        "narrative_role": "evidence",
+                        "archetype": "comparison_table",
+                        "bullets": ["Preserve context before work begins"],
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Preserve context before work begins"],
+                            }
+                        ],
+                        "sources": ["Uploaded source"],
+                    },
+                    layout_json={
+                        "layout": "comparison_table",
+                        "archetype": "comparison_table",
+                    },
+                    created_at=created_at,
+                )
+            )
+        return outlines, []
 
 
 def _timestamp() -> str:
@@ -209,6 +262,42 @@ async def test_orchestrator_repairs_actionable_warning_and_persists_outline(
     assert outlines[0].layout_json["qa_repair"]["applied"] is True
     assert (storage.job_dir("repair-job") / "qa" / "round-0.json").exists()
     assert (storage.job_dir("repair-job") / "qa" / "round-1.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_repairs_consulting_issues_before_build(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("consulting-repair-job", FREEFORM_TEMPLATE_ID, "freeform"))
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=DuplicateOutlinePlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object()),
+        qa_agent=CleanQAAgent(),
+    )
+
+    await orchestrator.run_job("consulting-repair-job")
+
+    job = await store.get_job("consulting-repair-job")
+    outlines = await store.list_slide_outlines("consulting-repair-job")
+
+    assert job is not None
+    assert job.status == "done"
+    assert job.result_file
+    assert Path(job.result_file).exists()
+    assert len({outline.label for outline in outlines}) == len(outlines)
+    assert all(outline.label != "Overview" for outline in outlines)
+    assert all(outline.content_json.get("source_refs") for outline in outlines)
+    assert all(outline.content_json.get("exhibit_spec") for outline in outlines)
+    assert any(warning["field"] == "consulting_qa" for warning in job.warnings)
 
 
 @pytest.mark.asyncio

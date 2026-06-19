@@ -8,6 +8,7 @@ class DocumentSection(BaseModel):
     level: int
     content: str
     source_doc_id: str
+    source_id: str = ""
 
 
 class DocumentTable(BaseModel):
@@ -15,6 +16,7 @@ class DocumentTable(BaseModel):
     headers: List[str]
     rows: List[List[str]]
     source_doc_id: str
+    source_id: str = ""
 
 
 class DocumentMetric(BaseModel):
@@ -22,6 +24,7 @@ class DocumentMetric(BaseModel):
     value: float
     unit: Optional[str] = None
     source_doc_id: str
+    source_id: str = ""
 
 
 class DocumentMetadata(BaseModel):
@@ -48,3 +51,4 @@ class DocumentBundle(BaseModel):
     metrics: List[DocumentMetric]
     metadata: DocumentMetadata
     content_inventory: List[str] = Field(default_factory=list)
+    source_index: dict[str, dict[str, str]] = Field(default_factory=dict)
