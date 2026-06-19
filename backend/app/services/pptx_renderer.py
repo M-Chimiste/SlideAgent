@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Inches
 
 from app.models.brand import BrandDNA
@@ -88,6 +89,7 @@ class DeterministicPptxRenderer(
             )
             self._add_logo(slide, brand)
             return
+        self._add_profile_background(slide, brand)
         self._add_header(slide, title, subheading, brand, outline, slide_number)
         self._add_logo(slide, brand)
         self._add_footer(slide, outline, brand, slide_number, total_slides)
@@ -98,6 +100,8 @@ class DeterministicPptxRenderer(
             self._add_metric_chart(slide, outline, brand)
         elif layout == "comparison_table":
             self._add_comparison_table(slide, outline, brand)
+        elif layout == "matrix_2x2":
+            self._add_matrix_2x2(slide, outline, brand)
         elif layout == "callouts":
             self._add_callouts(slide, outline, brand)
         elif layout == "process":
@@ -124,3 +128,23 @@ class DeterministicPptxRenderer(
             self._add_icon_rows(slide, outline, brand)
         else:
             self._add_two_column(slide, outline, brand)
+
+    def _add_profile_background(self, slide, brand: BrandDNA) -> None:
+        fill = (brand.layout_profile or {}).get("dominant_fill")
+        if not fill or str(fill).upper() in {"FFFFFF", "FFF"}:
+            return
+        try:
+            if self._relative_luminance(str(fill)) < 0.72:
+                return
+        except Exception:
+            return
+        background = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(0),
+            Inches(0),
+            Inches(SLIDE_W),
+            Inches(SLIDE_H),
+        )
+        background.fill.solid()
+        background.fill.fore_color.rgb = self._rgb(str(fill))
+        background.line.color.rgb = background.fill.fore_color.rgb

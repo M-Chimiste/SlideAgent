@@ -74,14 +74,23 @@ class AssetRenderingMixin:
         logo_path = Path(brand.logo.path)
         if not logo_path.exists():
             return
-        x = SLIDE_W - 0.6 - brand.logo.size_w
-        y = 0.3
+        logo_box = (brand.layout_profile or {}).get("logo_box")
+        if isinstance(logo_box, dict) and {"x", "y"}.issubset(logo_box):
+            x = float(logo_box.get("x", SLIDE_W - 0.6 - brand.logo.size_w))
+            y = float(logo_box.get("y", 0.3))
+            width = float(logo_box.get("w", brand.logo.size_w))
+            height = float(logo_box.get("h", brand.logo.size_h))
+        else:
+            x = SLIDE_W - 0.6 - brand.logo.size_w
+            y = 0.3
+            width = brand.logo.size_w
+            height = brand.logo.size_h
         slide.shapes.add_picture(
             logo_path.as_posix(),
             Inches(x),
             Inches(y),
-            width=Inches(brand.logo.size_w),
-            height=Inches(brand.logo.size_h),
+            width=Inches(width),
+            height=Inches(height),
         )
 
     def _add_icon(
@@ -286,4 +295,3 @@ class AssetRenderingMixin:
         self._line(draw, [(64, 12), (64, 4)], color, max(5, width - 2))
         self._line(draw, [(32, 28), (24, 20)], color, max(5, width - 2))
         self._line(draw, [(96, 28), (104, 20)], color, max(5, width - 2))
-

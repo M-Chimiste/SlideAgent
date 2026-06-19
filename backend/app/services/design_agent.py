@@ -64,6 +64,7 @@ class DesignAgent:
             "code_panel",
             "anti_patterns",
             "table_reference",
+            "matrix_2x2",
             "closing_recommendation",
             "icon_rows",
             "process",
@@ -277,6 +278,9 @@ class DesignAgent:
             "reference_table": "table_reference",
             "recommendation": "closing_recommendation",
             "metric_chart": "chart",
+            "line_chart": "chart",
+            "matrix_2x2": "matrix_2x2",
+            "2x2": "matrix_2x2",
         }
         return mapping.get(exhibit_type)
 
@@ -616,6 +620,10 @@ class DesignAgent:
     def _normalize_layout(self, layout: str, outline: SlideOutline) -> str:
         if layout == "chart" and not outline.content_json.get("metrics"):
             return "callouts"
+        if layout == "matrix_2x2":
+            exhibit = outline.content_json.get("exhibit_spec")
+            if not isinstance(exhibit, dict) or exhibit.get("type") != "matrix_2x2":
+                return "comparison_table"
         if layout not in self.layout_fallbacks:
             return "icon_rows"
         return layout
@@ -649,6 +657,8 @@ class DesignAgent:
             return ["structured_text"]
         if layout == "table_reference":
             return ["tables", "reference"]
+        if layout == "matrix_2x2":
+            return ["matrix", "quadrants"]
         if layout == "closing_recommendation":
             return ["recommendation", "checklist"]
         return ["icons", "shapes"]

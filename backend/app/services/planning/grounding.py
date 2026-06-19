@@ -27,6 +27,41 @@ class SourceGroundingMixin:
         warnings: list[dict[str, Any]] = []
         for slide in deck.slides:
             original_sources = list(slide.sources)
+            had_missing_sources = not any(
+                str(source).strip() for source in original_sources
+            )
+            has_invented_source_label = any(
+                str(source).strip()
+                and not self._canonical_source_label(
+                    str(source).strip(), has_source_material
+                )
+                for source in original_sources
+            )
+            valid_source_refs = [
+                str(ref).strip()
+                for ref in slide.source_refs
+                if self._source_ref_is_valid(str(ref).strip(), bundle)
+            ]
+            invalid_source_refs = [
+                str(ref).strip()
+                for ref in slide.source_refs
+                if str(ref).strip()
+                and not self._source_ref_is_valid(str(ref).strip(), bundle)
+                and str(ref).strip() not in {UPLOADED_SOURCE_LABEL, SOURCE_NEEDED_LABEL}
+            ]
+            if valid_source_refs:
+                slide.source_refs = self._dedupe_preserving_order(valid_source_refs)
+            elif (
+                not slide.source_refs
+                and has_source_material
+                and not has_invented_source_label
+            ):
+                slide.source_refs = self._fallback_source_refs_for_slide(slide, bundle)
+            elif not slide.source_refs and has_invented_source_label:
+                slide.source_refs = [SOURCE_NEEDED_LABEL]
+            elif not has_source_material:
+                slide.source_refs = [SOURCE_NEEDED_LABEL]
+
             normalized: list[str] = []
             invalid_sources: list[str] = []
             for source in original_sources:
@@ -37,20 +72,31 @@ class SourceGroundingMixin:
                 elif label:
                     invalid_sources.append(label)
 
-            if invalid_sources and fallback_label not in normalized:
-                normalized.append(fallback_label)
+            resolved_labels = self._source_labels_for_refs(slide.source_refs, bundle)
+            if resolved_labels:
+                normalized = [
+                    label
+                    for label in normalized
+                    if label not in {UPLOADED_SOURCE_LABEL}
+                ]
+                normalized.extend(resolved_labels)
+            if invalid_sources and SOURCE_NEEDED_LABEL not in normalized and not resolved_labels:
+                normalized.append(SOURCE_NEEDED_LABEL)
             if not normalized:
                 normalized.append(fallback_label)
 
             slide.sources = self._dedupe_preserving_order(normalized)
-            if slide.sources == original_sources and not invalid_sources:
+            should_warn = bool(
+                invalid_sources or invalid_source_refs or had_missing_sources
+            )
+            if not should_warn:
                 continue
 
-            invalid_summary = ", ".join(invalid_sources[:3])
+            invalid_summary = ", ".join((invalid_sources + invalid_source_refs)[:3])
             if invalid_summary:
                 message = (
                     "Unverified source labels were replaced with "
-                    f"{fallback_label}: {invalid_summary}"
+                    f"{SOURCE_NEEDED_LABEL}: {invalid_summary}"
                 )
             else:
                 message = f"Missing source labels were set to {fallback_label}."
@@ -63,6 +109,62 @@ class SourceGroundingMixin:
                 }
             )
         return warnings
+
+    def _source_ref_is_valid(self, ref: str, bundle: DocumentBundle) -> bool:
+        if not ref:
+            return False
+        if ref in {UPLOADED_SOURCE_LABEL, SOURCE_NEEDED_LABEL}:
+            return True
+        if ref in bundle.source_index:
+            return True
+        return any(
+            getattr(section, "source_id", "") == ref
+            or self._legacy_source_ref(section) == ref
+            for section in bundle.sections
+        )
+
+    def _legacy_source_ref(self, section: DocumentSection) -> str:
+        title = self._clean_section_title(section.title)
+        if not section.source_doc_id or not title:
+            return ""
+        return f"{section.source_doc_id}:{title}"
+
+    def _fallback_source_refs_for_slide(
+        self, slide: GeneratedSlideSpec, bundle: DocumentBundle
+    ) -> list[str]:
+        if not bundle.sections:
+            return [SOURCE_NEEDED_LABEL]
+        index = max(0, min(slide.slide_number - 1, len(bundle.sections) - 1))
+        source_id = getattr(bundle.sections[index], "source_id", "")
+        return [source_id] if source_id else [UPLOADED_SOURCE_LABEL]
+
+    def _source_labels_for_refs(
+        self, refs: list[str], bundle: DocumentBundle
+    ) -> list[str]:
+        labels: list[str] = []
+        for ref in refs:
+            if ref == SOURCE_NEEDED_LABEL:
+                labels.append(SOURCE_NEEDED_LABEL)
+                continue
+            if ref == UPLOADED_SOURCE_LABEL:
+                labels.append(UPLOADED_SOURCE_LABEL)
+                continue
+            entry = bundle.source_index.get(ref)
+            if entry and entry.get("label"):
+                labels.append(entry["label"])
+                continue
+            section = next(
+                (
+                    item
+                    for item in bundle.sections
+                    if getattr(item, "source_id", "") == ref
+                ),
+                None,
+            )
+            if section:
+                title = self._clean_section_title(section.title) or "Section"
+                labels.append(f"{section.source_doc_id} > {title}")
+        return self._dedupe_preserving_order(labels)
 
     def _has_uploaded_source_material(self, bundle: DocumentBundle) -> bool:
         return bool(
@@ -105,6 +207,8 @@ class SourceGroundingMixin:
             self._mark_unsupported_numeric_claims(slide, unsupported)
             if SOURCE_NEEDED_LABEL not in slide.sources:
                 slide.sources.append(SOURCE_NEEDED_LABEL)
+            if SOURCE_NEEDED_LABEL not in slide.source_refs:
+                slide.source_refs.append(SOURCE_NEEDED_LABEL)
             issue = {
                 "category": "source_coverage",
                 "message": (
@@ -292,7 +396,7 @@ class SourceGroundingMixin:
         if isinstance(slide.exhibit_spec, dict):
             exhibit_type = str(slide.exhibit_spec.get("type") or "").lower().replace("-", "_")
             exhibit_metrics = slide.exhibit_spec.get("metrics", [])
-            if exhibit_type == "metric_chart" and isinstance(exhibit_metrics, list):
+            if exhibit_type in {"metric_chart", "line_chart"} and isinstance(exhibit_metrics, list):
                 metrics = self._normalized_metric_dicts(exhibit_metrics)
                 if metrics:
                     return metrics
@@ -472,6 +576,7 @@ class SourceGroundingMixin:
             "quote_sidebar": "quote_sidebar",
             "anti_patterns": "anti_patterns",
             "metric_chart": "chart",
+            "matrix_2x2": "matrix_2x2",
             "table_reference": "table_reference",
             "closing_recommendation": "closing_recommendation",
             "reference": "code_panel",
@@ -535,6 +640,9 @@ class SourceGroundingMixin:
         if "callout" in block_types:
             return "callouts"
         if slide.slide_type in {"matrix", "comparison"}:
+            exhibit_type = str((slide.exhibit_spec or {}).get("type") or "")
+            if exhibit_type == "matrix_2x2":
+                return "matrix_2x2"
             return "icon_grid"
         return "two_column"
 
@@ -560,6 +668,7 @@ class SourceGroundingMixin:
             "anti_patterns",
             "table_reference",
             "closing_recommendation",
+            "matrix_2x2",
         }
         if preferred_layout in fixed_layouts:
             if preferred_layout != last_layout:
@@ -602,6 +711,8 @@ class SourceGroundingMixin:
             return ["tables", "reference"]
         if layout == "closing_recommendation":
             return ["recommendation", "checklist"]
+        if layout == "matrix_2x2":
+            return ["matrix", "quadrants"]
         return ["structured_text", "shapes"]
 
     def _slide_intent_text(self, slide: GeneratedSlideSpec) -> str:
@@ -671,4 +782,3 @@ class SourceGroundingMixin:
 
     def _timestamp(self) -> str:
         return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-

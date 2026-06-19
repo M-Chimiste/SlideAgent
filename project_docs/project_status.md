@@ -22,7 +22,7 @@ What exists today:
 - Python deterministic renderer for generated layouts, with the legacy
   PptxGenJS path no longer required for the tested freeform/brand flows.
 - Strict schema validation for simple field values.
-- Focused backend regression tests currently passing: `159 passed`.
+- Focused backend regression suite of 172 tests (`172 passed` on 2026-06-18).
 - App coverage after the backend refactor is `78%` overall for `app/*`
   (`/private/tmp/slideagent-refactor-coverage-after`), up from the 76%
   pre-refactor baseline.
@@ -64,11 +64,20 @@ What exists today:
   plus the embedded chart workbook through OOXML/openpyxl while preserving the
   chart frame and styling.
 - Brand template analysis now extracts theme colors, theme fonts, reusable
-  layout notes, and the first detected logo image for generated decks.
-- Generated decks now normalize model-emitted source labels to `Uploaded source`
-  or `[source needed]`, mark unsupported numeric claims with `[source needed]`
-  when the number does not appear in uploaded source sections, inventory, or
-  extracted metrics, and tag unsupported numeric bullets inline.
+  layout notes, the first detected logo image for generated decks, and an
+  additive `layout_profile` covering common title, footer/source, logo, body,
+  background, table-color, and chart-color cues.
+- Document ingestion now assigns stable per-job source IDs to sections, tables,
+  and metrics and carries a `source_index` for resolving generated
+  `source_refs` into rendered section-level labels.
+- Generated decks now treat `source_refs` as canonical citations and `sources`
+  as human-readable footer labels. Invented model source labels and unsupported
+  numeric claims normalize to `[source needed]`; prompt-only decks may not claim
+  `Uploaded source`; unsupported numeric bullets are tagged inline.
+- Source-aware fallback planning now selects richer blueprint archetypes from
+  the uploaded material and uses `ExhibitCompiler` to build source-derived
+  comparison/reference tables, KPI charts, native line charts, checklists,
+  process exhibits, evidence inventories, and 2x2 matrices.
 - Local DOCX ingestion fallback through `python-docx`.
 - VisualQA now validates PPTX package structure, content-type declarations,
   internal relationship targets, text density, layout variety, source metadata,
@@ -78,8 +87,10 @@ What exists today:
   repair triggers.
 - Generated-slide jobs now run deterministic QA repair rounds for reliable
   actionable issues, persist repaired outlines back to SQLite, and stop when an
-  actionable issue signature does not change after repair. Strict slides remain
-  preserve-only.
+  actionable issue signature does not change after repair. ConsultingQA now
+  also runs on outlines before the PPTX build and after each visual repair,
+  repairing weak/duplicate titles, repeated bullets, missing exhibits, and
+  missing source refs for generated slides. Strict slides remain preserve-only.
 - Repeatable all-mode Qwen smoke runner:
   `python -m app.tools.all_mode_smoke --vision` from `backend/`.
 - Automated tests covering freeform, brand, strict, local client parsing,
@@ -88,13 +99,40 @@ What exists today:
   numeric claims, strict placeholders, strict table cells, strict chart caches,
   warning-aware QA repair, and visual QA fallback behavior.
 
+### Output polish pass (2026-06-18)
+
+A second focused output-quality pass landed the five highest-leverage polish
+themes identified for source-backed decks:
+
+- **Source provenance contract:** `DocumentSection`, `DocumentTable`, and
+  `DocumentMetric` now carry additive `source_id` fields, and
+  `DocumentBundle.source_index` resolves those IDs to labels such as
+  `Source Notes > External Brain`. Generated modes preserve legacy
+  `sources: ["Uploaded source"]` compatibility but use `source_refs` as the
+  canonical citation field.
+- **ConsultingQA repair loop:** outline-level ConsultingQA now flags duplicate
+  or weak action titles, overlong/compound titles, title/body mismatch,
+  repeated or generic bullets, missing exhibits, missing source refs, and weak
+  SCR/horizontal flow. `JobOrchestrator` runs this loop before build and after
+  visual repair; repaired outlines are persisted.
+- **Source-derived planning and exhibits:** fallback decks use a source-aware
+  blueprint, avoid Beyond Vibe Coding demo-language leakage on unrelated
+  sources, and compile exhibits from nearby sections/tables/metrics through
+  `ExhibitCompiler`.
+- **Renderer and VisualQA expansion:** deterministic rendering supports native
+  line charts and 2x2 matrices; VisualQA flags metric charts without metrics,
+  line charts with fewer than three points, and unlabeled 2x2 matrices as
+  repairable exhibit issues.
+- **Brand fidelity profile:** brand analysis extracts additive layout-profile
+  cues for header/title, footer/source, logo, body bounds, background fill, and
+  representative table/chart colors. Brand rendering uses those cues when
+  present while keeping old deterministic defaults as fallback.
+
 Important caveat: this is still a vertical slice, not a finished world-class
-deck engine. Layout variety, authored slide rhythm, icon rendering, and diagram
-rendering are much better than the original scaffold. The next quality frontier
-is semantic label quality, document-level provenance, broader diagram types,
-exact Office/manual compatibility review, deeper brand fidelity analysis, and
-more exact-render repair behavior. The backend refactor improved module
-manageability without changing those product-quality frontiers.
+deck engine. The new provenance, consulting repair, exhibit compilation, and
+brand-profile paths materially improve deck polish, but manual Office review,
+broader diagram/chart families, richer brand-template interpretation, and more
+non-demo source smokes remain the next quality frontier.
 
 ## Historical Context
 
@@ -132,11 +170,11 @@ architecture target is documented in [architecture.md](./architecture.md).
    - Keep `implementation_plan.md` marked as historical where completed
      vertical-slice work has moved into current implementation status.
 
-2. **Source provenance**
-   - Promote source references from generic `Uploaded source` labels to stable
-     document and section IDs.
-   - Carry those stable IDs through slide specs, speaker notes, consulting QA,
-     and rendered source metadata.
+2. **Source and exhibit depth**
+   - Broaden source-reference use in speaker notes and future frontend review
+     surfaces.
+   - Add more deterministic exhibit choices for richer tables, multi-series
+     metrics, and source-derived diagrams.
 
 3. **Diagram expansion**
    - Add more deterministic diagram kinds, starting with hub-spoke, layered
@@ -152,15 +190,16 @@ architecture target is documented in [architecture.md](./architecture.md).
 
 5. **Office and brand fidelity**
    - Add manual Microsoft Office compatibility checks for generated PPTX files.
-   - Deepen brand-template fidelity analysis beyond colors, fonts, logo reuse,
-     and simple layout notes.
+   - Deepen brand-template fidelity analysis beyond the current colors, fonts,
+     logo reuse, and layout-profile cues.
    - Broaden strict schema extraction for additional charts, status indicators,
      and other complex PowerPoint objects.
 
 ## Verification Evidence
 
-- Backend tests: `159 passed`.
-- Backend lint: `ruff check app/ tests/` passes.
+- Backend tests: `cd backend && python -m pytest tests/ -q` passed
+  (`172 passed`) on 2026-06-18.
+- Backend lint: `cd backend && ruff check app/ tests/` passed on 2026-06-18.
 - Backend coverage after refactor:
   - App total: `78%`.
   - `ContentPlanner` facade: `92%`; extracted planning modules range from
@@ -199,16 +238,13 @@ architecture target is documented in [architecture.md](./architecture.md).
   - Previous Hermes diagram smoke evidence remains available at
     `/private/tmp/slideagent-hermes-diagram-smoke-final`.
   - Qwen remains the fast default and works well for development iteration.
-    The latest quick exact-render Qwen smoke
-    (`qwen-clean-placeholders`, using `http://192.168.50.93:1240/v1` because
-    Python in this sandbox cannot resolve `metis.local`) produced freeform,
-    brand, and strict PPTX artifacts with zero final structural/visual-rule
-    issues after repair.
-  - The latest Qwen vision smoke (`qwen-clean-placeholders-vision`) passed
-    freeform and brand with zero critical findings after repair. Strict mode
-    also passed structurally; Qwen vision still emits expected warning/info
-    notes because strict mode intentionally preserves the supplied template
-    rather than redesigning it.
+    The latest output-polish Metis/Qwen vision smoke
+    (`output-polish-metis-final`, using `http://metis.local:1240/v1`) produced
+    freeform, brand, and strict PPTX artifacts with no planner fallback, no
+    build warnings, no duplicate titles, and zero critical findings after
+    repair. The source-backed generated decks rendered section-level source
+    footers. Vision still emits warning/info notes because the smoke keeps
+    non-critical advisory findings visible for review.
   - The generated renderer now uses semantic real-icon artwork in colored
     circles when backend Node dependencies are installed, falls back to
     deterministic Pillow icons otherwise, and renders generated charts from

@@ -7,7 +7,9 @@ import subprocess
 from typing import Any
 
 from PIL import Image, ImageDraw
+from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Inches, Pt
 
@@ -392,9 +394,21 @@ class CoreLayoutRenderingMixin:
         exhibit = self._exhibit(outline)
         if not metrics and exhibit.get("type") == "metric_chart":
             metrics = exhibit.get("metrics") or []
+        if not metrics and exhibit.get("type") == "line_chart":
+            metrics = exhibit.get("metrics") or []
         metrics = [metric for metric in metrics if isinstance(metric, dict)]
         if not metrics:
             self._add_two_column(slide, outline, brand)
+            return
+        chart_type = str((outline.content_json.get("chart_spec") or {}).get("type") or exhibit.get("type") or "")
+        if chart_type == "line" or exhibit.get("type") == "line_chart":
+            series = self._line_series(metrics[:8])
+            if series:
+                self._add_native_line_chart(slide, outline, brand, series)
+                return
+        series = self._chart_series(metrics[:6])
+        if series:
+            self._add_native_bar_chart(slide, outline, brand, series)
             return
         display_metrics = metrics[:4]
         count = len(display_metrics)
@@ -519,3 +533,180 @@ class CoreLayoutRenderingMixin:
         words = " ".join(str(text).split()).split()
         return " ".join(words[:18])
 
+    def _chart_series(
+        self, metrics: list[dict[str, Any]]
+    ) -> list[tuple[str, float, str]] | None:
+        """Return a chartable (label, value, unit) series, or None.
+
+        A native bar chart is only meaningful when at least three values share a
+        single unit; mixed-unit KPIs (e.g. 95% next to 1M tokens) stay as cards.
+        """
+        series: list[tuple[str, float, str]] = []
+        for metric in metrics:
+            text = str(metric.get("value", "")).strip()
+            had_pct = text.endswith("%")
+            try:
+                value = float(text.replace(",", "").rstrip("%").strip())
+            except (TypeError, ValueError):
+                return None
+            label = self._metric_label_text(metric.get("label", "")) or "Item"
+            unit = str(metric.get("unit") or "").strip() or ("%" if had_pct else "")
+            series.append((label, value, unit))
+        if len(series) < 3:
+            return None
+        if len({unit.lower() for _, _, unit in series}) != 1:
+            return None
+        return series
+
+    def _line_series(
+        self, metrics: list[dict[str, Any]]
+    ) -> list[tuple[str, float, str]] | None:
+        series: list[tuple[str, float, str]] = []
+        for index, metric in enumerate(metrics):
+            try:
+                value = float(str(metric.get("value", "")).replace(",", "").rstrip("%"))
+            except (TypeError, ValueError):
+                continue
+            label = self._metric_label_text(metric.get("label", "")) or f"Point {index + 1}"
+            unit = str(metric.get("unit") or "")
+            series.append((label, value, unit))
+        if len(series) < 3:
+            return None
+        units = {unit.lower() for _, _, unit in series if unit}
+        if len(units) > 1:
+            return None
+        return series
+
+    def _add_native_line_chart(
+        self,
+        slide,
+        outline: SlideOutline,
+        brand: BrandDNA,
+        series: list[tuple[str, float, str]],
+    ) -> None:
+        labels = [self._truncate_at_word(label, 20) for label, _, _ in series]
+        values = [value for _, value, _ in series]
+        unit = series[0][2]
+        self._add_label(slide, "TREND SIGNAL", 0.9, 1.45, 3.0, brand, bold=True)
+        chart_data = CategoryChartData()
+        chart_data.categories = labels
+        chart_data.add_series("trend", tuple(values))
+        frame = slide.shapes.add_chart(
+            XL_CHART_TYPE.LINE_MARKERS,
+            Inches(0.9),
+            Inches(1.9),
+            Inches(11.35),
+            Inches(3.6),
+            chart_data,
+        )
+        chart = frame.chart
+        chart.has_legend = False
+        chart.has_title = False
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        data_labels = plot.data_labels
+        data_labels.number_format = '0"%"' if unit == "%" else "#,##0"
+        data_labels.number_format_is_linked = False
+        data_labels.position = XL_LABEL_POSITION.ABOVE
+        data_labels.font.size = Pt(10)
+        data_labels.font.bold = True
+        data_labels.font.name = brand.fonts.body
+        data_labels.font.color.rgb = self._rgb(brand.colors.text_dark)
+        line_series = plot.series[0]
+        line_series.format.line.color.rgb = self._rgb(brand.colors.accent)
+        line_series.format.line.width = Pt(2.25)
+        value_axis = chart.value_axis
+        value_axis.has_major_gridlines = True
+        value_axis.major_gridlines.format.line.color.rgb = self._rgb(
+            self._tint(brand.colors.secondary, 0.78)
+        )
+        value_axis.tick_labels.font.size = Pt(9)
+        category_axis = chart.category_axis
+        category_axis.tick_labels.font.size = Pt(10)
+        category_axis.tick_labels.font.name = brand.fonts.body
+        category_axis.tick_labels.font.color.rgb = self._rgb(brand.colors.text_dark)
+        insight = self._metric_insight(
+            outline,
+            [{"label": label, "value": value, "unit": unit} for label, value, unit in series],
+        )
+        self._add_card(
+            slide,
+            1.2,
+            5.74,
+            10.9,
+            0.74,
+            brand.colors.background_light,
+            brand.colors.background_light,
+        )
+        self._add_body_text(
+            slide, insight, 1.52, 5.92, 10.25, 0.4, brand, center=True, size=13
+        )
+
+    def _add_native_bar_chart(
+        self,
+        slide,
+        outline: SlideOutline,
+        brand: BrandDNA,
+        series: list[tuple[str, float, str]],
+    ) -> None:
+        labels = [self._truncate_at_word(label, 22) for label, _, _ in series]
+        values = [value for _, value, _ in series]
+        unit = series[0][2]
+        self._add_label(slide, "SOURCED SIGNALS", 0.9, 1.45, 3.0, brand, bold=True)
+
+        chart_data = CategoryChartData()
+        chart_data.categories = labels
+        chart_data.add_series("signal", tuple(values))
+        frame = slide.shapes.add_chart(
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+            Inches(0.9),
+            Inches(1.98),
+            Inches(11.5),
+            Inches(3.5),
+            chart_data,
+        )
+        chart = frame.chart
+        chart.has_legend = False
+        chart.has_title = False
+
+        plot = chart.plots[0]
+        plot.gap_width = 80
+        plot.has_data_labels = True
+        data_labels = plot.data_labels
+        data_labels.number_format = '0"%"' if unit == "%" else "#,##0"
+        data_labels.number_format_is_linked = False
+        data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
+        data_labels.font.size = Pt(12)
+        data_labels.font.bold = True
+        data_labels.font.name = brand.fonts.body
+        data_labels.font.color.rgb = self._rgb(brand.colors.text_dark)
+
+        # One accent bar carries the message; the rest stay a neutral gray.
+        highlight = max(range(len(values)), key=lambda index: values[index])
+        muted = self._tint(brand.colors.secondary, 0.5)
+        bar_series = plot.series[0]
+        for index, point in enumerate(bar_series.points):
+            point.format.fill.solid()
+            point.format.fill.fore_color.rgb = self._rgb(
+                brand.colors.accent if index == highlight else muted
+            )
+
+        value_axis = chart.value_axis
+        value_axis.has_major_gridlines = False
+        value_axis.visible = False
+        value_axis.minimum_scale = 0
+        value_axis.maximum_scale = max(values) * 1.18 if values else 1
+        category_axis = chart.category_axis
+        category_axis.has_major_gridlines = False
+        category_axis.tick_labels.font.size = Pt(11)
+        category_axis.tick_labels.font.name = brand.fonts.body
+        category_axis.tick_labels.font.color.rgb = self._rgb(brand.colors.text_dark)
+
+        insight = self._metric_insight(
+            outline,
+            [{"label": label, "value": value, "unit": unit} for label, value, unit in series],
+        )
+        self._add_card(
+            slide, 1.2, 5.74, 10.9, 0.74, brand.colors.background_light, brand.colors.background_light
+        )
+        self._add_body_text(slide, insight, 1.52, 5.92, 10.25, 0.4, brand, center=True, size=13)

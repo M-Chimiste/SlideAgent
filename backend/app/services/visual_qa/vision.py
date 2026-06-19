@@ -96,6 +96,11 @@ class VisionQAMixin:
         parsed: list[QAIssue] = []
         for issue in envelope.issues:
             normalized_severity = issue.severity if issue.severity in {"CRITICAL", "WARNING", "INFO"} else "INFO"
+            normalized_severity = self._normalize_vision_severity(
+                normalized_severity,
+                issue.message,
+                issue.category,
+            )
             parsed.append(
                 QAIssue(
                     severity=normalized_severity,
@@ -105,6 +110,47 @@ class VisionQAMixin:
                 )
             )
         return parsed
+
+    def _normalize_vision_severity(
+        self,
+        severity: str,
+        message: str,
+        category: str | None,
+    ) -> str:
+        if severity != "CRITICAL":
+            return severity
+        text = " ".join(f"{category or ''} {message}".lower().split())
+        positive_markers = (
+            "no overlap",
+            "no overlapping",
+            "no cut-off",
+            "no cutoff",
+            "no clipped",
+            "no clipping",
+            "not overlapping",
+            "layout is clean",
+            "well-spaced",
+            "well spaced",
+            "no issues detected",
+        )
+        if any(marker in text for marker in positive_markers):
+            return "INFO"
+        if (
+            ("footer" in text or "source" in text)
+            and ("may be" in text or "risk" in text or "potential" in text)
+            and not any(
+                marker in text
+                for marker in (
+                    "is cut off",
+                    "are cut off",
+                    "cut off in",
+                    "overlaps",
+                    "overlapping",
+                )
+            )
+        ):
+            return "WARNING"
+        return severity
 
     def _downgrade_fallback_vision_issues(
         self, issues: list[QAIssue]

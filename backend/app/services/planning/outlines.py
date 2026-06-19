@@ -28,6 +28,7 @@ class OutlinePlanningMixin:
             content["summary"] = slide.subheading
             content["bullets"] = self._body_to_bullets(slide)
             content["metrics"] = self._metrics_from_slide(slide)
+            content["source_labels"] = list(slide.sources)
             preferred_layout = self._layout_for_slide(slide)
             layout = self._layout_with_variety(
                 slide, preferred_layout, last_layout, len(outlines)
@@ -295,4 +296,3 @@ class OutlinePlanningMixin:
             if keyword in combined:
                 return action_title
         return None
-

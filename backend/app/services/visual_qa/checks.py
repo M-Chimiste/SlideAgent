@@ -221,6 +221,38 @@ class RuleAndPackageChecksMixin:
                         category="exhibit_structure",
                     )
                 )
+            if exhibit_type == "metric_chart" and not exhibit.get("metrics"):
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Metric chart needs at least one sourced metric.",
+                        slide_index=outline.slide_index,
+                        category="exhibit_structure",
+                    )
+                )
+            if exhibit_type == "line_chart" and len(exhibit.get("metrics", [])) < 3:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message="Line chart needs at least three ordered points.",
+                        slide_index=outline.slide_index,
+                        category="exhibit_structure",
+                    )
+                )
+            if exhibit_type == "matrix_2x2":
+                quadrants = exhibit.get("quadrants", [])
+                has_labels = isinstance(quadrants, list) and len(quadrants) >= 4 and all(
+                    isinstance(item, dict) and item.get("label") for item in quadrants[:4]
+                )
+                if not has_labels:
+                    issues.append(
+                        QAIssue(
+                            severity="WARNING",
+                            message="2x2 matrix needs four labeled quadrants.",
+                            slide_index=outline.slide_index,
+                            category="exhibit_structure",
+                        )
+                    )
         return issues
 
     def _pptx_structure_checks(
@@ -505,4 +537,3 @@ class RuleAndPackageChecksMixin:
             "table_reference": 16,
         }
         return thresholds.get(archetype, 10)
-
