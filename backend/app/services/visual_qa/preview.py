@@ -42,8 +42,8 @@ class PreviewFallbackMixin:
             draw = ImageDraw.Draw(image)
             for shape in slide.shapes:
                 self._draw_shape_preview(draw, shape, prs, font)
-            image_path = output_dir / f"slide-{idx + 1}.png"
-            image.save(image_path)
+            image_path = output_dir / f"slide-{idx + 1}.jpg"
+            image.save(image_path, "JPEG", quality=90)
             images.append(image_path)
         return images
 

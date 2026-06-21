@@ -106,6 +106,34 @@ def test_apply_design_enforces_deck_level_layout_variety() -> None:
     assert not any(left == right for left, right in zip(layouts, layouts[1:]))
 
 
+def test_apply_design_caps_repeated_heavy_layouts() -> None:
+    heavy_layouts = [
+        "framework_cycle",
+        "framework_cycle",
+        "framework_cycle",
+        "dependency_map",
+        "dependency_map",
+        "code_panel",
+        "code_panel",
+        "table_reference",
+        "table_reference",
+    ]
+    outlines = []
+    for idx, layout in enumerate(heavy_layouts):
+        outline = _outline(index=idx, layout=layout)
+        outline.content_json["archetype"] = layout
+        outline.content_json["action_title"] = f"Slide {idx} {layout}"
+        outline.layout_json["archetype"] = layout
+        outlines.append(outline)
+
+    designed = DesignAgent().apply_design(outlines)
+    layouts = [outline.layout_json["layout"] for outline in designed]
+
+    for layout in {"framework_cycle", "dependency_map", "code_panel", "table_reference"}:
+        assert layouts.count(layout) <= 1
+    assert not any(left == right for left, right in zip(layouts, layouts[1:]))
+
+
 def test_apply_design_preserves_explicit_mid_deck_section_divider() -> None:
     outlines = [_outline(index=idx, layout="two_column") for idx in range(6)]
     outlines[3].content_json["archetype"] = "section_divider"

@@ -10,12 +10,15 @@ from app.models.template import TemplateProfile
 from app.services.consulting_qa import ConsultingQA
 from app.services.planning.blueprint import BlueprintPlanningMixin
 from app.services.planning import constants as planning_constants
+from app.services.planning.context import ContextPlanningMixin
+from app.services.planning.exhibit_selection import ExhibitSelectionMixin
 from app.services.planning.exhibits import ExhibitCompiler
 from app.services.planning.grounding import SourceGroundingMixin
 from app.services.planning.llm import LLMPlanningMixin
 from app.services.planning.outlines import OutlinePlanningMixin
 from app.services.planning.repairs import PlanningRepairMixin
 from app.services.planning.specs import SlideSpecPlanningMixin
+from app.services.planning.spec_gate import SpecGateMixin
 
 
 PLANNER_SYSTEM_PROMPT = planning_constants.PLANNER_SYSTEM_PROMPT
@@ -24,6 +27,9 @@ SOURCE_NEEDED_LABEL = planning_constants.SOURCE_NEEDED_LABEL
 
 
 class ContentPlanner(
+    ContextPlanningMixin,
+    ExhibitSelectionMixin,
+    SpecGateMixin,
     LLMPlanningMixin,
     BlueprintPlanningMixin,
     SlideSpecPlanningMixin,
@@ -34,6 +40,8 @@ class ContentPlanner(
     def __init__(self, llm_client: Optional[OpenAICompatibleClient] = None) -> None:
         self.llm_client = llm_client
         self._last_planning_error: str | None = None
+        self._last_story_map_error: str | None = None
+        self.last_planning_artifacts: dict[str, Any] = {}
         self.qa = ConsultingQA()
         self.exhibit_compiler = ExhibitCompiler()
         self.layouts = [
@@ -54,6 +62,7 @@ class ContentPlanner(
             "code_panel",
             "anti_patterns",
             "table_reference",
+            "matrix_2x2",
             "closing_recommendation",
         ]
 
@@ -107,6 +116,7 @@ class ContentPlanner(
         length_strategy: str = "auto",
     ) -> tuple[DeckSpec, list[dict[str, Any]]]:
         warnings: list[dict[str, Any]] = []
+        self.last_planning_artifacts = {}
         blueprint = self._build_blueprint(
             bundle,
             instructions,
@@ -114,13 +124,29 @@ class ContentPlanner(
             quality_profile=quality_profile,
             length_strategy=length_strategy,
         )
+        source_compression = self._build_source_compression(bundle, quality_profile)
+        story_map = self._build_story_map(
+            bundle,
+            instructions,
+            blueprint,
+            source_compression,
+            quality_profile,
+        )
+        blueprint.story_beats = [beat.model_dump() for beat in story_map.beats]
+        self.last_planning_artifacts = {
+            "source-compression": source_compression.model_dump(),
+            "story-map": story_map.model_dump(),
+        }
         self._last_planning_error = None
+        used_deck_fallback = False
         deck = self._plan_with_llm(
             bundle,
             instructions,
             mode,
             blueprint=blueprint,
             quality_profile=quality_profile,
+            source_compression=source_compression,
+            story_map=story_map,
         )
         if deck is None:
             message = (
@@ -137,17 +163,53 @@ class ContentPlanner(
                     "message": message,
                 }
             )
-            deck = self._fallback_deck(bundle, instructions, mode, blueprint)
+            deck = self._fallback_deck(
+                bundle,
+                instructions,
+                mode,
+                blueprint,
+                story_map=story_map,
+            )
+            used_deck_fallback = True
         if deck.blueprint is None:
             deck.blueprint = blueprint
+        selection_story_map = (
+            story_map
+            if story_map.status == "llm" or used_deck_fallback
+            else None
+        )
         self._enrich_deck_specs(deck, blueprint, bundle)
+        self._apply_exhibit_selection(deck, bundle, selection_story_map)
         self._repair_model_titles(deck)
         self._repair_repeated_action_titles(deck)
         warnings.extend(self._normalize_source_labels(deck, bundle))
         warnings.extend(self._ground_numeric_claims(deck, bundle))
+        spec_gate_report = self._run_spec_gate(
+            deck,
+            bundle,
+            source_compression,
+            selection_story_map or story_map,
+        )
+        self.last_planning_artifacts["spec-gate"] = spec_gate_report.model_dump()
+        warnings.extend(self._spec_gate_warnings(spec_gate_report))
         deck, qa_warnings = self.qa.inspect(deck)
         warnings.extend(qa_warnings)
         return deck, warnings
+
+    def _spec_gate_warnings(self, report) -> list[dict[str, Any]]:
+        if not getattr(report, "unresolved_count", 0):
+            return []
+        return [
+            {
+                "slide_index": issue.slide_number - 1
+                if issue.slide_number is not None
+                else None,
+                "field": "spec_gate",
+                "message": issue.message,
+            }
+            for issue in report.issues
+            if not issue.repaired
+        ]
 
     def consulting_issues_for_outlines(
         self, outlines: list[SlideOutline], bundle: DocumentBundle
@@ -173,6 +235,7 @@ class ContentPlanner(
         repaired: list[SlideOutline] = []
         seen_titles: set[str] = set()
         seen_bullets: set[str] = set()
+        seen_source_refs: set[str] = set()
         for outline in outlines:
             if outline.mode != "flexible":
                 repaired.append(outline)
@@ -183,6 +246,13 @@ class ContentPlanner(
             issue_categories = {
                 str(issue.category or "") for issue in slide_issues
             }
+            if "duplicate_slide" in issue_categories:
+                section = self._alternate_source_section(
+                    section,
+                    bundle,
+                    seen_source_refs,
+                    outline.slide_index,
+                )
             current_title = str(
                 revised.content_json.get("action_title")
                 or revised.content_json.get("title")
@@ -193,7 +263,13 @@ class ContentPlanner(
                 deck_level_issue
                 or title_key in seen_titles
                 or issue_categories
-                & {"action_title", "one_message", "horizontal_flow", "title_body_support"}
+                & {
+                    "action_title",
+                    "duplicate_slide",
+                    "horizontal_flow",
+                    "one_message",
+                    "title_body_support",
+                }
             ):
                 title = self._consulting_title_for_section(section, revised)
                 title = self._unique_consulting_title(title, section, seen_titles)
@@ -202,7 +278,12 @@ class ContentPlanner(
                 revised.content_json["title"] = title
             else:
                 seen_titles.add(title_key)
-            if issue_categories & {"repeated_bullet", "generic_filler", "title_body_support"}:
+            if issue_categories & {
+                "duplicate_slide",
+                "generic_filler",
+                "repeated_bullet",
+                "title_body_support",
+            }:
                 self._replace_outline_bullets_from_source(
                     revised, section, seen_bullets
                 )
@@ -210,12 +291,18 @@ class ContentPlanner(
                 self._track_outline_bullets(revised, seen_bullets)
             if (
                 issue_categories
-                & {"missing_exhibit", "exhibit_structure", "source_refs"}
+                & {
+                    "duplicate_slide",
+                    "exhibit_structure",
+                    "missing_exhibit",
+                    "source_refs",
+                }
             ):
                 self._restore_outline_sources(revised, section, bundle)
                 self._rebuild_outline_exhibit(revised, section, bundle)
             elif issue_categories & {"source_refs"}:
                 self._restore_outline_sources(revised, section, bundle)
+            self._track_outline_source_refs(revised, section, seen_source_refs)
             repaired.append(revised)
         return repaired
 
@@ -247,6 +334,25 @@ class ContentPlanner(
                 if self._clean_section_title(section.title).casefold() == title:
                     return section
         return None
+
+    def _alternate_source_section(
+        self,
+        section: DocumentSection | None,
+        bundle: DocumentBundle,
+        seen_source_refs: set[str],
+        slide_index: int,
+    ) -> DocumentSection | None:
+        candidates = bundle.sections or []
+        if not candidates:
+            return section
+        for candidate in candidates[slide_index:] + candidates[:slide_index]:
+            key = getattr(candidate, "source_id", "") or self._source_ref(
+                candidate,
+                slide_index,
+            )
+            if key and key not in seen_source_refs:
+                return candidate
+        return section
 
     def _consulting_title_for_section(
         self, section: DocumentSection | None, outline: SlideOutline
@@ -320,6 +426,25 @@ class ContentPlanner(
             key = self._qa_key(bullet)
             if key:
                 seen_bullets.add(key)
+
+    def _track_outline_source_refs(
+        self,
+        outline: SlideOutline,
+        section: DocumentSection | None,
+        seen_source_refs: set[str],
+    ) -> None:
+        refs = outline.content_json.get("source_refs")
+        if isinstance(refs, list):
+            for ref in refs:
+                if str(ref).strip():
+                    seen_source_refs.add(str(ref).strip())
+        if section:
+            key = getattr(section, "source_id", "") or self._source_ref(
+                section,
+                outline.slide_index,
+            )
+            if key:
+                seen_source_refs.add(key)
 
     def _outline_bullets(self, outline: SlideOutline) -> list[str]:
         bullets = outline.content_json.get("bullets")

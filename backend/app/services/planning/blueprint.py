@@ -152,11 +152,12 @@ class BlueprintPlanningMixin:
                 [
                     "checklist",
                     "quote_sidebar",
+                    "matrix_2x2",
                     "code_panel",
+                    "callouts",
+                    "icon_rows",
                     "comparison_table" if not has_tables else "reference",
-                    "table_reference",
-                    "dependency_map",
-                    "framework_cycle",
+                    "two_column",
                 ]
             )
         for archetype in candidates:
@@ -183,6 +184,10 @@ class BlueprintPlanningMixin:
             "quote_sidebar": "decision",
             "table_reference": "reference",
             "metric_chart": "evidence",
+            "matrix_2x2": "decision",
+            "callouts": "evidence",
+            "icon_rows": "implementation",
+            "two_column": "evidence",
             "closing_recommendation": "closing",
             "reference": "reference",
         }
@@ -198,10 +203,92 @@ class BlueprintPlanningMixin:
         source_map: dict[str, list[str]] = {}
         if not sections:
             return {str(index + 1): [SOURCE_NEEDED_LABEL] for index in range(target_slide_count)}
+        representative_sections = self._representative_source_sections(
+            sections,
+            target_slide_count,
+        )
         for index in range(target_slide_count):
-            section = sections[min(index, len(sections) - 1)]
+            section = representative_sections[
+                min(index, len(representative_sections) - 1)
+            ]
             source_map[str(index + 1)] = [self._source_ref(section, index)]
         return source_map
+
+    def _representative_source_sections(
+        self,
+        sections: list[DocumentSection],
+        target_slide_count: int,
+    ) -> list[DocumentSection]:
+        if target_slide_count <= 0:
+            return []
+        if len(sections) <= target_slide_count:
+            return sections
+
+        mandatory_indices = self._representative_document_start_indices(
+            sections,
+            target_slide_count,
+        )
+        selected: set[int] = set(mandatory_indices)
+        for index in self._evenly_spaced_indices(len(sections), target_slide_count):
+            selected.add(index)
+            if len(selected) >= target_slide_count:
+                break
+        if len(selected) < target_slide_count:
+            for index in range(len(sections)):
+                selected.add(index)
+                if len(selected) >= target_slide_count:
+                    break
+        return [sections[index] for index in sorted(selected)[:target_slide_count]]
+
+    def _representative_document_start_indices(
+        self,
+        sections: list[DocumentSection],
+        target_slide_count: int,
+    ) -> list[int]:
+        first_indices: list[int] = []
+        seen_docs: set[str] = set()
+        for index, section in enumerate(sections):
+            doc_id = section.source_doc_id or "__unknown__"
+            if doc_id in seen_docs:
+                continue
+            seen_docs.add(doc_id)
+            first_indices.append(index)
+        if len(first_indices) <= 1:
+            return []
+        if len(first_indices) <= target_slide_count:
+            return first_indices
+        return [
+            first_indices[index]
+            for index in self._evenly_spaced_indices(
+                len(first_indices),
+                target_slide_count,
+            )
+        ]
+
+    def _evenly_spaced_indices(self, total: int, count: int) -> list[int]:
+        if total <= 0 or count <= 0:
+            return []
+        if count >= total:
+            return list(range(total))
+        if count == 1:
+            return [0]
+        return [
+            round(index * (total - 1) / (count - 1))
+            for index in range(count)
+        ]
+
+    def _representative_source_section(
+        self,
+        sections: list[DocumentSection],
+        slide_index: int,
+        target_slide_count: int,
+    ) -> DocumentSection:
+        if len(sections) <= target_slide_count or target_slide_count <= 1:
+            return sections[min(slide_index, len(sections) - 1)]
+        section_index = round(
+            slide_index * (len(sections) - 1) / max(target_slide_count - 1, 1)
+        )
+        return sections[min(max(section_index, 0), len(sections) - 1)]
 
     def _source_ref(self, section: DocumentSection, index: int) -> str:
         if getattr(section, "source_id", ""):

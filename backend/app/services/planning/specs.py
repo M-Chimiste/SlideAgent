@@ -8,6 +8,7 @@ from typing import Any
 from app.models.document import DocumentBundle, DocumentMetric, DocumentSection
 from app.models.generation import ContentBlock, DeckBlueprint, DeckSpec, GeneratedSlideSpec
 from app.models.outline import SlideOutline
+from app.models.planning import StoryBeat, StoryMap
 from app.models.template import SlideSpec, TemplateProfile
 from app.services.planning.constants import (
     PLANNER_SYSTEM_PROMPT,
@@ -23,6 +24,7 @@ class SlideSpecPlanningMixin:
         instructions: str,
         mode: str,
         blueprint: DeckBlueprint,
+        story_map: StoryMap | None = None,
     ) -> DeckSpec:
         title = bundle.metadata.title or self._title_from_instructions(instructions)
         source_label = UPLOADED_SOURCE_LABEL if bundle.sections else SOURCE_NEEDED_LABEL
@@ -47,6 +49,8 @@ class SlideSpecPlanningMixin:
                 blueprint=blueprint,
                 bundle=bundle,
             )
+            if story_map:
+                self._apply_story_beat_to_slide(slide, story_map, archetype)
             slides.append(slide)
         return DeckSpec(
             deck_title=title,
@@ -56,6 +60,56 @@ class SlideSpecPlanningMixin:
             slides=slides,
             blueprint=blueprint,
         )
+
+    def _apply_story_beat_to_slide(
+        self,
+        slide: GeneratedSlideSpec,
+        story_map: StoryMap,
+        fallback_archetype: str,
+    ) -> None:
+        beat = self._story_beat_for_slide(story_map, slide.slide_number)
+        if beat is None:
+            return
+        if slide.archetype not in {"cover", "executive_summary", "closing_recommendation"}:
+            selected = self._normalize_archetype(beat.preferred_exhibit or fallback_archetype)
+            if selected in {
+                "comparison_table",
+                "dependency_map",
+                "framework_cycle",
+                "checklist",
+                "code_panel",
+                "anti_patterns",
+                "quote_sidebar",
+                "metric_chart",
+                "table_reference",
+                "matrix_2x2",
+                "callouts",
+                "icon_rows",
+                "two_column",
+            }:
+                slide.archetype = selected
+                slide.slide_type = self._slide_type_for_archetype(selected)
+        if beat.role:
+            slide.narrative_role = beat.role
+        if beat.claim and slide.archetype not in {"cover"}:
+            slide.action_title = self._truncate_title(beat.claim)
+        if beat.source_refs:
+            slide.source_refs = beat.source_refs
+            slide.sources = [UPLOADED_SOURCE_LABEL]
+        slide.speaker_notes = beat.rationale or slide.speaker_notes
+
+    def _story_beat_for_slide(
+        self,
+        story_map: StoryMap,
+        slide_number: int,
+    ) -> StoryBeat | None:
+        for beat in story_map.beats:
+            if beat.beat_number == slide_number:
+                return beat
+        index = slide_number - 1
+        if 0 <= index < len(story_map.beats):
+            return story_map.beats[index]
+        return None
 
     def _section_for_blueprint_slot(
         self,
@@ -245,6 +299,14 @@ class SlideSpecPlanningMixin:
                     },
                 ],
             }
+        if archetype == "matrix_2x2":
+            return self.exhibit_compiler.compile(
+                archetype,
+                "evidence",
+                section,
+                tables or [],
+                source_metrics or [],
+            )
         if archetype in {"code_panel", "reference"}:
             return self._code_panel_spec_for_section(section)
         if archetype == "checklist":
@@ -263,6 +325,29 @@ class SlideSpecPlanningMixin:
                 "key_idea": "The work shifts from isolated output to managed operating discipline.",
                 "supporting_points": bullets[:3],
                 "quote": "Make the standard explicit before asking the team to move faster.",
+            }
+        if archetype == "callouts":
+            spec: dict[str, Any] = {"type": "callouts", "points": bullets[:3]}
+            if source_metrics:
+                metric_spec = self.exhibit_compiler.compile(
+                    "metric_chart",
+                    "evidence",
+                    section,
+                    tables or [],
+                    source_metrics,
+                )
+                metric_items = metric_spec.get("metrics", [])
+                if isinstance(metric_items, list) and metric_items:
+                    spec["metrics"] = metric_items[:3]
+            return spec
+        if archetype == "icon_rows":
+            return {"type": "icon_rows", "items": bullets[:4]}
+        if archetype == "two_column":
+            return {
+                "type": "two_column",
+                "left": bullets[:2],
+                "right": bullets[2:4] or bullets[:2],
+                "points": bullets[:4],
             }
         if archetype == "table_reference":
             if tables:
@@ -435,6 +520,8 @@ class SlideSpecPlanningMixin:
             return [ContentBlock(type="table", body=body)]
         if archetype == "metric_chart":
             return [ContentBlock(type="chart", body=exhibit_spec.get("metrics", []))]
+        if archetype == "matrix_2x2":
+            return self.exhibit_compiler.content_blocks(exhibit_spec)
         if archetype == "executive_summary":
             messages = exhibit_spec.get("messages", [])
             return [
@@ -476,6 +563,34 @@ class SlideSpecPlanningMixin:
             return [ContentBlock(type="bullets", body=exhibit_spec.get("lines", []))]
         if archetype == "quote_sidebar":
             return [ContentBlock(type="bullets", body=exhibit_spec.get("supporting_points", []))]
+        if archetype == "callouts":
+            metrics = exhibit_spec.get("metrics", [])
+            if isinstance(metrics, list) and metrics:
+                return [
+                    ContentBlock(
+                        type="callout",
+                        body=[
+                            str(item.get("label") or item.get("name") or item)
+                            for item in metrics
+                            if isinstance(item, dict) or str(item).strip()
+                        ],
+                    )
+                ]
+            points = exhibit_spec.get("points", [])
+            return [ContentBlock(type="callout", body=points if isinstance(points, list) else [])]
+        if archetype == "icon_rows":
+            items = exhibit_spec.get("items", [])
+            return [ContentBlock(type="bullets", body=items if isinstance(items, list) else [])]
+        if archetype == "two_column":
+            points = exhibit_spec.get("points", [])
+            if not isinstance(points, list):
+                left = exhibit_spec.get("left", [])
+                right = exhibit_spec.get("right", [])
+                points = [
+                    *(left if isinstance(left, list) else []),
+                    *(right if isinstance(right, list) else []),
+                ]
+            return [ContentBlock(type="bullets", body=points)]
         return [ContentBlock(type="bullets", body=self._section_phrases(section, 4))]
 
     def _fallback_action_title(
@@ -523,6 +638,10 @@ class SlideSpecPlanningMixin:
             "quote_sidebar": "Reframe the mindset shift behind the recommendation",
             "table_reference": "Standardize responsibilities across the operating workflow",
             "metric_chart": "Quantify the signal before making the decision",
+            "matrix_2x2": "Prioritize the moves by impact and readiness",
+            "callouts": "Surface the highest-signal proof points for the decision",
+            "icon_rows": "Sequence the operating moves into scanable actions",
+            "two_column": "Separate the implication from the evidence",
             "closing_recommendation": "Commit to the next operating decision",
         }
         if archetype in titles:
@@ -544,6 +663,10 @@ class SlideSpecPlanningMixin:
             "quote_sidebar": "quote",
             "table_reference": "reference",
             "metric_chart": "chart",
+            "matrix_2x2": "matrix",
+            "callouts": "callouts",
+            "icon_rows": "content",
+            "two_column": "content",
             "closing_recommendation": "closing",
         }
         return mapping.get(archetype, "content")
@@ -570,6 +693,10 @@ class SlideSpecPlanningMixin:
             "quote_sidebar": "quote sidebar visually tied to supporting points",
             "table_reference": "compact reference table",
             "metric_chart": "simple metric chart using sourced values",
+            "matrix_2x2": "2x2 prioritization matrix with concise quadrant labels",
+            "callouts": "three source-derived proof-point cards",
+            "icon_rows": "four scanable action rows with icons",
+            "two_column": "balanced implication and evidence columns",
             "closing_recommendation": "closing recommendation with decision ask",
         }
         return intents.get(archetype, "structured exhibit with concise body text")
@@ -708,6 +835,43 @@ class SlideSpecPlanningMixin:
             }
         if archetype == "metric_chart":
             return {"type": "metric_chart", "metrics": self._metrics_from_slide(slide)}
+        if archetype == "matrix_2x2":
+            items = bullets[:4]
+            while len(items) < 4:
+                items.append(
+                    [
+                        "Name the decision owner.",
+                        "Confirm the evidence standard.",
+                        "Set the review cadence.",
+                        "Track changes as conditions shift.",
+                    ][len(items)]
+                )
+            labels = [
+                "High impact / high readiness",
+                "High impact / low readiness",
+                "Low impact / high readiness",
+                "Low impact / low readiness",
+            ]
+            return {
+                "type": "matrix_2x2",
+                "x_axis": "Readiness",
+                "y_axis": "Impact",
+                "quadrants": [
+                    {"label": labels[index], "description": self._truncate_at_word(item, 78)}
+                    for index, item in enumerate(items[:4])
+                ],
+            }
+        if archetype == "callouts":
+            return {"type": "callouts", "points": bullets[:3]}
+        if archetype == "icon_rows":
+            return {"type": "icon_rows", "items": bullets[:4]}
+        if archetype == "two_column":
+            return {
+                "type": "two_column",
+                "left": bullets[:2],
+                "right": bullets[2:4] or bullets[:2],
+                "points": bullets[:4],
+            }
         if archetype == "closing_recommendation":
             return {
                 "type": "recommendation",
@@ -912,6 +1076,10 @@ class SlideSpecPlanningMixin:
             "reference_table": lambda item: bool(item.get("columns") and item.get("rows")),
             "recommendation": lambda item: bool(item.get("next_steps") or item.get("recommendation")),
             "metric_chart": lambda item: bool(item.get("metrics")),
+            "matrix_2x2": lambda item: len(item.get("quadrants", [])) >= 4,
+            "callouts": lambda item: bool(item.get("points") or item.get("metrics")),
+            "icon_rows": lambda item: len(item.get("items", [])) >= 3,
+            "two_column": lambda item: bool(item.get("points") or item.get("left") or item.get("right")),
         }
         checker = checks.get(exhibit_type)
         if checker and not checker(exhibit):
@@ -981,6 +1149,30 @@ class SlideSpecPlanningMixin:
             metrics = slide.exhibit_spec.get("metrics", [])
             if isinstance(metrics, list) and metrics:
                 slide.content_blocks = [ContentBlock(type="chart", body=metrics)]
+        if archetype == "matrix_2x2":
+            slide.content_blocks = self.exhibit_compiler.content_blocks(slide.exhibit_spec)
+        if archetype == "callouts":
+            slide.content_blocks = self._content_blocks_from_exhibit(
+                archetype,
+                slide.exhibit_spec,
+                DocumentSection(
+                    title=slide.action_title,
+                    level=1,
+                    content=slide.subheading,
+                    source_doc_id="generated",
+                ),
+            )
+        if archetype in {"icon_rows", "two_column"}:
+            slide.content_blocks = self._content_blocks_from_exhibit(
+                archetype,
+                slide.exhibit_spec,
+                DocumentSection(
+                    title=slide.action_title,
+                    level=1,
+                    content=slide.subheading,
+                    source_doc_id="generated",
+                ),
+            )
 
     def _comparison_exhibit_is_sparse(self, exhibit: dict[str, Any]) -> bool:
         columns = exhibit.get("columns", [])

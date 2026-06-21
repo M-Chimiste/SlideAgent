@@ -3,6 +3,7 @@ from typing import Any, List, Optional
 from pydantic import BaseModel
 
 from app.models.job import JobRecord
+from app.models.qa import QAIssue
 from app.models.template import TemplateProfile
 
 
@@ -19,3 +20,5 @@ class JobStatusResponse(BaseModel):
     warnings: List[dict[str, Any]]
     preview_images: Optional[List[str]] = None
     qa_summary: Optional[dict[str, Any]] = None
+    qa_issues: Optional[List[QAIssue]] = None
+    planning_summary: Optional[dict[str, Any]] = None

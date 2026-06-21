@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     llm_provider: str = Field(default="openai_compatible", alias="LLM_PROVIDER")
     openai_compatible_base_url: str = Field(
-        default="http://metis.local:1240/v1", alias="OPENAI_COMPATIBLE_BASE_URL"
+        default="http://localhost:1240/v1", alias="OPENAI_COMPATIBLE_BASE_URL"
     )
     openai_compatible_model: str = Field(
         default="qwen3.6-35b-a3b-mtp", alias="OPENAI_COMPATIBLE_MODEL"
@@ -45,22 +45,22 @@ class Settings(BaseSettings):
         default="none", alias="OPENAI_COMPATIBLE_REASONING_EFFORT"
     )
     openai_compatible_timeout_seconds: int = Field(
-        default=120, alias="OPENAI_COMPATIBLE_TIMEOUT_SECONDS"
+        default=900, alias="OPENAI_COMPATIBLE_TIMEOUT_SECONDS"
     )
     deep_planner_base_url: str = Field(
-        default="http://athena.local:1240/v1", alias="DEEP_PLANNER_BASE_URL"
+        default="http://localhost:1240/v1", alias="DEEP_PLANNER_BASE_URL"
     )
     deep_planner_model: str = Field(
         default="minimax-m2.7", alias="DEEP_PLANNER_MODEL"
     )
     deep_planner_timeout_seconds: int = Field(
-        default=300, alias="DEEP_PLANNER_TIMEOUT_SECONDS"
+        default=900, alias="DEEP_PLANNER_TIMEOUT_SECONDS"
     )
     deep_planner_reasoning_effort: str | None = Field(
         default=None, alias="DEEP_PLANNER_REASONING_EFFORT"
     )
     vision_base_url: str = Field(
-        default="http://metis.local:1240/v1", alias="VISION_BASE_URL"
+        default="http://localhost:1240/v1", alias="VISION_BASE_URL"
     )
     vision_model: str = Field(
         default="qwen3.6-35b-a3b-mtp", alias="VISION_MODEL"

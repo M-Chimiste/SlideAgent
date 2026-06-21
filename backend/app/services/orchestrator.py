@@ -45,7 +45,7 @@ class JobOrchestrator:
         if not job:
             return
         template = (
-            self._freeform_template()
+            self.freeform_template()
             if job.template_id == FREEFORM_TEMPLATE_ID
             else await self.store.get_template(job.template_id)
         )
@@ -87,6 +87,11 @@ class JobOrchestrator:
                 quality_profile=self._quality_profile(job),
                 length_strategy=self._length_strategy(job),
             )
+            if planner.last_planning_artifacts:
+                self.storage.save_planning_artifacts(
+                    job.id,
+                    planner.last_planning_artifacts,
+                )
             outlines = self.designer.apply_design(outlines)
             outlines, consulting_warnings = self._run_consulting_qa_repairs(
                 outlines, bundle
@@ -361,7 +366,7 @@ class JobOrchestrator:
         )
         return ContentPlanner(llm_client=OpenAICompatibleClient(deep_settings))
 
-    def _freeform_template(self) -> TemplateProfile:
+    def freeform_template(self) -> TemplateProfile:
         timestamp = self._timestamp()
         return TemplateProfile(
             id=FREEFORM_TEMPLATE_ID,

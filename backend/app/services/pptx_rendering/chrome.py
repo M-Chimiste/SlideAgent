@@ -58,31 +58,14 @@ class ChromeRenderingMixin:
         number_run.font.bold = True
         number_run.font.color.rgb = self._rgb(self._tint(brand.colors.primary, 0.84))
 
-        accent = slide.shapes.add_shape(
-            MSO_SHAPE.RECTANGLE,
-            Inches(0.68),
-            Inches(0.46),
-            Inches(0.62),
-            Inches(0.035),
-        )
-        accent.fill.solid()
-        accent.fill.fore_color.rgb = self._rgb(brand.colors.accent)
-        accent.line.color.rgb = self._rgb(brand.colors.accent)
-        rule = slide.shapes.add_shape(
-            MSO_SHAPE.RECTANGLE,
-            Inches(0.68),
-            Inches(1.12),
-            Inches(11.95),
-            Inches(0.012),
-        )
-        rule.fill.solid()
-        rule.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.secondary, 0.82))
-        rule.line.color.rgb = rule.fill.fore_color.rgb
+        # No accent line under the kicker and no full-width rule under the title:
+        # both collide with two-line titles and read as an AI-generated tell. The
+        # ghosted section number (top-right) plus whitespace carry the header.
         title_profile = self._profile_box(brand, "title_box")
         title_x = title_profile.get("x", 0.68)
         title_y = title_profile.get("y", 0.48)
         title_width = title_profile.get("w", 12.1 - reserved_logo_width)
-        title_font_size = self._fit_font_size(title, title_width, [24, 20, 18], max_lines=2)
+        title_font_size = self._fit_font_size(title, title_width, [24, 22, 20, 18, 16], max_lines=2)
         one_line_chars = max(1, int((title_width * 72) / (0.52 * title_font_size)))
         wraps_two_lines = len(" ".join(title.split())) > one_line_chars
         if not wraps_two_lines:
@@ -142,6 +125,12 @@ class ChromeRenderingMixin:
         )
 
     def _section_marker(self, outline: SlideOutline, slide_number: int) -> tuple[str, str]:
+        # Prefer the sequential section assigned at outline-build time so kickers
+        # read 01 -> 0N in order instead of per-slide archetype lookups.
+        precomputed_number = str(outline.layout_json.get("section_number") or "").strip()
+        precomputed_label = str(outline.layout_json.get("section_label") or "").strip()
+        if precomputed_number and precomputed_label:
+            return precomputed_number, precomputed_label
         role = str(
             outline.layout_json.get("narrative_role")
             or outline.content_json.get("narrative_role")

@@ -111,6 +111,7 @@ class ConsultingQA:
         flexible = [outline for outline in outlines if outline.mode == "flexible"]
         titles: dict[str, int] = {}
         bullets_seen: dict[str, int] = {}
+        slide_fingerprints: list[tuple[int, set[str]]] = []
         roles = []
         for outline in flexible:
             content = outline.content_json
@@ -148,6 +149,24 @@ class ConsultingQA:
                     )
                     break
                 bullets_seen[normalized_bullet] = outline.slide_index
+            fingerprint = self._outline_slide_fingerprint(outline, title, bullets)
+            duplicate_index = self._duplicate_slide_index(
+                fingerprint,
+                slide_fingerprints,
+            )
+            if duplicate_index is not None:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        category="duplicate_slide",
+                        message=(
+                            "Slide substantially duplicates the message and evidence "
+                            f"from slide {duplicate_index + 1}."
+                        ),
+                        slide_index=outline.slide_index,
+                    )
+                )
+            slide_fingerprints.append((outline.slide_index, fingerprint))
             if has_source_material and not self._outline_source_refs(outline):
                 issues.append(
                     QAIssue(
@@ -388,6 +407,48 @@ class ConsultingQA:
     def _has_primary_exhibit(self, outline: SlideOutline) -> bool:
         exhibit = outline.content_json.get("exhibit_spec")
         return isinstance(exhibit, dict) and bool(exhibit.get("type"))
+
+    def _outline_slide_fingerprint(
+        self,
+        outline: SlideOutline,
+        title: str,
+        bullets: list[str],
+    ) -> set[str]:
+        content = outline.content_json
+        exhibit = content.get("exhibit_spec")
+        exhibit_text = self._flatten_for_similarity(exhibit) if exhibit else ""
+        return self._meaningful_tokens(" ".join([title, *bullets, exhibit_text]))
+
+    def _duplicate_slide_index(
+        self,
+        fingerprint: set[str],
+        previous: list[tuple[int, set[str]]],
+    ) -> int | None:
+        if len(fingerprint) < 6:
+            return None
+        for slide_index, prior in previous:
+            if len(prior) < 6:
+                continue
+            shared = len(fingerprint & prior)
+            if shared < 6:
+                continue
+            union = len(fingerprint | prior)
+            smaller = min(len(fingerprint), len(prior))
+            jaccard = shared / union if union else 0
+            containment = shared / smaller if smaller else 0
+            if jaccard >= 0.72 or containment >= 0.86:
+                return slide_index
+        return None
+
+    def _flatten_for_similarity(self, value) -> str:
+        if isinstance(value, dict):
+            return " ".join(
+                self._flatten_for_similarity(item)
+                for item in value.values()
+            )
+        if isinstance(value, list):
+            return " ".join(self._flatten_for_similarity(item) for item in value)
+        return str(value)
 
     def _normalize_text(self, text: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", str(text).lower())

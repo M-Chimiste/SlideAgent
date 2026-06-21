@@ -15,8 +15,9 @@ from app.config import Settings
 from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.models.brand import BrandDNA
 from app.models.document import DocumentBundle, DocumentMetadata, DocumentMetric, DocumentSection
-from app.models.generation import ContentBlock, DeckBlueprint, GeneratedSlideSpec
+from app.models.generation import ContentBlock, DeckBlueprint, DeckSpec, GeneratedSlideSpec
 from app.models.outline import SlideOutline
+from app.models.planning import StoryMap
 from app.models.template import SlideField, SlideSchema, SlideSpec, TemplateProfile
 from app.services.content_planner import ContentPlanner
 from app.services.document_ingester import DocumentIngester
@@ -277,10 +278,13 @@ def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
     assert all(outline.content_json.get("exhibit_spec") for outline in outlines)
     assert any(archetype == "comparison_table" for archetype in archetypes)
     assert any(archetype == "code_panel" for archetype in archetypes)
+    assert any(archetype == "matrix_2x2" for archetype in archetypes)
+    assert any(archetype == "callouts" for archetype in archetypes)
+    assert any(archetype == "icon_rows" for archetype in archetypes)
     assert sum(
-        archetype in {"code_panel", "table_reference", "reference"}
+        archetype in {"dependency_map", "framework_cycle", "code_panel", "table_reference"}
         for archetype in archetypes
-    ) >= 4
+    ) <= 5
     assert any(
         warning["field"] == "llm_planning"
         and "not configured" in warning["message"]
@@ -592,6 +596,391 @@ def test_fallback_section_selection_uses_blueprint_source_map() -> None:
     section = ContentPlanner()._section_for_blueprint_slot(1, sections, blueprint)
 
     assert section.title == "3.3 When and How to Update"
+
+
+def test_blueprint_source_map_spans_long_documents() -> None:
+    planner = ContentPlanner()
+    bundle = DocumentBundle(
+        job_id="long-doc",
+        sections=[
+            DocumentSection(
+                title=f"Chapter {index}",
+                level=1,
+                content=f"Evidence from chapter {index}.",
+                source_doc_id="doc",
+            )
+            for index in range(1, 31)
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Long Document"),
+        content_inventory=[],
+    )
+
+    source_map = planner._source_coverage_map(bundle, target_slide_count=5)
+
+    assert "Chapter 1" in source_map["1"][0]
+    assert "Chapter 30" in source_map["5"][0]
+    assert len({refs[0] for refs in source_map.values()}) == 5
+
+
+def test_blueprint_source_map_represents_multiple_documents() -> None:
+    planner = ContentPlanner()
+    bundle = DocumentBundle(
+        job_id="multi-doc",
+        sections=[
+            DocumentSection(
+                title=f"Alpha {index}",
+                level=1,
+                content=f"Alpha document section {index}.",
+                source_doc_id="alpha",
+            )
+            for index in range(1, 6)
+        ]
+        + [
+            DocumentSection(
+                title=f"Beta {index}",
+                level=1,
+                content=f"Beta document section {index}.",
+                source_doc_id="beta",
+            )
+            for index in range(1, 6)
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Multi Document"),
+        content_inventory=[],
+    )
+
+    source_map = planner._source_coverage_map(bundle, target_slide_count=4)
+    refs = [refs[0] for refs in source_map.values()]
+
+    assert any(ref.startswith("alpha:") for ref in refs)
+    assert any(ref.startswith("beta:") for ref in refs)
+
+
+def test_planner_source_packet_includes_whole_document_outline() -> None:
+    planner = ContentPlanner()
+    bundle = DocumentBundle(
+        job_id="long-doc",
+        sections=[
+            DocumentSection(
+                title=f"Chapter {index}",
+                level=1,
+                content=(
+                    f"Evidence from chapter {index}. "
+                    f"Decision implication {index} should inform the story."
+                ),
+                source_doc_id="doc",
+            )
+            for index in range(1, 31)
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Long Document"),
+        content_inventory=[],
+    )
+    blueprint = DeckBlueprint(
+        deck_title="Long Document",
+        audience="Engineering leaders",
+        core_thesis="The whole document should inform the deck.",
+        target_slide_count=5,
+        story_beats=[],
+        section_plan=[],
+        archetype_sequence=[
+            "cover",
+            "executive_summary",
+            "comparison_table",
+            "checklist",
+            "closing_recommendation",
+        ],
+        source_coverage_map=planner._source_coverage_map(bundle, target_slide_count=5),
+    )
+
+    packet = planner._planner_source_packet(bundle, blueprint, "balanced")
+
+    outline_titles = [
+        section["title"] for section in packet["document_outline"]["sections"]
+    ]
+    detailed_titles = [section["title"] for section in packet["sections"]]
+    assert packet["document_outline"]["section_count"] == 30
+    assert "Chapter 30" in outline_titles
+    assert "Chapter 30" in detailed_titles
+
+
+def test_planner_source_packet_caps_huge_document_outline() -> None:
+    planner = ContentPlanner()
+    bundle = DocumentBundle(
+        job_id="huge-doc",
+        sections=[
+            DocumentSection(
+                title=f"Chapter {index}",
+                level=1,
+                content=(
+                    f"Evidence from chapter {index}. "
+                    f"Decision implication {index} should inform the story."
+                ),
+                source_doc_id="doc",
+            )
+            for index in range(1, 151)
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Huge Document"),
+        content_inventory=[],
+    )
+    blueprint = DeckBlueprint(
+        deck_title="Huge Document",
+        audience="Engineering leaders",
+        core_thesis="The full document should inform the deck.",
+        target_slide_count=12,
+        story_beats=[],
+        section_plan=[],
+        archetype_sequence=["cover"] * 12,
+        source_coverage_map=planner._source_coverage_map(bundle, target_slide_count=12),
+    )
+
+    packet = planner._planner_source_packet(bundle, blueprint, "balanced")
+    outline_titles = [
+        section["title"] for section in packet["document_outline"]["sections"]
+    ]
+
+    assert packet["document_outline"]["section_count"] == 150
+    assert packet["document_outline"]["included_section_count"] == 80
+    assert packet["document_outline"]["omitted_section_count"] == 70
+    assert packet["document_outline"]["coverage"] == "representative"
+    assert "Chapter 150" in outline_titles
+
+
+def test_source_compression_spans_long_documents_and_estimates_tokens() -> None:
+    planner = ContentPlanner()
+    bundle = DocumentBundle(
+        job_id="long-compression",
+        sections=[
+            DocumentSection(
+                title=f"Chapter {index}",
+                level=1,
+                content=f"Evidence from chapter {index}. Risk and recommendation {index}.",
+                source_doc_id="doc",
+            )
+            for index in range(1, 31)
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Long Compression"),
+        content_inventory=[],
+    )
+
+    compression = planner._build_source_compression(bundle, "balanced")
+    titles = [unit.title for unit in compression.evidence_units]
+
+    assert compression.section_count == 30
+    assert compression.coverage == "full"
+    assert compression.estimated_tokens > 0
+    assert "Chapter 1" in titles
+    assert "Chapter 30" in titles
+    assert compression.tensions
+
+
+def test_source_compression_represents_multiple_documents() -> None:
+    planner = ContentPlanner()
+    bundle = DocumentBundle(
+        job_id="multi-compression",
+        sections=[
+            DocumentSection(
+                title="Alpha opening",
+                level=1,
+                content="Alpha evidence creates the initial problem.",
+                source_doc_id="alpha",
+            ),
+            DocumentSection(
+                title="Beta opening",
+                level=1,
+                content="Beta evidence defines the recommendation.",
+                source_doc_id="beta",
+            ),
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Multi Compression"),
+        content_inventory=[],
+    )
+
+    compression = planner._build_source_compression(bundle, "fast")
+
+    assert {entry["source_doc_id"] for entry in compression.document_manifest} == {
+        "alpha",
+        "beta",
+    }
+    assert {unit.source_doc_id for unit in compression.evidence_units} == {
+        "alpha",
+        "beta",
+    }
+
+
+def test_story_map_uses_llm_and_fallback_when_deck_planning_fails() -> None:
+    class StoryMapLLM:
+        def __init__(self) -> None:
+            self.prompts = []
+
+        def complete_json(self, **kwargs):
+            self.prompts.append(kwargs["user_prompt"])
+            if "Create a consulting story map" in kwargs["user_prompt"]:
+                return {
+                    "thesis": "Persistent context improves delivery.",
+                    "narrative_arc": "Situation -> Complication -> Resolution",
+                    "recommendation": "Adopt source-backed review.",
+                    "beats": [
+                        {
+                            "beat_number": 1,
+                            "role": "cover",
+                            "claim": "Translate persistent context into a delivery decision",
+                            "source_refs": ["doc-1:Developer Productivity"],
+                            "preferred_exhibit": "cover",
+                            "rationale": "Set the thesis.",
+                        },
+                        {
+                            "beat_number": 2,
+                            "role": "evidence",
+                            "claim": "Use source-backed review to reduce delivery risk",
+                            "source_refs": ["doc-1:Quality Risk"],
+                            "preferred_exhibit": "callouts",
+                            "rationale": "Support the decision.",
+                        },
+                    ],
+                }
+            return None
+
+    llm = StoryMapLLM()
+    planner = ContentPlanner(llm_client=llm)
+    outlines, warnings = planner.plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="fast",
+    )
+
+    assert outlines
+    assert planner.last_planning_artifacts["story-map"]["status"] == "llm"
+    assert any("Story map:" in prompt for prompt in llm.prompts)
+    assert any(warning["field"] == "llm_planning" for warning in warnings)
+
+
+def test_story_map_falls_back_on_malformed_llm_response() -> None:
+    class MalformedStoryMapLLM:
+        def complete_json(self, **kwargs):
+            if "Create a consulting story map" in kwargs["user_prompt"]:
+                return {"beats": []}
+            return None
+
+    planner = ContentPlanner(llm_client=MalformedStoryMapLLM())
+    outlines, _warnings = planner.plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="fast",
+    )
+
+    assert outlines
+    story_map = planner.last_planning_artifacts["story-map"]
+    assert story_map["status"] == "fallback"
+    assert "contained no beats" in story_map["fallback_reason"]
+
+
+def test_exhibit_selector_promotes_metric_claim_to_chart() -> None:
+    planner = ContentPlanner()
+    bundle = _bundle()
+    bundle.metrics = [
+        DocumentMetric(
+            label="Developers using AI",
+            value=85,
+            unit="%",
+            source_doc_id="doc-1",
+        ),
+        DocumentMetric(
+            label="AI-generated code",
+            value=95,
+            unit="%",
+            source_doc_id="doc-1",
+        ),
+        DocumentMetric(
+            label="Context window",
+            value=200000,
+            unit="tokens",
+            source_doc_id="doc-1",
+        ),
+    ]
+    slide = GeneratedSlideSpec(
+        slide_number=1,
+        slide_type="content",
+        action_title="Quantify AI adoption before scaling delivery",
+        content_blocks=[ContentBlock(type="bullets", body=["AI adoption reached 85%."])],
+        sources=["Uploaded source"],
+        source_refs=["doc-1:Developer Productivity"],
+        archetype="two_column",
+        exhibit_spec={"type": "two_column", "points": ["AI adoption reached 85%."]},
+    )
+    deck = DeckSpec(deck_title="Selector", slides=[slide])
+
+    planner._apply_exhibit_selection(deck, bundle)
+
+    assert deck.slides[0].archetype == "metric_chart"
+    assert deck.slides[0].chart_spec["type"] == "bar"
+
+
+def test_spec_gate_repairs_duplicate_and_over_budget_slide_specs() -> None:
+    planner = ContentPlanner()
+    bundle = _bundle()
+    blueprint = planner._build_blueprint(
+        bundle,
+        "Create a deck.",
+        "freeform",
+        quality_profile="balanced",
+        length_strategy="auto",
+    )
+    compression = planner._build_source_compression(bundle, "balanced")
+    story_map = StoryMap(
+        status="fallback",
+        thesis="Improve delivery quality.",
+        recommendation="Adopt source-backed review.",
+        beats=[],
+    )
+    duplicate_body = [" ".join(["Repeated evidence point"] * 20) for _ in range(8)]
+    slides = [
+        GeneratedSlideSpec(
+            slide_number=1,
+            slide_type="content",
+            action_title="Overview",
+            content_blocks=[ContentBlock(type="bullets", body=duplicate_body)],
+            sources=["Uploaded source"],
+            source_refs=["doc-1:Developer Productivity"],
+            archetype="two_column",
+            exhibit_spec={"type": "two_column", "points": duplicate_body},
+        ),
+        GeneratedSlideSpec(
+            slide_number=2,
+            slide_type="content",
+            action_title="Overview",
+            content_blocks=[ContentBlock(type="bullets", body=duplicate_body)],
+            sources=["Uploaded source"],
+            source_refs=["doc-1:Developer Productivity"],
+            archetype="two_column",
+            exhibit_spec={"type": "two_column", "points": duplicate_body},
+        ),
+    ]
+    deck = DeckSpec(deck_title="Gate", slides=slides, blueprint=blueprint)
+
+    report = planner._run_spec_gate(deck, bundle, compression, story_map)
+
+    categories = {issue.category for issue in report.issues}
+    assert "action_title" in categories
+    assert "content_budget" in categories
+    assert "duplicate_slide" in categories
+    assert report.repaired_count >= 3
+    assert deck.slides[1].source_refs != ["doc-1:Developer Productivity"]
+    assert len(deck.slides[0].content_blocks[0].body) <= 5
 
 
 def test_planner_reports_llm_fallback_when_configured_client_fails() -> None:
@@ -1744,7 +2133,7 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
         "code_panel",
         "checklist",
         "quote_sidebar",
-        "dependency_map",
+        "callouts",
     ]
     assert not warnings
 
@@ -2109,7 +2498,8 @@ def test_showcase_planner_uses_richer_source_packet_and_output_budget() -> None:
     packet = json.loads(prompt.split("Source packet: ", 1)[1].split("\nMetrics:", 1)[0])
     assert packet["section_count"] == 18
     assert packet["included_section_count"] == 18
-    assert packet["sections"][-1]["id"] == "doc-1:Section 18"
+    assert any(section["id"] == "doc-1:Section 18" for section in packet["sections"])
+    assert packet["document_outline"]["section_count"] == 18
     assert "key_points" in packet["sections"][0]
 
 

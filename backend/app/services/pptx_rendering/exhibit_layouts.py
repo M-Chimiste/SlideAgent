@@ -610,6 +610,10 @@ class ExhibitLayoutRenderingMixin:
                 {"name": "Thin sourcing", "symptom": "Skipping source checks", "better_behavior": "Cite evidence"},
                 {"name": "Blind accept", "symptom": "Accepting code blindly", "better_behavior": "Run QA gates"},
             ]
+        patterns = [pattern for pattern in patterns if isinstance(pattern, dict)]
+        if not patterns:
+            self._add_grid(slide, outline, brand)
+            return
         icons = self._icons(outline)
         count = min(len(patterns), 4)
         card_w = 11.4 / count - 0.24
@@ -670,8 +674,11 @@ class ExhibitLayoutRenderingMixin:
 
     def _add_icon_rows(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         bullets = self._bullets(outline)[:4]
-        if not bullets:
-            bullets = ["Clarify the implication and required management action."]
+        if len(bullets) < 2:
+            # A single point reads as a near-empty slide in a multi-row layout;
+            # render it as one deliberate statement panel instead.
+            self._add_grid(slide, outline, brand)
+            return
         icons = self._icons(outline)
         for idx, text in enumerate(bullets[:4]):
             y = 1.45 + idx * 1.25

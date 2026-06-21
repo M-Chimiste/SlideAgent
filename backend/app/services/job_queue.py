@@ -58,7 +58,10 @@ class JobQueue:
             job_id = await self._queue.get()
             try:
                 await self.store.update_job(job_id, status="running")
-                await self.orchestrator.run_job(job_id)
+                await asyncio.to_thread(self._run_job_in_thread, job_id)
             finally:
                 self._known_jobs.discard(job_id)
                 self._queue.task_done()
+
+    def _run_job_in_thread(self, job_id: str) -> None:
+        asyncio.run(self.orchestrator.run_job(job_id))

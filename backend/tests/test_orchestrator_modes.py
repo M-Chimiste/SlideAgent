@@ -236,7 +236,11 @@ async def test_orchestrator_runs_freeform_job_without_template(tmp_path: Path) -
     assert outlines
     assert {outline.layout_json["generation_mode"] for outline in outlines} == {"freeform"}
     assert len(Presentation(job.result_file).slides) == len(outlines)
-    assert list((storage.job_dir("freeform-job") / "preview").glob("slide-*.png"))
+    assert list((storage.job_dir("freeform-job") / "preview").glob("slide-*.jpg"))
+    planning_dir = storage.job_dir("freeform-job") / "planning"
+    assert (planning_dir / "source-compression.json").exists()
+    assert (planning_dir / "story-map.json").exists()
+    assert (planning_dir / "spec-gate.json").exists()
 
 
 @pytest.mark.asyncio

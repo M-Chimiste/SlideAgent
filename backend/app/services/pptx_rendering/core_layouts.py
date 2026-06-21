@@ -32,8 +32,9 @@ class CoreLayoutRenderingMixin:
         background.fill.fore_color.rgb = self._rgb(brand.colors.primary)
         background.line.color.rgb = self._rgb(brand.colors.primary)
         title = (
-            outline.content_json.get("action_title")
+            outline.content_json.get("deck_title")
             or outline.content_json.get("title")
+            or outline.content_json.get("action_title")
             or outline.label
         )
         exhibit = self._exhibit(outline)
@@ -383,11 +384,9 @@ class CoreLayoutRenderingMixin:
             strip.fill.solid()
             strip.fill.fore_color.rgb = self._rgb(brand.colors.accent if idx == 0 else brand.colors.secondary)
             strip.line.color.rgb = strip.fill.fore_color.rgb
-            value = str(metric.get("value", "1"))
-            unit = metric.get("unit") or ""
             self._add_icon(slide, icons[idx], x + 2.54, 1.86, 0.74, brand, self._icon_fill(brand, idx))
-            self._add_big_number(slide, f"{value}{unit}", x + 0.2, 2.05, 3.05, brand)
-            self._add_body_text(slide, metric.get("label", "Metric"), x + 0.35, 3.35, 2.75, 1.35, brand, center=True, size=14)
+            self._add_big_number(slide, self._format_metric_value(metric), x + 0.2, 2.05, 3.05, brand)
+            self._add_body_text(slide, self._metric_label_text(metric.get("label", "Metric")), x + 0.35, 3.35, 2.75, 1.35, brand, center=True, size=14)
 
     def _add_metric_chart(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         metrics = outline.content_json.get("metrics") or []

@@ -19,6 +19,7 @@ class LocalStorage:
         base = self.job_dir(job_id)
         (base / "documents").mkdir(parents=True, exist_ok=True)
         (base / "markdown").mkdir(parents=True, exist_ok=True)
+        (base / "planning").mkdir(parents=True, exist_ok=True)
         (base / "outline").mkdir(parents=True, exist_ok=True)
         (base / "slides").mkdir(parents=True, exist_ok=True)
         (base / "preview").mkdir(parents=True, exist_ok=True)
@@ -55,6 +56,27 @@ class LocalStorage:
         target = self.job_dir(job_id) / "outline" / "outline.json"
         target.write_text(outline_json, encoding="utf-8")
         return target
+
+    def save_planning_artifacts(
+        self,
+        job_id: str,
+        artifacts: dict[str, object],
+    ) -> None:
+        self.ensure_job_dirs(job_id)
+        planning_dir = self.job_dir(job_id) / "planning"
+        import json
+
+        for name, payload in artifacts.items():
+            if name not in {"source-compression", "story-map", "spec-gate"}:
+                continue
+            target = planning_dir / f"{name}.json"
+            target.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=True),
+                encoding="utf-8",
+            )
+
+    def planning_artifact_path(self, job_id: str, artifact: str) -> Path:
+        return self.job_dir(job_id) / "planning" / f"{artifact}.json"
 
     def save_slide_script(self, job_id: str, slide_id: str, script: str) -> Path:
         self.ensure_job_dirs(job_id)
