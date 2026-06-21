@@ -14,7 +14,10 @@ class BrandColors(BaseModel):
 
 
 class BrandFonts(BaseModel):
-    heading: str = Field(default="Calibri")
+    # Freeform default house style: a serif display heading paired with a clean
+    # sans body (emulating the reference deck). Brand mode overrides both via the
+    # template analyzer, so this only styles freeform decks.
+    heading: str = Field(default="Georgia")
     body: str = Field(default="Calibri")
 
 

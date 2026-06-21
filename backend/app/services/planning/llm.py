@@ -8,6 +8,7 @@ from typing import Any
 from app.models.document import DocumentBundle, DocumentMetric, DocumentSection
 from app.models.generation import ContentBlock, DeckBlueprint, DeckSpec, GeneratedSlideSpec
 from app.models.outline import SlideOutline
+from app.models.planning import SourceCompression, StoryMap
 from app.models.template import SlideSpec, TemplateProfile
 from app.services.planning.constants import (
     PLANNER_SYSTEM_PROMPT,
@@ -25,6 +26,8 @@ class LLMPlanningMixin:
         mode: str,
         blueprint: DeckBlueprint,
         quality_profile: str,
+        source_compression: SourceCompression | None = None,
+        story_map: StoryMap | None = None,
     ) -> DeckSpec | None:
         if self.llm_client is None:
             return None
@@ -44,7 +47,8 @@ class LLMPlanningMixin:
             "Use the supplied blueprint as the deck plan, but improve wording and exhibit details from the source. "
             "Use distinct slide archetypes across the deck: cover, executive summary, section divider, "
             "comparison table, dependency map, framework/cycle, code/reference panel, checklist, "
-            "anti-pattern cards, quote/sidebar, metric chart, table/reference, or closing recommendation. "
+            "anti-pattern cards, quote/sidebar, metric chart, table/reference, 2x2 matrix, "
+            "callouts, icon rows, two column, or closing recommendation. "
             "Avoid repeating the same slide type on adjacent slides. "
             "Use exactly this shape: "
             "{\"deck_title\":\"string\",\"audience\":\"string\",\"goal\":\"string\","
@@ -58,9 +62,9 @@ class LLMPlanningMixin:
             "\"content_blocks\":[{\"type\":\"bullets|chart|table|callout|text\","
             "\"body\":[\"short evidence point\"],\"annotations\":[],\"callouts\":[]}],"
             "\"chart_spec\":null,\"sources\":[\"Uploaded source\"],"
-            "\"archetype\":\"cover|section_divider|comparison_table|dependency_map|cycle|code_panel|checklist|quote_sidebar|anti_patterns|metric_chart|executive_summary|table_reference|closing_recommendation\","
+            "\"archetype\":\"cover|section_divider|comparison_table|dependency_map|cycle|code_panel|checklist|quote_sidebar|anti_patterns|metric_chart|executive_summary|table_reference|matrix_2x2|callouts|icon_rows|two_column|closing_recommendation\","
             "\"narrative_role\":\"cover|executive_summary|problem|evidence|framework|implementation|reference|decision|closing\","
-            "\"exhibit_spec\":{\"type\":\"comparison_table|dependency_map|cycle|checklist|code_panel|anti_patterns|quote_sidebar|metric_chart|reference_table|recommendation\"},"
+            "\"exhibit_spec\":{\"type\":\"comparison_table|dependency_map|cycle|checklist|code_panel|anti_patterns|quote_sidebar|metric_chart|reference_table|matrix_2x2|callouts|icon_rows|two_column|recommendation\"},"
             "\"diagram_spec\":null,"
             "\"design_intent\":\"short renderer guidance\","
             "\"source_refs\":[\"one of the source packet section ids, table ids, metric ids, or [source needed]\"],"
@@ -79,6 +83,8 @@ class LLMPlanningMixin:
             f"Generation mode: {mode}. Quality profile: {quality_profile}. "
             f"Instructions: {instructions or 'No extra instructions.'}\n"
             f"Blueprint: {blueprint.model_dump()}\n"
+            f"Story map: {story_map.model_dump() if story_map else {}}\n"
+            f"Source compression: {source_compression.model_dump() if source_compression else {}}\n"
             f"Allowed numeric tokens: {allowed_numbers or ['none']}\n"
             f"Source packet: {json.dumps(source_packet, ensure_ascii=True)}\n"
             f"Metrics: {json.dumps(metrics, ensure_ascii=True)}"
@@ -164,14 +170,22 @@ class LLMPlanningMixin:
     ) -> dict[str, Any]:
         section_limit = self._planner_section_limit(quality_profile, blueprint)
         char_limit = self._planner_section_char_limit(quality_profile)
+        detailed_sections = self._planner_detailed_sections(
+            bundle,
+            blueprint,
+            section_limit,
+        )
         sections = [
             self._planner_section_payload(section, index, char_limit)
-            for index, section in enumerate(bundle.sections[:section_limit])
+            for index, section in enumerate(detailed_sections)
         ]
+        document_outline = self._planner_document_outline(bundle, quality_profile)
+        source_index = self._planner_source_index(bundle, sections, document_outline)
         return {
             "metadata": bundle.metadata.model_dump(),
             "section_count": len(bundle.sections),
             "included_section_count": len(sections),
+            "document_outline": document_outline,
             "sections": sections,
             "content_inventory": bundle.content_inventory[:24],
             "tables": [
@@ -185,8 +199,163 @@ class LLMPlanningMixin:
                 }
                 for table in bundle.tables[:6]
             ],
-            "source_index": bundle.source_index,
+            "source_index": source_index,
         }
+
+    def _planner_detailed_sections(
+        self,
+        bundle: DocumentBundle,
+        blueprint: DeckBlueprint,
+        section_limit: int,
+    ) -> list[DocumentSection]:
+        selected: list[DocumentSection] = []
+        seen: set[str] = set()
+
+        def add(section: DocumentSection | None) -> None:
+            if section is None:
+                return
+            key = (
+                getattr(section, "source_id", "")
+                or f"{section.source_doc_id}:{section.title}"
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            selected.append(section)
+
+        for slide_number in sorted(
+            blueprint.source_coverage_map,
+            key=lambda value: int(value) if str(value).isdigit() else 9999,
+        ):
+            for source_ref in blueprint.source_coverage_map.get(slide_number, []):
+                add(self._section_for_source_ref(str(source_ref), bundle))
+                if len(selected) >= section_limit:
+                    return selected
+
+        for section in self._planner_outline_sections(bundle.sections, section_limit):
+            add(section)
+            if len(selected) >= section_limit:
+                return selected
+
+        for section in bundle.sections:
+            add(section)
+            if len(selected) >= section_limit:
+                break
+        return selected
+
+    def _planner_document_outline(
+        self,
+        bundle: DocumentBundle,
+        quality_profile: str,
+    ) -> dict[str, Any]:
+        summary_limit = self._planner_outline_summary_limit(quality_profile)
+        outline_sections = self._planner_outline_sections(
+            bundle.sections,
+            self._planner_outline_section_budget(quality_profile),
+        )
+        sections = [
+            {
+                "id": self._source_ref(section, index),
+                "title": section.title,
+                "level": section.level,
+                "source_doc_id": section.source_doc_id,
+                "word_count": len(section.content.split()),
+                "summary": self._source_excerpt(section.content, summary_limit),
+                "key_points": self._source_key_points(section.content)[:2],
+            }
+            for index, section in enumerate(outline_sections)
+        ]
+        return {
+            "section_count": len(bundle.sections),
+            "included_section_count": len(sections),
+            "omitted_section_count": max(0, len(bundle.sections) - len(sections)),
+            "coverage": "full" if len(sections) == len(bundle.sections) else "representative",
+            "documents": self._planner_document_manifest(bundle),
+            "sections": sections,
+        }
+
+    def _planner_outline_sections(
+        self,
+        sections: list[DocumentSection],
+        budget: int,
+    ) -> list[DocumentSection]:
+        return self._representative_source_sections(sections, budget)
+
+    def _planner_document_manifest(self, bundle: DocumentBundle) -> list[dict[str, Any]]:
+        docs: dict[str, dict[str, Any]] = {}
+        filenames = self._planner_filenames_by_doc_id(bundle)
+        for section in bundle.sections:
+            doc_id = section.source_doc_id or "__unknown__"
+            entry = docs.setdefault(
+                doc_id,
+                {
+                    "source_doc_id": doc_id,
+                    "filename": filenames.get(doc_id, doc_id),
+                    "section_count": 0,
+                    "word_count": 0,
+                    "first_section": section.title,
+                    "last_section": section.title,
+                },
+            )
+            entry["section_count"] += 1
+            entry["word_count"] += len(section.content.split())
+            entry["last_section"] = section.title
+        return list(docs.values())
+
+    def _planner_filenames_by_doc_id(self, bundle: DocumentBundle) -> dict[str, str]:
+        filenames: dict[str, str] = {}
+        for entry in bundle.source_index.values():
+            doc_id = entry.get("source_doc_id")
+            filename = entry.get("filename")
+            if doc_id and filename:
+                filenames.setdefault(doc_id, filename)
+        return filenames
+
+    def _planner_source_index(
+        self,
+        bundle: DocumentBundle,
+        sections: list[dict[str, Any]],
+        document_outline: dict[str, Any],
+    ) -> dict[str, dict[str, str]]:
+        included_ids = {
+            str(section.get("id"))
+            for section in sections
+            if section.get("id")
+        }
+        included_ids.update(
+            str(section.get("id"))
+            for section in document_outline.get("sections", [])
+            if section.get("id")
+        )
+        included_ids.update(
+            getattr(table, "source_id", "")
+            for table in bundle.tables[:6]
+            if getattr(table, "source_id", "")
+        )
+        included_ids.update(
+            getattr(metric, "source_id", "")
+            for metric in bundle.metrics[:8]
+            if getattr(metric, "source_id", "")
+        )
+        return {
+            source_id: entry
+            for source_id, entry in bundle.source_index.items()
+            if source_id in included_ids
+        }
+
+    def _planner_outline_section_budget(self, quality_profile: str) -> int:
+        if quality_profile == "fast":
+            return 40
+        if quality_profile == "showcase":
+            return 120
+        return 80
+
+    def _planner_outline_summary_limit(self, quality_profile: str) -> int:
+        if quality_profile == "fast":
+            return 180
+        if quality_profile == "showcase":
+            return 360
+        return 260
 
     def _planner_section_limit(
         self, quality_profile: str, blueprint: DeckBlueprint

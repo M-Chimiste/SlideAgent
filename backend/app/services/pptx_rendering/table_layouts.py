@@ -25,6 +25,11 @@ class TableLayoutRenderingMixin:
         if not display_rows:
             self._add_two_column(slide, outline, brand)
             return
+        if not any(str((row + ["", ""])[2]).strip() for row in display_rows):
+            # A comparison with no target-state column is malformed; render a
+            # populated two-column layout rather than a column of empty cards.
+            self._add_two_column(slide, outline, brand)
+            return
 
         rail = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
@@ -49,7 +54,7 @@ class TableLayoutRenderingMixin:
         )
         self._add_dark_text(
             slide,
-            f"{len(display_rows)} shifts",
+            f"{len(display_rows)} shift{'s' if len(display_rows) != 1 else ''}",
             1.18,
             2.42,
             1.9,
@@ -94,7 +99,7 @@ class TableLayoutRenderingMixin:
             cells = (row + ["", ""])[:3]
             dimension = self._truncate_at_word(cells[0], 28)
             current = self._truncate_at_word(cells[1], 72)
-            target = self._truncate_at_word(cells[2], 72)
+            target = self._truncate_at_word(cells[2], 72) or "Managed behavior"
             y = start_y + idx * (row_h + gap)
             accent = self._icon_fill(brand, idx)
 

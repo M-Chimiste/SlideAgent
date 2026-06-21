@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-06-18
+**Last updated:** 2026-06-19
 
 ## Current Reality
 
@@ -11,7 +11,12 @@ What exists today:
 
 - FastAPI backend scaffold with local storage, SQLite persistence, job queue,
   template routes, job routes, and preview/download endpoints.
-- React frontend scaffold for template setup, generation, review, and download.
+- React frontend implementing the SlideForge design comp as a five-screen
+  wizard (Mode → Setup → Brief → Generate → Review) plus a per-slide lightbox,
+  wired to the live `/api` (job creation, status polling, preview images,
+  QA/warnings, downloads, template analysis, and per-slide regeneration).
+- The wizard also has a desktop Library rail for recent jobs and saved
+  brand/strict templates, including strict schema override editing.
 - Service implementations for template analysis, document ingestion, content
   planning, design planning, deterministic PPTX building, strict injection,
   hybrid assembly, rendering hooks, and visual QA.
@@ -22,19 +27,20 @@ What exists today:
 - Python deterministic renderer for generated layouts, with the legacy
   PptxGenJS path no longer required for the tested freeform/brand flows.
 - Strict schema validation for simple field values.
-- Focused backend regression suite of 172 tests (`172 passed` on 2026-06-18).
+- Focused backend regression suite of 175 tests (`175 passed` on 2026-06-19).
 - App coverage after the backend refactor is `78%` overall for `app/*`
   (`/private/tmp/slideagent-refactor-coverage-after`), up from the 76%
   pre-refactor baseline.
 - `project_docs/style_guide.md`, the consulting quality guide that now drives
   planner prompts and ConsultingQA checks.
-- Local OpenAI-compatible model integration for LM Studio / Metis using
+- Local OpenAI-compatible model integration for LM Studio or another compatible
+  local endpoint using
   `qwen3.6-35b-a3b-mtp` with `reasoning_effort=none` and a longer local
   planning timeout.
-- Optional slower planning path tested against Athena
-  (`http://athena.local:1240/v1`) using `minimax-m2.7`.
+- Optional slower planning path tested against a separate OpenAI-compatible
+  local endpoint using `minimax-m2.7`.
 - Jobs now accept `planner_profile=fast|deep`. Fast uses the default Qwen
-  planner profile; deep uses the configured Minimax/Athena planner profile.
+  planner profile; deep uses the configured premium planner profile.
   VisualQA is configured separately from the planner and defaults to Qwen.
 - Jobs also accept `quality_profile=fast|balanced|showcase` and
   `length_strategy=auto|concise|expanded` for generated decks.
@@ -134,6 +140,72 @@ brand-profile paths materially improve deck polish, but manual Office review,
 broader diagram/chart families, richer brand-template interpretation, and more
 non-demo source smokes remain the next quality frontier.
 
+### Frontend wizard + preview/regen fixes (2026-06-18)
+
+The frontend was rebuilt from the earlier tabbed scaffold into the SlideForge
+design comp (imported from Claude Design, `SlideForge.dc.html`), and two
+supporting backend gaps it exposed were fixed:
+
+- **Wizard UI:** a five-screen flow — Mode (freeform/brand/strict) → Setup
+  (brand/strict only) → Brief → Generate → Review — plus a slide lightbox.
+  Ported the warm "paper" design system with light/dark themes and the
+  Newsreader / Hanken Grotesk / IBM Plex Mono type stack. All screen data is
+  live API data, not comp placeholders: the Generate screen maps backend job
+  status (`queued→analyzing→planning→generating→qa→done`) onto an eight-stage
+  pipeline with the real progress value; Review renders real preview images, QA
+  stat cards (from `qa_summary`/warnings), warnings, and PPTX/PDF download
+  links; the Setup screen uploads a PPTX to `POST /api/templates/analyze` and
+  renders the extracted Brand DNA (colors/fonts/logo/layout notes) or strict
+  field schema; the lightbox regenerates a slide via
+  `POST /api/jobs/{id}/regen/{i}`. Layout shapes are stored under
+  `frontend/src/components/` with shared tokens in `frontend/src/ui.ts`.
+- **Freeform regenerate fix:** the regen route looked the template up via
+  `store.get_template(job.template_id)`, which returns `None` for freeform jobs
+  (they use the in-memory `__freeform__` sentinel), so per-slide regeneration
+  404'd for every freeform deck. The route now resolves the freeform template
+  the same way `run_job` does; `_freeform_template` was promoted to a public
+  `JobOrchestrator.freeform_template()`.
+- **Preview-image format consistency:** preview images are now uniformly
+  `slide-*.jpg` across the real LibreOffice/Poppler renderer, the Pillow
+  no-tools fallback (previously `slide-*.png`), the job/preview API routes
+  (which only globbed `.jpg`), and the frontend. Previously the fallback wrote
+  `.png` while the routes globbed `.jpg`, so a render-tool-less environment
+  would have returned an empty preview list to the UI. Two stale tests that
+  assumed render tools were absent (`test_orchestrator_modes` preview glob,
+  `test_brand_template_support` thumbnail assertion) were corrected/made
+  environment-robust; the suite is now genuinely `172 passed` in this
+  tools-present environment.
+
+### UI regression and container alignment pass (2026-06-19)
+
+The post-overhaul UI review identified three non-mobile regressions plus stale
+container assumptions. Those were addressed without changing the mobile layout
+scope:
+
+- **Truthful QA review state:** `GET /api/jobs/{id}` now returns
+  `qa_issues` from the latest QA round in addition to the existing
+  `qa_summary` and pipeline `warnings`. The Review screen and slide lightbox
+  derive pass/warning state from both latest QA issues and pipeline warnings,
+  replacing the earlier optimistic hard-coded horizontal-flow pass message.
+- **Recovered saved work access:** the new desktop Library rail lists recent
+  jobs and saved brand/strict templates. Users can reopen completed jobs in
+  Review, inspect active/error jobs in the Generate status screen, use saved
+  templates for new jobs, and edit strict schema overrides (`required`,
+  `max_chars`, allowed `values`) through a modal backed by `PATCH
+  /api/templates/{id}`.
+- **Visible regeneration failures:** slide regeneration errors now surface
+  inline in the lightbox using backend `detail` messages where available,
+  instead of being swallowed.
+- **Docker/runtime alignment:** Docker now builds the frontend with `npm ci`,
+  installs backend Node worker dependencies from `backend/package-lock.json`,
+  serves the built frontend from `/app/frontend/dist`, and persists SQLite,
+  templates, and job artifacts under `/app/data`, matching
+  `docker-compose.yml`'s `./data:/app/data` volume. Compose now passes through
+  the local planner, deep planner, vision, AWS/Bedrock, QA, and worker
+  concurrency environment knobs from `.env`, and `.dockerignore` excludes
+  local caches, build artifacts, generated data, `node_modules`, and `.env`
+  secrets from the build context.
+
 ## Historical Context
 
 The old implementation preserved in git history at commit `ade041c` had useful
@@ -198,8 +270,8 @@ architecture target is documented in [architecture.md](./architecture.md).
 ## Verification Evidence
 
 - Backend tests: `cd backend && python -m pytest tests/ -q` passed
-  (`172 passed`) on 2026-06-18.
-- Backend lint: `cd backend && ruff check app/ tests/` passed on 2026-06-18.
+  (`175 passed`) on 2026-06-19.
+- Backend lint: `cd backend && ruff check app/ tests/` passed on 2026-06-19.
 - Backend coverage after refactor:
   - App total: `78%`.
   - `ContentPlanner` facade: `92%`; extracted planning modules range from
@@ -208,7 +280,11 @@ architecture target is documented in [architecture.md](./architecture.md).
     range from `65%` to `95%`.
   - `VisualQAAgent` facade: `92%`; extracted VisualQA modules range from `81%`
     to `92%`.
-- Frontend production build: `npm run build` passes.
+- Frontend typecheck (`npx tsc --noEmit`) and production build (`npm run build`)
+  pass for the wizard UI on 2026-06-19.
+- Docker Compose config validation (`docker-compose config`) passed on
+  2026-06-19. A full Docker image build was not run because the local Docker
+  daemon/Colima socket was unavailable in this environment.
 - Local model list endpoint returned `qwen3.6-35b-a3b-mtp`.
 - Local Qwen text generation works through `/v1/chat/completions`.
 - Local Qwen vision accepts OpenAI-style `image_url` messages.
@@ -238,8 +314,9 @@ architecture target is documented in [architecture.md](./architecture.md).
   - Previous Hermes diagram smoke evidence remains available at
     `/private/tmp/slideagent-hermes-diagram-smoke-final`.
   - Qwen remains the fast default and works well for development iteration.
-    The latest output-polish Metis/Qwen vision smoke
-    (`output-polish-metis-final`, using `http://metis.local:1240/v1`) produced
+    The latest output-polish local-model vision smoke
+    (`output-polish-local-final`, using an OpenAI-compatible local endpoint)
+    produced
     freeform, brand, and strict PPTX artifacts with no planner fallback, no
     build warnings, no duplicate titles, and zero critical findings after
     repair. The source-backed generated decks rendered section-level source
@@ -306,7 +383,7 @@ architecture target is documented in [architecture.md](./architecture.md).
 - Current repeatable local-Qwen smoke:
   `python -m app.tools.all_mode_smoke --vision` from `backend/`.
 - Current Minimax structural smoke:
-  `python -m app.tools.all_mode_smoke --base-url http://athena.local:1240/v1 --model minimax-m2.7 --label minimax-m27`
+  `python -m app.tools.all_mode_smoke --base-url http://localhost:1240/v1 --model minimax-m2.7 --label minimax-m27`
   from `backend/`.
 - Current frontend build requires dependencies to be installed first.
 - Documentation should not claim the target architecture is already

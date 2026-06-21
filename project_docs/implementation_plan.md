@@ -47,15 +47,15 @@ actual module boundaries.
   specs, sources, speaker notes, and QA metadata.
 - Add an OpenAI-compatible client configured by:
   - `LLM_PROVIDER=openai_compatible|bedrock|none`
-  - `OPENAI_COMPATIBLE_BASE_URL=http://metis.local:1240/v1`
+  - `OPENAI_COMPATIBLE_BASE_URL=http://localhost:1240/v1`
   - `OPENAI_COMPATIBLE_MODEL=qwen3.6-35b-a3b-mtp`
   - `OPENAI_COMPATIBLE_REASONING_EFFORT=none`
-  - `OPENAI_COMPATIBLE_TIMEOUT_SECONDS=120`
+  - `OPENAI_COMPATIBLE_TIMEOUT_SECONDS=900`
 - Add separate planner and vision profiles:
   - `planner_profile=fast|deep` on jobs
-  - `DEEP_PLANNER_BASE_URL=http://athena.local:1240/v1`
+  - `DEEP_PLANNER_BASE_URL=http://localhost:1240/v1`
   - `DEEP_PLANNER_MODEL=minimax-m2.7`
-  - `VISION_BASE_URL=http://metis.local:1240/v1`
+  - `VISION_BASE_URL=http://localhost:1240/v1`
   - `VISION_MODEL=qwen3.6-35b-a3b-mtp`
 - Keep deterministic fallback generation available when no model endpoint is
   reachable.
@@ -134,8 +134,8 @@ actual module boundaries.
   unmapped content.
 - Jobs can select `planner_profile=fast|deep`; deep planning uses the configured
   premium local planner while VisualQA uses the configured vision model.
-- The code can use `metis.local:1240` through OpenAI-compatible endpoints when
-  the server is available.
+- The code can use any reachable OpenAI-compatible local endpoint when the
+  server is available.
 - The smoke runner can compare local OpenAI-compatible models by overriding
   base URL, model, timeout, vision model, and report label.
 - If the local model is unavailable, tests still pass through deterministic
@@ -145,8 +145,9 @@ actual module boundaries.
 
 ## 4. Local Model Verification
 
-`http://metis.local:1240/v1/models` and `http://athena.local:1240/v1/models`
-are reachable when network access is approved for the local host.
+`http://localhost:1240/v1/models` is reachable when network access is approved
+for the local host. Docker-based runs can use `host.docker.internal` or a
+Tailscale URL when the model server is outside the container network.
 
 Verified local models:
 
@@ -158,7 +159,7 @@ Important request setting:
 - `reasoning_effort: "none"` disables reasoning-token output for this LM Studio
   endpoint. `enable_reasoning: false` and `chat_template_kwargs.enable_thinking`
   did not disable reasoning in this environment.
-- Local OpenAI-compatible calls use a separate 120-second timeout because deck
+- Local OpenAI-compatible calls use a separate 900-second timeout because deck
   planning can exceed the shorter Bedrock validation timeout.
 - Direct endpoint check on 2026-06-17:
   - no reasoning flag: response spent all completion tokens in
@@ -166,10 +167,10 @@ Important request setting:
   - `enable_reasoning: false`: same reasoning-token behavior
   - `reasoning_effort: "none"`: returned answer content with
     `reasoning_tokens: 0`
-- Athena `minimax-m2.7` currently ignores `reasoning_effort: "none"`,
+- Some `minimax-m2.7` serving stacks may ignore `reasoning_effort: "none"`,
   `enable_reasoning: false`, and `chat_template_kwargs.enable_thinking: false`.
-  It is usable with larger completion budgets, but should be treated as a
-  slower premium planner until the serving stack exposes a no-reasoning mode.
+  If so, treat that endpoint as a slower premium planner until the serving
+  stack exposes a no-reasoning mode.
 
 Smoke artifacts:
 
@@ -198,7 +199,7 @@ Repeatable smoke command:
   `--base-url`, `--model`, `--timeout-seconds`, `--vision-base-url`,
   `--vision-model`, `--vision-timeout-seconds`, and `--label`.
 - Minimax structural comparison command:
-  `python -m app.tools.all_mode_smoke --base-url http://athena.local:1240/v1 --model minimax-m2.7 --label minimax-m27`
+  `python -m app.tools.all_mode_smoke --base-url http://localhost:1240/v1 --model minimax-m2.7 --label minimax-m27`
 
 Vision smoke:
 

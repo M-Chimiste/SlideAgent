@@ -212,6 +212,39 @@ def test_consulting_qa_flags_outline_polish_issues() -> None:
     } <= categories
 
 
+def test_consulting_qa_flags_near_duplicate_slides() -> None:
+    exhibit = {
+        "type": "comparison_table",
+        "rows": [{"label": "Context", "values": ["Fragmented", "Persistent"]}],
+    }
+    outlines = [
+        _outline(
+            0,
+            "Use persistent context to improve AI handoffs",
+            [
+                "Persistent context improves handoffs.",
+                "Review gates reduce missed requirements.",
+            ],
+            source_refs=["source-doc:section:1:external-brain"],
+            exhibit_spec=exhibit,
+        ),
+        _outline(
+            1,
+            "Use persistent context to improve team handoffs",
+            [
+                "Persistent context improves handoffs.",
+                "Review gates reduce missed requirements.",
+            ],
+            source_refs=["source-doc:section:1:external-brain"],
+            exhibit_spec=exhibit,
+        ),
+    ]
+
+    issues = ConsultingQA().inspect_outlines(outlines, has_source_material=True)
+
+    assert "duplicate_slide" in {issue.category for issue in issues}
+
+
 def test_consulting_repair_rewrites_titles_sources_and_exhibits() -> None:
     bundle = _source_bundle()
     outlines = [
@@ -230,6 +263,76 @@ def test_consulting_repair_rewrites_titles_sources_and_exhibits() -> None:
         "Beyond Vibe Coding > External Brain"
     ]
     assert repaired[0].content_json["exhibit_spec"]["type"] == "comparison_table"
+
+
+def test_consulting_repair_moves_duplicate_slide_to_unused_source() -> None:
+    first = DocumentSection(
+        title="External Brain",
+        level=1,
+        content="Persistent context improves handoffs before work scales.",
+        source_doc_id="source-doc",
+        source_id="source-doc:section:1:external-brain",
+    )
+    second = DocumentSection(
+        title="Reviewer Mode",
+        level=1,
+        content="Reviewer mode catches defects before generated code ships.",
+        source_doc_id="source-doc",
+        source_id="source-doc:section:2:reviewer-mode",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[first, second],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+        source_index={
+            first.source_id: {
+                "kind": "section",
+                "source_doc_id": "source-doc",
+                "filename": "Beyond Vibe Coding.docx",
+                "title": "External Brain",
+                "label": "Beyond Vibe Coding > External Brain",
+            },
+            second.source_id: {
+                "kind": "section",
+                "source_doc_id": "source-doc",
+                "filename": "Beyond Vibe Coding.docx",
+                "title": "Reviewer Mode",
+                "label": "Beyond Vibe Coding > Reviewer Mode",
+            },
+        },
+    )
+    exhibit = {
+        "type": "comparison_table",
+        "rows": [{"label": "Context", "values": ["Fragmented", "Persistent"]}],
+    }
+    outlines = [
+        _outline(
+            0,
+            "Use persistent context to improve AI handoffs",
+            ["Persistent context improves handoffs before work scales."],
+            source_refs=[first.source_id],
+            exhibit_spec=exhibit,
+        ),
+        _outline(
+            1,
+            "Use persistent context to improve team handoffs",
+            ["Persistent context improves handoffs before work scales."],
+            source_refs=[first.source_id],
+            exhibit_spec=exhibit,
+        ),
+    ]
+    planner = ContentPlanner()
+    issues = planner.consulting_issues_for_outlines(outlines, bundle)
+
+    repaired = planner.repair_outlines_for_consulting(outlines, issues, bundle)
+
+    assert any(issue.category == "duplicate_slide" for issue in issues)
+    assert repaired[1].content_json["source_refs"] == [second.source_id]
+    assert repaired[1].label != repaired[0].label
+    assert "Reviewer Mode" in repaired[1].content_json["sources"][0]
 
 
 def test_unrelated_source_fallback_does_not_leak_demo_language() -> None:
@@ -475,3 +578,200 @@ def test_quote_sidebar_does_not_render_meta_instruction_text(tmp_path: Path) -> 
 
     assert "Quote sidebar highlighting" not in text
     assert "Treat the model as a managed teammate" in text
+
+
+def _all_slide_text(slide) -> str:
+    parts = [
+        shape.text
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    ]
+    parts.extend(
+        cell.text
+        for shape in slide.shapes
+        if getattr(shape, "has_table", False)
+        for row in shape.table.rows
+        for cell in row.cells
+    )
+    return "\n".join(parts)
+
+
+def test_phase_a_rendering_correctness(tmp_path: Path) -> None:
+    """Regression: metric dicts, unformatted numbers, and empty comparison columns
+    must never reach the rendered surface (Phase A correctness fixes)."""
+
+    def _outline(idx: int, label: str, archetype: str, content: dict) -> SlideOutline:
+        return SlideOutline(
+            id=f"pa-{idx}",
+            job_id="job-pa",
+            slide_index=idx,
+            mode="flexible",
+            label=label,
+            content_json={
+                "action_title": label,
+                "subheading": "",
+                "bullets": [],
+                "sources": ["Uploaded source"],
+                "archetype": archetype,
+                **content,
+            },
+            layout_json={"layout": archetype, "icons": ["FaDatabase", "FaShieldAlt", "FaBolt"]},
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+    outlines = [
+        # A1: metric dicts in bullets must not stringify as raw dicts.
+        _outline(
+            0,
+            "Adoption is high enough to make discipline the constraint",
+            "icon_rows",
+            {
+                "bullets": [
+                    {"label": "AI-generated", "value": 95, "unit": "%"},
+                    {"label": "Context window", "value": 200000, "unit": "tokens"},
+                ]
+            },
+        ),
+        # A2: callouts must humanize large numbers ("200k", never "200000tokens").
+        _outline(
+            1,
+            "Capacity is high but discipline is the constraint",
+            "callouts",
+            {
+                "metrics": [
+                    {"label": "Adoption", "value": 85, "unit": "%"},
+                    {"label": "Context window maximum", "value": 200000, "unit": "tokens"},
+                ]
+            },
+        ),
+        # A3: a comparison with no target-state column must not render empty cards.
+        _outline(
+            2,
+            "Four steps immediately improve AI coding outcomes",
+            "comparison_table",
+            {
+                "exhibit_spec": {
+                    "type": "comparison_table",
+                    "columns": ["Dimension", "Current state", "Target state"],
+                    "rows": [
+                        {"label": "Step 1", "values": ["Create a memory bank"]},
+                        {"label": "Step 2", "values": ["Write specs before features"]},
+                    ],
+                }
+            },
+        ),
+    ]
+    output_path = tmp_path / "phase-a.pptx"
+    DeterministicPptxRenderer().render(outlines, BrandDNA(), output_path)
+    rendered = Presentation(output_path.as_posix())
+    full = "\n".join(_all_slide_text(slide) for slide in rendered.slides)
+
+    # A1: no raw dict reprs leaked into a text frame.
+    for marker in ("{'label'", "{'value'", "{'unit'", '{"label"'):
+        assert marker not in full
+    assert "AI-generated: 95%" in full
+    # A2: large number humanized, not raw-concatenated.
+    assert "200k" in full
+    assert "200000tokens" not in full
+    # A3: empty-target comparison fell back instead of drawing blank target cards.
+    assert "COMPARISON LENS" not in _all_slide_text(rendered.slides[2])
+
+
+def test_metrics_do_not_repeat_across_slides() -> None:
+    """Phase B: the same KPI must not appear on more than one slide's exhibit."""
+    metrics = [
+        DocumentMetric(label=f"Signal {i}", value=value, unit="%", source_doc_id="source-doc")
+        for i, value in enumerate([95, 85, 72, 64, 58, 41, 33, 27], start=1)
+    ]
+    section = DocumentSection(
+        title="Adoption signals",
+        level=1,
+        content="Adoption and capacity metrics across the program.",
+        source_doc_id="source-doc",
+        source_id="source-doc:section:1:adoption",
+    )
+    bundle = DocumentBundle(
+        job_id="job-metric",
+        sections=[section],
+        tables=[],
+        metrics=metrics,
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+        source_index={
+            section.source_id: {
+                "kind": "section",
+                "source_doc_id": "source-doc",
+                "title": "Adoption signals",
+                "label": "Beyond Vibe Coding > Adoption signals",
+            }
+        },
+    )
+    deck = DeckSpec(
+        deck_title="Adoption",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=i,
+                slide_type="chart",
+                action_title=f"Adoption percentage rises across program area {i}",
+                archetype="metric_chart",
+                exhibit_spec=None,
+                source_refs=[section.source_id],
+            )
+            for i in range(1, 4)
+        ],
+    )
+    planner = ContentPlanner()
+    planner._apply_exhibit_selection(deck, bundle)
+
+    per_slide_keys = []
+    for slide in deck.slides:
+        exhibit = slide.exhibit_spec or {}
+        per_slide_keys.append(
+            {
+                planner._metric_key(m.get("label"), m.get("value"), m.get("unit"))
+                for m in exhibit.get("metrics", [])
+                if isinstance(m, dict)
+            }
+        )
+
+    seen: set[str] = set()
+    for keys in per_slide_keys:
+        assert not (keys & seen), f"metric reused across slides: {keys & seen}"
+        seen |= keys
+    # de-duplication still distributed real metrics to more than one slide
+    assert sum(1 for keys in per_slide_keys if keys) >= 2
+
+
+def test_section_numbers_are_sequential_and_cover_uses_deck_title() -> None:
+    """Phase C: kickers read 01..0N monotonically; the cover shows the deck title."""
+    roles = ["problem", "evidence", "evidence", "framework", "decision", "closing"]
+    slides = [
+        GeneratedSlideSpec(
+            slide_number=1,
+            slide_type="cover",
+            action_title="Prioritize overview to strengthen the recommendation",
+            archetype="cover",
+            narrative_role="cover",
+        )
+    ]
+    for i, role in enumerate(roles, start=2):
+        slides.append(
+            GeneratedSlideSpec(
+                slide_number=i,
+                slide_type="content",
+                action_title=f"Claim number {i} states the operating point",
+                archetype="two_column",
+                narrative_role=role,
+            )
+        )
+    deck = DeckSpec(deck_title="Beyond Vibe Coding", slides=slides)
+    outlines = ContentPlanner()._deck_to_outlines(deck, "job-c", "freeform")
+
+    # C2: the cover carries the real deck title, not the meta action title.
+    assert outlines[0].content_json.get("deck_title") == "Beyond Vibe Coding"
+    assert outlines[0].layout_json.get("section_number") == ""
+
+    # C1: section numbers are monotonic; contiguous same-label slides share one.
+    numbers = [int(o.layout_json["section_number"]) for o in outlines[1:]]
+    assert numbers == sorted(numbers)
+    assert numbers == [1, 2, 2, 3, 4, 5]

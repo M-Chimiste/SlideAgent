@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -42,6 +43,15 @@ class DummyOrchestrator:
         self.ran.append(job_id)
 
 
+class BlockingOrchestrator:
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+
+    async def run_job(self, job_id: str) -> None:
+        time.sleep(0.25)
+        self.ran.append(job_id)
+
+
 @pytest.mark.asyncio
 async def test_queue_recovers_and_runs_pending_jobs() -> None:
     store = DummyStore()
@@ -54,3 +64,18 @@ async def test_queue_recovers_and_runs_pending_jobs() -> None:
 
     assert "job-1" in orchestrator.ran
     assert any(update for update in store.updated if update[1].get("status") == "queued")
+
+
+@pytest.mark.asyncio
+async def test_queue_does_not_block_event_loop_while_job_runs() -> None:
+    store = DummyStore()
+    orchestrator = BlockingOrchestrator()
+    queue = JobQueue(store=store, orchestrator=orchestrator, worker_concurrency=1)
+
+    start = asyncio.get_running_loop().time()
+    await queue.start()
+    await asyncio.sleep(0.05)
+    elapsed = asyncio.get_running_loop().time() - start
+    await queue.stop()
+
+    assert elapsed < 0.15

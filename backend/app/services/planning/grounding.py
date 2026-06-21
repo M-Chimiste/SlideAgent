@@ -563,7 +563,11 @@ class SourceGroundingMixin:
 
     def _layout_for_slide(self, slide: GeneratedSlideSpec) -> str:
         intent_text = self._slide_intent_text(slide)
-        archetype = self._normalize_archetype(slide.archetype or "")
+        archetype = (
+            self._normalize_archetype(slide.archetype)
+            if slide.archetype and slide.archetype.strip()
+            else ""
+        )
         archetype_layouts = {
             "cover": "cover",
             "executive_summary": "executive_summary",
@@ -577,6 +581,9 @@ class SourceGroundingMixin:
             "anti_patterns": "anti_patterns",
             "metric_chart": "chart",
             "matrix_2x2": "matrix_2x2",
+            "callouts": "callouts",
+            "icon_rows": "icon_rows",
+            "two_column": "two_column",
             "table_reference": "table_reference",
             "closing_recommendation": "closing_recommendation",
             "reference": "code_panel",
@@ -669,6 +676,9 @@ class SourceGroundingMixin:
             "table_reference",
             "closing_recommendation",
             "matrix_2x2",
+            "callouts",
+            "icon_rows",
+            "two_column",
         }
         if preferred_layout in fixed_layouts:
             if preferred_layout != last_layout:
@@ -756,14 +766,19 @@ class SourceGroundingMixin:
         return bullets[:4] if bullets else lines[:4]
 
     def _pick_metrics(
-        self, metrics: list[DocumentMetric], count: int
+        self,
+        metrics: list[DocumentMetric],
+        count: int,
+        exclude_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
+        exclude = exclude_ids or set()
         selected = [
             metric
             for metric in metrics
             if self._is_chartable_metric_dict(
                 {"label": metric.label, "value": metric.value, "unit": metric.unit}
             )
+            and self._metric_key(metric.label, metric.value, metric.unit) not in exclude
         ]
         selected.sort(
             key=lambda metric: self._metric_dict_priority(
@@ -779,6 +794,20 @@ class SourceGroundingMixin:
             }
             for metric in selected
         ]
+
+    def _metric_key(self, label: Any, value: Any, unit: Any) -> str:
+        """Truncation-stable identity for a metric: value + unit + label prefix.
+
+        Uses the first four label words so a picked (truncated) label and the
+        original metric resolve to the same key for cross-slide de-duplication.
+        """
+        words = " ".join(str(label).lower().split()[:4])
+        try:
+            number = float(value)
+            value_part = str(int(number)) if number.is_integer() else str(number)
+        except (TypeError, ValueError):
+            value_part = str(value).strip().lower()
+        return f"{value_part}|{str(unit or '').strip().lower()}|{words}"
 
     def _timestamp(self) -> str:
         return datetime.now(UTC).isoformat().replace("+00:00", "Z")

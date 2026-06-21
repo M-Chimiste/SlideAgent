@@ -22,6 +22,8 @@ class OutlinePlanningMixin:
     ) -> list[SlideOutline]:
         outlines = []
         last_layout: str | None = None
+        section_number = 0
+        prev_section_label: str | None = None
         for slide in deck.slides:
             content = slide.model_dump()
             content["title"] = slide.action_title
@@ -34,6 +36,19 @@ class OutlinePlanningMixin:
                 slide, preferred_layout, last_layout, len(outlines)
             )
             last_layout = layout
+            archetype = slide.archetype or layout
+            # Assign a monotonic section number that only advances when the section
+            # label changes, so kickers read 01 -> 0N in order instead of jumping
+            # around by per-slide archetype (the cover carries no section kicker).
+            if self._normalize_archetype(archetype) == "cover":
+                section_marker, section_label = "", ""
+                content["deck_title"] = deck.deck_title
+            else:
+                section_label = self._section_label_for(slide.narrative_role, archetype)
+                if section_label != prev_section_label:
+                    section_number += 1
+                    prev_section_label = section_label
+                section_marker = f"{section_number:02d}"
             outlines.append(
                 SlideOutline(
                     id=str(uuid.uuid4()),
@@ -46,9 +61,11 @@ class OutlinePlanningMixin:
                         "layout": layout,
                         "visual_elements": self._visual_elements_for_layout(layout),
                         "generation_mode": mode,
-                        "archetype": slide.archetype or layout,
+                        "archetype": archetype,
                         "narrative_role": slide.narrative_role,
                         "design_intent": slide.design_intent,
+                        "section_number": section_marker,
+                        "section_label": section_label,
                         "exhibit_type": (slide.exhibit_spec or {}).get("type")
                         if slide.exhibit_spec
                         else None,
@@ -59,6 +76,38 @@ class OutlinePlanningMixin:
                 )
             )
         return outlines
+
+    def _section_label_for(self, role: str | None, archetype: str) -> str:
+        """Section label for a slide's kicker, derived from its narrative role
+        (preferred) or archetype. Numbering is assigned sequentially by the caller."""
+        role_labels = {
+            "executive_summary": "EXECUTIVE SUMMARY",
+            "problem": "DIAGNOSIS",
+            "evidence": "EVIDENCE",
+            "framework": "OPERATING MODEL",
+            "reference": "REFERENCE SYSTEM",
+            "implementation": "IMPLEMENTATION",
+            "decision": "DECISION",
+            "closing": "RECOMMENDATION",
+        }
+        role_key = str(role or "").lower()
+        if role_key in role_labels:
+            return role_labels[role_key]
+        archetype_labels = {
+            "executive_summary": "EXECUTIVE SUMMARY",
+            "anti_patterns": "DIAGNOSIS",
+            "dependency_map": "EVIDENCE",
+            "chart": "EVIDENCE",
+            "metric_chart": "EVIDENCE",
+            "comparison_table": "EVIDENCE",
+            "framework_cycle": "OPERATING MODEL",
+            "code_panel": "REFERENCE SYSTEM",
+            "table_reference": "REFERENCE SYSTEM",
+            "checklist": "IMPLEMENTATION",
+            "quote_sidebar": "DECISION",
+            "closing_recommendation": "RECOMMENDATION",
+        }
+        return archetype_labels.get(self._normalize_archetype(archetype or ""), "ANALYSIS")
 
     def _pick_sections(self, sections: list[DocumentSection]) -> list[DocumentSection]:
         skipped = {"overview", "executive summary", "introduction", "background"}
@@ -252,8 +301,8 @@ class OutlinePlanningMixin:
         if not base:
             base = "The analysis"
         if re.search(r"\b\d+(\.\d+)?%?\b", first_sentence):
-            return f"{base} shows measurable impact that should guide the decision"[:110]
-        return f"Prioritize {base.lower()} to strengthen the recommendation"[:110]
+            return f"{base} shows a measurable signal worth acting on"[:110]
+        return f"{base} reshapes how the work should be managed"[:110]
 
     def _clean_section_title(self, title: str) -> str:
         cleaned = re.sub(r"^\d+(\.\d+)*\s*", "", title).strip()

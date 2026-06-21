@@ -63,6 +63,10 @@ cd backend && ruff check app/ tests/
 cd frontend && npx tsc --noEmit
 cd frontend && npm run build
 
+# Containerized full app — one container, backend serves the built frontend on :8080 (UI E2E)
+./scripts/e2e-ui.sh                     # build + start, wait on /api/health, print UI (http://localhost:8080)
+./scripts/e2e-ui.sh start --no-build    # skip rebuild;  also: stop | restart | logs | status
+
 # Repeatable all-mode local-model smoke (freeform/brand/strict end-to-end; writes a JSON report)
 cd backend && python -m app.tools.all_mode_smoke --vision
 # Compare against the deep/premium planner (Minimax via Athena):
@@ -100,12 +104,23 @@ There is **no approval gate** — jobs run straight through. A job is created vi
 enqueued on `JobQueue`, and executed by `JobOrchestrator.run_job` in the background. Config travels in the job's
 `config_json` and selects mode + quality knobs (see "Request contract" below).
 
+### Frontend (single-page stepper, no router)
+
+There is no router (`react-router` is not a dependency). `App.tsx` owns all state and advances a `Screen` through
+`mode → setup → brief → job → review`, rendered by `components/` (`ModeScreen`, `SetupScreen`, `BriefScreen`,
+`JobScreen`, `ReviewScreen`) with a `Stepper`; `TopBar`, `LibraryRail`, `SlideLightbox`, and `StrictSchemaEditor`
+sit alongside. Helpers: `api/client.ts` (typed fetch wrappers + shared types), `types.ts` (UI enums), `ui.ts`,
+`qa.ts`. The old `pages/*` routed components were removed.
+
+In Docker/production a single uvicorn process serves both the API and the built frontend (`StaticFiles` mount at
+`/` when `FRONTEND_DIST_DIR` exists, port 8080); in dev the Vite server (:5173) proxies `/api` → :8000.
+
 ### Service facades → packages
 
 Three large services are stable public facades that delegate to internal packages (behavior-preserving refactors —
-keep the facade's public shape stable):
+keep the facade's public shape stable; `tests/test_refactor_boundaries.py` guards the facade imports + behavior):
 
-- `services/content_planner.py` (`ContentPlanner`) → `services/planning/` (`blueprint`, `llm`, `specs`, `repairs`, `grounding`, `outlines`, `exhibits`, `constants`)
+- `services/content_planner.py` (`ContentPlanner`) → `services/planning/` (`context`, `exhibit_selection`, `spec_gate`, `llm`, `blueprint`, `specs`, `outlines`, `repairs`, `grounding`, `exhibits`, `constants`). `ContentPlanner` *subclasses* one `*Mixin` per module (not delegation). The newer layers — `context` (source compression → story map), `exhibit_selection`, and `spec_gate` (post-plan spec validation/repair) — operate on the story-map/evidence types in `models/planning.py` (`StoryMap`, `StoryBeat`, `EvidenceUnit`, `SourceCompression`, `SpecGateReport`).
 - `services/pptx_renderer.py` (`DeterministicPptxRenderer`) → `services/pptx_rendering/` (`assets`, `chrome`, `core_layouts`, `table_layouts`, `immersive_layouts`, `exhibit_layouts`, `drawing`, `constants`)
 - `services/visual_qa_agent.py` (`VisualQAAgent`) → `services/visual_qa/` (`checks`, `preview`, `vision`, `constants`)
 

@@ -296,6 +296,9 @@ class DesignAgent:
     def _layout_is_suitable(self, layout: str, outline: SlideOutline) -> bool:
         if layout == "chart" and not outline.content_json.get("metrics"):
             return False
+        if layout == "matrix_2x2":
+            exhibit = outline.content_json.get("exhibit_spec")
+            return isinstance(exhibit, dict) and exhibit.get("type") == "matrix_2x2"
         if layout == "process" and not self._has_table(outline.content_json):
             return bool(self._content_bullets(outline.content_json))
         if layout == "chart" and not outline.content_json.get("metrics"):
@@ -307,17 +310,19 @@ class DesignAgent:
         last_layout: str | None = None
         seen_counts: dict[str, int] = {}
         fallback_cycle = [
-            "anti_patterns",
+            "callouts",
+            "icon_rows",
+            "comparison_table",
+            "checklist",
+            "two_column",
+            "icon_grid",
             "quote_sidebar",
+            "anti_patterns",
+            "matrix_2x2",
             "dependency_map",
             "framework_cycle",
-            "comparison_table",
             "code_panel",
-            "checklist",
             "table_reference",
-            "callouts",
-            "icon_grid",
-            "two_column",
         ]
         for index, outline in enumerate(outlines):
             if outline.mode != "flexible":
@@ -328,11 +333,9 @@ class DesignAgent:
             intended = self._intent_layout(revised, index) or current
             if index > 0 and intended == "executive_summary" and current != "executive_summary":
                 intended = current if current != "executive_summary" else "two_column"
-            if (
-                intended == last_layout
-                or seen_counts.get(intended, 0) >= 2
-                and intended in {"two_column", "icon_grid", "icon_rows", "executive_summary"}
-            ):
+            if intended == last_layout or seen_counts.get(
+                intended, 0
+            ) >= self._layout_repeat_limit(intended):
                 intended = self._next_diverse_layout(
                     fallback_cycle,
                     last_layout,
@@ -362,7 +365,7 @@ class DesignAgent:
                 continue
             if layout == last_layout:
                 continue
-            if seen_counts.get(layout, 0) >= 2:
+            if seen_counts.get(layout, 0) >= self._layout_repeat_limit(layout):
                 continue
             if self._layout_is_suitable(layout, outline):
                 return layout
@@ -372,6 +375,26 @@ class DesignAgent:
             if layout != last_layout and self._layout_is_suitable(layout, outline):
                 return layout
         return "two_column"
+
+    def _layout_repeat_limit(self, layout: str) -> int:
+        if layout in {
+            "cover",
+            "executive_summary",
+            "section_divider",
+            "closing_recommendation",
+        }:
+            return 99
+        if layout in {
+            "anti_patterns",
+            "dependency_map",
+            "framework_cycle",
+            "code_panel",
+            "table_reference",
+            "matrix_2x2",
+            "quote_sidebar",
+        }:
+            return 1
+        return 2
 
     def _intent_layout(self, outline: SlideOutline, index: int) -> str | None:
         current = str(outline.layout_json.get("layout") or "")
@@ -669,9 +692,22 @@ class DesignAgent:
         summary = str(content.get("summary") or content.get("subheading") or "")
         bullets = self._content_bullets(content)
         text_units = bullets or [f"{title} {summary}"]
-        selected = [self._icon_for_text(text) for text in text_units if text.strip()]
+        # Rotate through neutral icons when text doesn't match a keyword, so
+        # unmatched slides don't fill with repeated identical lightbulbs.
+        neutral_cycle = ["systems", "docs", "standards", "status", "tools", "growth"]
+        default_icon = self.icon_pool["default"]
+        selected: list[str] = []
+        fallback_index = 0
+        for text in text_units:
+            if not text.strip():
+                continue
+            icon = self._icon_for_text(text)
+            if icon == default_icon:
+                icon = self.icon_pool[neutral_cycle[fallback_index % len(neutral_cycle)]]
+                fallback_index += 1
+            selected.append(icon)
         if not selected:
-            selected.append(self.icon_pool["default"])
+            selected.append(self.icon_pool["systems"])
         while len(selected) < 4:
             selected.append(selected[-1])
         return selected[:4]

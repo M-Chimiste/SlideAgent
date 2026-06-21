@@ -6,11 +6,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
 from app.models.api import JobListResponse, JobStatusResponse
 from app.models.job import FREEFORM_TEMPLATE_ID, JobRecord
+from app.models.qa import QAIssue
 from app.services.job_queue import JobQueue
 from app.services.orchestrator import JobOrchestrator
 
@@ -142,30 +144,119 @@ async def get_job_status(
         preview_images = sorted(
             [image.name for image in preview_dir.glob("slide-*.jpg")]
         )
+    qa_payload = _latest_qa_payload(storage, job_id)
     return JobStatusResponse(
         job=job,
         warnings=job.warnings,
         preview_images=preview_images,
-        qa_summary=_qa_summary(storage, job_id),
+        qa_summary=_qa_summary(qa_payload),
+        qa_issues=_qa_issues(qa_payload),
+        planning_summary=_planning_summary(storage, job_id),
     )
 
 
-def _qa_summary(storage: LocalStorage, job_id: str) -> dict:
+@router.get("/jobs/{job_id}/planning/{artifact_name}")
+async def get_planning_artifact(
+    job_id: str,
+    artifact_name: str,
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+) -> JSONResponse:
+    job = await store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if artifact_name not in {"source-compression", "story-map", "spec-gate"}:
+        raise HTTPException(status_code=404, detail="Planning artifact not found.")
+    path = storage.planning_artifact_path(job_id, artifact_name)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Planning artifact not found.")
+    try:
+        return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Planning artifact could not be read.")
+
+
+def _latest_qa_payload(storage: LocalStorage, job_id: str) -> dict | None:
     qa_dir = storage.job_dir(job_id) / "qa"
     if not qa_dir.exists():
-        return {"critical": 0, "warning": 0, "info": 0, "count": 0}
+        return None
     logs = sorted(qa_dir.glob("round-*.json"))
     if not logs:
-        return {"critical": 0, "warning": 0, "info": 0, "count": 0}
+        return None
     try:
-        payload = json.loads(logs[-1].read_text(encoding="utf-8"))
+        return json.loads(logs[-1].read_text(encoding="utf-8"))
     except Exception:
-        return {"critical": 0, "warning": 0, "info": 0, "count": 0}
-    issues = payload.get("issues", [])
+        return None
+
+
+def _planning_summary(storage: LocalStorage, job_id: str) -> dict:
+    planning_dir = storage.job_dir(job_id) / "planning"
+    artifact_names = ["source-compression", "story-map", "spec-gate"]
+    artifacts = [
+        name
+        for name in artifact_names
+        if (planning_dir / f"{name}.json").exists()
+    ]
+    if not artifacts:
+        return {
+            "artifacts": [],
+            "available": False,
+        }
+    source = _read_planning_artifact(storage, job_id, "source-compression") or {}
+    story = _read_planning_artifact(storage, job_id, "story-map") or {}
+    gate = _read_planning_artifact(storage, job_id, "spec-gate") or {}
     return {
-        "critical": sum(1 for issue in issues if issue.get("severity") == "CRITICAL"),
-        "warning": sum(1 for issue in issues if issue.get("severity") == "WARNING"),
-        "info": sum(1 for issue in issues if issue.get("severity") == "INFO"),
+        "available": True,
+        "artifacts": artifacts,
+        "story_map_status": story.get("status"),
+        "story_map_fallback_reason": story.get("fallback_reason"),
+        "source_coverage": {
+            "section_count": source.get("section_count", 0),
+            "included_section_count": source.get("included_section_count", 0),
+            "omitted_section_count": source.get("omitted_section_count", 0),
+            "estimated_tokens": source.get("estimated_tokens", 0),
+        },
+        "spec_gate": {
+            "status": gate.get("status"),
+            "issue_count": gate.get("issue_count", 0),
+            "repaired_count": gate.get("repaired_count", 0),
+            "unresolved_count": gate.get("unresolved_count", 0),
+        },
+    }
+
+
+def _read_planning_artifact(
+    storage: LocalStorage,
+    job_id: str,
+    artifact_name: str,
+) -> dict | None:
+    path = storage.planning_artifact_path(job_id, artifact_name)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _qa_issues(payload: dict | None) -> list[QAIssue]:
+    if not payload:
+        return []
+    issues = []
+    for issue in payload.get("issues", []):
+        try:
+            issues.append(QAIssue.model_validate(issue))
+        except Exception:
+            continue
+    return issues
+
+
+def _qa_summary(payload: dict | None) -> dict:
+    issues = _qa_issues(payload)
+    return {
+        "critical": sum(1 for issue in issues if issue.severity == "CRITICAL"),
+        "warning": sum(1 for issue in issues if issue.severity == "WARNING"),
+        "info": sum(1 for issue in issues if issue.severity == "INFO"),
         "count": len(issues),
     }
 
@@ -223,7 +314,11 @@ async def regenerate_slide(
     job = await store.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    template = await store.get_template(job.template_id)
+    template = (
+        orchestrator.freeform_template()
+        if job.template_id == FREEFORM_TEMPLATE_ID
+        else await store.get_template(job.template_id)
+    )
     if not template:
         raise HTTPException(status_code=404, detail="Template not found.")
     await orchestrator.regenerate_slide(job_id, template, slide_index)

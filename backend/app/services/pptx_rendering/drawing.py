@@ -262,17 +262,44 @@ class DrawingMixin:
             return [
                 cleaned
                 for item in bullets
-                if (cleaned := self._clean_display_text(str(item)))
+                if (cleaned := self._clean_display_text(self._coerce_item_text(item)))
             ]
         blocks = outline.content_json.get("content_blocks") or []
         collected: list[str] = []
         for block in blocks:
             for item in block.get("body", []):
-                if isinstance(item, str):
-                    cleaned = self._clean_display_text(item)
+                if isinstance(item, (str, dict)):
+                    cleaned = self._clean_display_text(self._coerce_item_text(item))
                     if cleaned:
                         collected.append(cleaned)
         return collected
+
+    def _coerce_item_text(self, item: Any) -> str:
+        """Render a content item as display text.
+
+        Bullets occasionally arrive as metric dicts (e.g.
+        ``{"label": "Adoption", "value": 95, "unit": "%"}``); never let a raw
+        dict reach a text frame as ``str(dict)``.
+        """
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            label = str(
+                item.get("label") or item.get("name") or item.get("title") or ""
+            ).strip()
+            if str(item.get("value", "")).strip() != "":
+                value = self._format_metric_value(item)
+                return f"{label}: {value}" if label else value
+            for key in ("text", "description"):
+                text = str(item.get(key) or "").strip()
+                if text:
+                    return (
+                        f"{label}: {text}"
+                        if label and label.lower() not in text.lower()
+                        else text
+                    )
+            return label
+        return ""
 
     def _clean_display_text(self, text: str) -> str:
         cleaned = re.sub(

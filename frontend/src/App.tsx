@@ -1,141 +1,400 @@
 import { useEffect, useState } from "react";
 import {
+  analyzeTemplate,
+  createJob,
+  getJobStatus,
+  JobRecord,
+  JobStatus,
   listJobs,
   listTemplates,
+  regenerateSlide,
+  SlideSpec,
   TemplateProfile,
-  JobRecord,
+  updateTemplate,
 } from "./api/client";
-import TemplateSetupPage from "./pages/TemplateSetupPage";
-import TemplateDetailPage from "./pages/TemplateDetailPage";
-import GenerateDeckPage from "./pages/GenerateDeckPage";
-import ReviewDownloadPage from "./pages/ReviewDownloadPage";
+import { Length, Mode, Planner, Quality, Screen, Theme } from "./types";
+import TopBar from "./components/TopBar";
+import Stepper from "./components/Stepper";
+import ModeScreen from "./components/ModeScreen";
+import SetupScreen from "./components/SetupScreen";
+import BriefScreen from "./components/BriefScreen";
+import JobScreen from "./components/JobScreen";
+import ReviewScreen from "./components/ReviewScreen";
+import SlideLightbox from "./components/SlideLightbox";
+import LibraryRail from "./components/LibraryRail";
+import StrictSchemaEditor from "./components/StrictSchemaEditor";
 
-type Tab = "templates" | "generate" | "review";
+const TERMINAL = new Set(["done", "error"]);
 
 export default function App() {
+  // ── presentation ──
+  const [theme, setTheme] = useState<Theme>("light");
+  const [screen, setScreen] = useState<Screen>("mode");
+
+  // ── deck config ──
+  const [mode, setMode] = useState<Mode>("freeform");
+  const [planner, setPlanner] = useState<Planner>("fast");
+  const [quality, setQuality] = useState<Quality>("balanced");
+  const [length, setLength] = useState<Length>("auto");
+  const [visualQa, setVisualQa] = useState(true);
+
+  // ── brief ──
+  const [brief, setBrief] = useState("");
+  const [audience, setAudience] = useState("");
+  const [goal, setGoal] = useState("");
+  const [docs, setDocs] = useState<File[]>([]);
+
+  // ── template (brand / strict) ──
+  const [template, setTemplate] = useState<TemplateProfile | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [schemaTemplate, setSchemaTemplate] = useState<TemplateProfile | null>(null);
+  const [schemaSaving, setSchemaSaving] = useState(false);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+
+  // ── job ──
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [status, setStatus] = useState<JobStatus | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // ── review / lightbox ──
+  const [openSlide, setOpenSlide] = useState<number | null>(null);
+  const [regening, setRegening] = useState(false);
+  const [regenError, setRegenError] = useState<string | null>(null);
+
+  // ── library ──
   const [templates, setTemplates] = useState<TemplateProfile[]>([]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
-  const [activeTab, setActiveTab] = useState<Tab>("templates");
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
 
-  const refreshTemplates = async () => {
-    const data = await listTemplates();
-    setTemplates(data);
-  };
-
-  const refreshJobs = async () => {
-    const data = await listJobs();
-    setJobs(data);
+  const refreshLibrary = async () => {
+    setLibraryLoading(true);
+    setLibraryError(null);
+    try {
+      const [nextTemplates, nextJobs] = await Promise.all([listTemplates(), listJobs()]);
+      setTemplates(nextTemplates);
+      setJobs(nextJobs);
+    } catch (err: any) {
+      setLibraryError(err?.message || "Failed to load library.");
+    } finally {
+      setLibraryLoading(false);
+    }
   };
 
   useEffect(() => {
-    refreshTemplates();
-    refreshJobs();
+    refreshLibrary();
   }, []);
 
+  // poll the job while the Generate screen is showing
+  useEffect(() => {
+    if (!jobId || screen !== "job") return;
+    let active = true;
+    const tick = async () => {
+      try {
+        const s = await getJobStatus(jobId);
+        if (!active) return;
+        setStatus(s);
+        if (TERMINAL.has(s.job.status)) window.clearInterval(timer);
+      } catch {
+        /* keep polling */
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [jobId, screen]);
+
+  const changeMode = (m: Mode) => {
+    if (m === mode) return;
+    setMode(m);
+    setTemplate(null);
+    setAnalyzeError(null);
+  };
+
+  const goHome = () => {
+    setScreen("mode");
+    setJobId(null);
+    setStatus(null);
+    setOpenSlide(null);
+    setSubmitError(null);
+    setRegenError(null);
+  };
+
+  const applyJobConfig = (job: JobRecord) => {
+    const nextMode = String(job.config_json?.generation_mode || "freeform");
+    if (nextMode === "freeform" || nextMode === "brand" || nextMode === "strict") setMode(nextMode);
+    const nextPlanner = String(job.config_json?.planner_profile || "fast");
+    if (nextPlanner === "fast" || nextPlanner === "deep") setPlanner(nextPlanner);
+    const nextQuality = String(job.config_json?.quality_profile || "balanced");
+    if (nextQuality === "fast" || nextQuality === "balanced" || nextQuality === "showcase") {
+      setQuality(nextQuality);
+    }
+    setBrief((job.instructions || "").split("\n\nAudience:")[0]);
+  };
+
+  const openLibraryJob = async (job: JobRecord) => {
+    setLibraryError(null);
+    setOpenSlide(null);
+    setRegenError(null);
+    setJobId(job.id);
+    applyJobConfig(job);
+    try {
+      const nextStatus = await getJobStatus(job.id);
+      setStatus(nextStatus);
+      setScreen(nextStatus.job.status === "done" ? "review" : "job");
+    } catch (err: any) {
+      setLibraryError(err?.message || "Failed to open job.");
+    }
+  };
+
+  const useTemplateFromLibrary = (nextTemplate: TemplateProfile) => {
+    const nextMode =
+      nextTemplate.type === "brand" ? "brand" : nextTemplate.type === "strict" ? "strict" : null;
+    if (!nextMode) return;
+    setMode(nextMode);
+    setTemplate(nextTemplate);
+    setAnalyzeError(null);
+    setSubmitError(null);
+    setScreen("brief");
+  };
+
+  const editTemplateSchema = (nextTemplate: TemplateProfile) => {
+    setSchemaTemplate(nextTemplate);
+    setSchemaError(null);
+  };
+
+  const saveTemplateSchema = async (slides: SlideSpec[]) => {
+    if (!schemaTemplate) return;
+    setSchemaSaving(true);
+    setSchemaError(null);
+    try {
+      const updated = await updateTemplate(schemaTemplate.id, { slides });
+      setTemplates((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      if (template?.id === updated.id) setTemplate(updated);
+      setSchemaTemplate(updated);
+      setSchemaTemplate(null);
+      await refreshLibrary();
+    } catch (err: any) {
+      setSchemaError(err?.message || "Failed to save schema.");
+    } finally {
+      setSchemaSaving(false);
+    }
+  };
+
+  const continueFromMode = () => setScreen(mode === "freeform" ? "brief" : "setup");
+
+  const handleUpload = async (file: File) => {
+    setAnalyzing(true);
+    setAnalyzeError(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("name", file.name.replace(/\.pptx$/i, ""));
+      form.append("template_type", mode);
+      const profile = await analyzeTemplate(form);
+      setTemplate(profile);
+      await refreshLibrary();
+    } catch (err: any) {
+      setAnalyzeError(err?.message || "Template analysis failed.");
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const startJob = async () => {
+    if (!brief.trim() && docs.length === 0) {
+      setSubmitError("Add a brief or at least one source document.");
+      return;
+    }
+    if (mode !== "freeform" && !template) {
+      setSubmitError("Upload and analyze a template first.");
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      let instructions = brief.trim();
+      if (audience.trim()) instructions += `\n\nAudience: ${audience.trim()}`;
+      if (goal.trim()) instructions += `\n\nGoal: ${goal.trim()}`;
+
+      const form = new FormData();
+      form.append("generation_mode", mode);
+      form.append("planner_profile", planner);
+      form.append("quality_profile", quality);
+      form.append("length_strategy", length);
+      form.append("run_visual_qa", String(visualQa));
+      if (mode !== "freeform" && template) form.append("template_id", template.id);
+      form.append("instructions", instructions);
+      docs.forEach((doc) => form.append("documents", doc));
+
+      const job = await createJob(form);
+      setJobId(job.id);
+      setJobs((prev) => [job, ...prev.filter((existing) => existing.id !== job.id)]);
+      setStatus(null);
+      setRegenError(null);
+      setScreen("job");
+      await refreshLibrary();
+    } catch (err: any) {
+      setSubmitError(err?.message || "Failed to start the job.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRegen = async () => {
+    if (!jobId || openSlide == null) return;
+    setRegening(true);
+    setRegenError(null);
+    try {
+      await regenerateSlide(jobId, openSlide);
+      const s = await getJobStatus(jobId);
+      setStatus(s);
+      await refreshLibrary();
+    } catch (err: any) {
+      setRegenError(err?.message || "Failed to regenerate slide.");
+    } finally {
+      setRegening(false);
+    }
+  };
+
+  const deckTitle =
+    (brief.trim().split("\n").find((l) => l.trim())?.trim() || goal.trim() || "Generated deck").slice(
+      0,
+      80
+    );
+
   return (
-    <div className="container">
-      <h1>SlideForge</h1>
-      <div className="tabs">
-        <button
-          className={`tab ${activeTab === "templates" ? "active" : ""}`}
-          onClick={() => setActiveTab("templates")}
-        >
-          Template Setup
-        </button>
-        <button
-          className={`tab ${activeTab === "generate" ? "active" : ""}`}
-          onClick={() => setActiveTab("generate")}
-        >
-          Generate Deck
-        </button>
-        <button
-          className={`tab ${activeTab === "review" ? "active" : ""}`}
-          onClick={() => setActiveTab("review")}
-        >
-          Review & Download
-        </button>
-      </div>
+    <div
+      data-theme={theme}
+      style={{
+        minHeight: "100vh",
+        background: "var(--paper)",
+        color: "var(--ink)",
+        fontFamily: "'Hanken Grotesk', system-ui, sans-serif",
+      }}
+    >
+      <TopBar theme={theme} onTheme={setTheme} onHome={goHome} />
+      <Stepper mode={mode} screen={screen} onJump={setScreen} />
 
-      {activeTab === "templates" && (
-        <>
-          <TemplateSetupPage
-            onTemplateCreated={(template) => {
-              setTemplates((prev) => [...prev, template]);
-              refreshTemplates();
-            }}
-          />
-          <div className="card">
-            <h2>Saved Templates</h2>
-            {templates.length === 0 ? (
-              <p className="status">No templates yet.</p>
-            ) : (
-              <ul>
-                {templates.map((template) => (
-                  <li key={template.id}>
-                    {template.name} ({template.type}) • {template.slides.length} slides
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => setSelectedTemplateId(template.id)}
-                    >
-                      Edit Schema
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <TemplateDetailPage
-            templateId={selectedTemplateId}
-            onSaved={() => {
-              refreshTemplates();
-            }}
-          />
-        </>
+      <main
+        style={{
+          maxWidth: 1400,
+          margin: "0 auto",
+          padding: "48px 28px 96px",
+          display: "grid",
+          gridTemplateColumns: "270px minmax(0, 1120px)",
+          gap: 28,
+          alignItems: "start",
+        }}
+      >
+        <LibraryRail
+          jobs={jobs}
+          templates={templates}
+          activeJobId={jobId}
+          loading={libraryLoading}
+          error={libraryError}
+          onRefresh={refreshLibrary}
+          onOpenJob={openLibraryJob}
+          onUseTemplate={useTemplateFromLibrary}
+          onEditTemplate={editTemplateSchema}
+        />
+
+        <div style={{ minWidth: 0 }}>
+          {screen === "mode" && (
+            <ModeScreen mode={mode} onMode={changeMode} onContinue={continueFromMode} />
+          )}
+
+          {screen === "setup" && mode !== "freeform" && (
+            <SetupScreen
+              mode={mode}
+              template={template}
+              analyzing={analyzing}
+              error={analyzeError}
+              onUpload={handleUpload}
+              onBack={() => setScreen("mode")}
+              onContinue={() => setScreen("brief")}
+            />
+          )}
+
+          {screen === "brief" && (
+            <BriefScreen
+              mode={mode}
+              brief={brief}
+              audience={audience}
+              goal={goal}
+              onBrief={setBrief}
+              onAudience={setAudience}
+              onGoal={setGoal}
+              docs={docs}
+              onAddDocs={(files) => setDocs((prev) => [...prev, ...files])}
+              onRemoveDoc={(i) => setDocs((prev) => prev.filter((_, idx) => idx !== i))}
+              planner={planner}
+              quality={quality}
+              length={length}
+              visualQa={visualQa}
+              onPlanner={setPlanner}
+              onQuality={setQuality}
+              onLength={setLength}
+              onToggleVisualQa={() => setVisualQa((v) => !v)}
+              submitting={submitting}
+              error={submitError}
+              onGenerate={startJob}
+            />
+          )}
+
+          {screen === "job" && (
+            <JobScreen
+              jobId={jobId}
+              jobStatus={status?.job.status ?? "queued"}
+              progress={status?.job.progress ?? 0}
+              errorMessage={status?.job.error_message ?? null}
+              onCancel={() => setScreen("brief")}
+              onReview={() => setScreen("review")}
+            />
+          )}
+
+          {screen === "review" && jobId && status && (
+            <ReviewScreen
+              jobId={jobId}
+              status={status}
+              mode={mode}
+              planner={planner}
+              quality={quality}
+              deckTitle={deckTitle}
+              onOpenSlide={(i) => {
+                setOpenSlide(i);
+                setRegenError(null);
+              }}
+            />
+          )}
+        </div>
+      </main>
+
+      {openSlide != null && jobId && status && (
+        <SlideLightbox
+          jobId={jobId}
+          status={status}
+          index={openSlide}
+          regening={regening}
+          regenError={regenError}
+          onClose={() => setOpenSlide(null)}
+          onRegen={handleRegen}
+        />
       )}
 
-      {activeTab === "generate" && (
-        <>
-          <GenerateDeckPage
-            templates={templates}
-            onJobCreated={(jobId) => {
-              setSelectedJobId(jobId);
-              refreshJobs();
-              setActiveTab("review");
-            }}
-          />
-          <div className="card">
-            <h2>Recent Jobs</h2>
-            {jobs.length === 0 ? (
-              <p className="status">No jobs yet.</p>
-            ) : (
-              <ul>
-                {jobs.map((job) => (
-                  <li key={job.id}>
-                    {job.id} • {job.status} •{" "}
-                    {Math.round(job.progress * 100)}%
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => {
-                        setSelectedJobId(job.id);
-                        setActiveTab("review");
-                      }}
-                    >
-                      View
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </>
-      )}
-
-      {activeTab === "review" && (
-        <ReviewDownloadPage jobId={selectedJobId} />
+      {schemaTemplate && (
+        <StrictSchemaEditor
+          template={schemaTemplate}
+          saving={schemaSaving}
+          error={schemaError}
+          onClose={() => setSchemaTemplate(null)}
+          onSave={saveTemplateSchema}
+        />
       )}
     </div>
   );
