@@ -4,7 +4,9 @@ from app.models.qa import QAIssue, QAResult
 from app.services.design_agent import DesignAgent
 from app.tools.all_mode_smoke import (
     _actionable_issue_signature,
+    _dedupe_warning_dicts,
     _has_planner_fallback,
+    _is_initial_consulting_warning,
     _model_slug,
     _normalize_modes,
     _parse_modes,
@@ -65,6 +67,7 @@ def test_deck_report_shape_is_machine_readable(tmp_path: Path) -> None:
     assert result["qa_rounds"] == 0
     assert result["qa_history"] == [result["qa"]]
     assert result["planner_fallback"] is False
+    assert result["consulting_repair_history"] == []
     assert result["qa_issues"] == [
         {
             "severity": "WARNING",
@@ -74,6 +77,72 @@ def test_deck_report_shape_is_machine_readable(tmp_path: Path) -> None:
         }
     ]
     assert result["preview_images"] == [preview.as_posix()]
+
+
+def test_deck_report_keeps_consulting_repair_history_separate(tmp_path: Path) -> None:
+    history = [
+        {
+            "slide_index": 1,
+            "field": "consulting_qa",
+            "message": "Round 0: Slide body did not support the title.",
+        }
+    ]
+
+    result = deck_report(
+        mode="freeform",
+        output_path=tmp_path / "deck.pptx",
+        slide_count=1,
+        titles=["Improve delivery discipline"],
+        layouts=["two_column"],
+        planning_warnings=[],
+        build_warnings=[],
+        qa_result=QAResult(issues=[], passed=True),
+        preview_images=[],
+        consulting_repair_history=history,
+    )
+
+    assert result["planning_warnings"] == []
+    assert result["consulting_repair_history"] == history
+
+
+def test_initial_horizontal_flow_warning_is_consulting_repair_history() -> None:
+    assert _is_initial_consulting_warning(
+        {
+            "slide_index": None,
+            "field": "horizontal_flow",
+            "message": "Repeated action titles weaken the deck storyline.",
+        }
+    )
+    assert not _is_initial_consulting_warning(
+        {
+            "slide_index": None,
+            "field": "llm_planning",
+            "message": "LLM planning was unavailable or malformed.",
+        }
+    )
+
+
+def test_deck_report_dedupes_repeated_planning_warnings(tmp_path: Path) -> None:
+    repeated = {
+        "slide_index": 3,
+        "field": "consulting_qa",
+        "message": "Round final: Slide body does not clearly support the action title.",
+    }
+
+    result = deck_report(
+        mode="freeform",
+        output_path=tmp_path / "deck.pptx",
+        slide_count=1,
+        titles=["Improve delivery discipline"],
+        layouts=["two_column"],
+        planning_warnings=[repeated, dict(repeated)],
+        build_warnings=[],
+        qa_result=QAResult(issues=[], passed=True),
+        preview_images=[],
+    )
+
+    assert result["planning_warnings"] == [repeated]
+    assert _dedupe_warning_dicts([repeated, dict(repeated)]) == [repeated]
 
 
 def test_deck_report_marks_planner_fallback(tmp_path: Path) -> None:

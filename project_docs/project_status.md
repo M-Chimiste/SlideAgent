@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-06-19
+**Last updated:** 2026-06-23
 
 ## Current Reality
 
@@ -27,7 +27,7 @@ What exists today:
 - Python deterministic renderer for generated layouts, with the legacy
   PptxGenJS path no longer required for the tested freeform/brand flows.
 - Strict schema validation for simple field values.
-- Focused backend regression suite of 175 tests (`175 passed` on 2026-06-19).
+- Focused backend regression suite of 234 tests (`234 passed` on 2026-06-23).
 - App coverage after the backend refactor is `78%` overall for `app/*`
   (`/private/tmp/slideagent-refactor-coverage-after`), up from the 76%
   pre-refactor baseline.
@@ -84,6 +84,10 @@ What exists today:
   the uploaded material and uses `ExhibitCompiler` to build source-derived
   comparison/reference tables, KPI charts, native line charts, checklists,
   process exhibits, evidence inventories, and 2x2 matrices.
+- Qwen-backed generated modes now have a clean output-polish smoke for the
+  `data/Beyond Vibe Coding.docx` input: freeform, brand, and strict complete
+  with no planner fallback, no planning warnings, no build warnings, and no
+  visual-QA issues.
 - Local DOCX ingestion fallback through `python-docx`.
 - VisualQA now validates PPTX package structure, content-type declarations,
   internal relationship targets, text density, layout variety, source metadata,
@@ -139,6 +143,54 @@ deck engine. The new provenance, consulting repair, exhibit compilation, and
 brand-profile paths materially improve deck polish, but manual Office review,
 broader diagram/chart families, richer brand-template interpretation, and more
 non-demo source smokes remain the next quality frontier.
+
+### Qwen production-polish pass (2026-06-23)
+
+This pass moved the local Qwen E2E path from "mechanically valid" toward
+production-grade generated decks for the Beyond Vibe Coding source document,
+while keeping the deterministic title/layout rules generic rather than
+hard-coding demo-specific copy.
+
+- **Style-guide alignment:** planner prompts, consulting QA, spec-gate repair,
+  and visual QA now enforce sharper action titles, title/body support, exhibit
+  fit, evidence grounding, no repeated slide frames, and stronger
+  slide-to-slide narrative rhythm in line with `project_docs/style_guide.md`.
+- **Qwen planning robustness:** the OpenAI-compatible client and planner path
+  handle Qwen JSON/schema behavior more reliably, including structured-response
+  parsing, repair retries, and local-model token/timeout expectations.
+- **No repeated-slide feel:** design selection and VisualQA now cap repeated
+  heavy visual treatments across the full deck, not just adjacent slides. The
+  system preserves genuinely source-specific repeats when justified, while
+  diversifying comparison tables, reference tables, dependency maps, cycles,
+  code panels, charts, and other high-salience layouts.
+- **Source/exhibit grounding:** source labels and source refs are normalized
+  more strictly; prompt-only decks cannot claim uploaded material; model-added
+  `[source needed]` markers are retained for unsupported numeric claims but
+  removed from source-backed nonnumeric metadata that would not render into the
+  PPTX.
+- **Fallback quality:** deterministic fallback planning now preserves a core
+  exhibit mix for source-rich decks and re-runs duplicate-title repair after
+  spec-gate changes, so the safety path does not collapse into repeated
+  checklist/callout slides.
+- **Renderer polish:** generated cover, table/reference, dependency map,
+  framework/cycle, matrix, quote/sidebar, and closing layouts received spacing,
+  text fitting, chrome, and shape-treatment improvements to better match the
+  reference deck's authored rhythm.
+- **Smoke reporting:** `app.tools.all_mode_smoke` now separates final planning
+  warnings from consulting repair history, so fixed issues do not masquerade as
+  acceptance failures.
+
+Latest acceptance artifact:
+
+- `/private/tmp/slideagent-polish-qwen-allmodes-v9/all-mode-qwen-allmodes-fast-v9-smoke-report.json`
+- Freeform: 12 slides, no planner fallback, no planning warnings, no build
+  warnings, zero final visual-QA issues.
+- Brand: 12 slides, no planner fallback, no planning warnings, no build
+  warnings, zero final visual-QA issues.
+- Strict: 1 slide, no planner fallback, no planning warnings, no build
+  warnings, zero final visual-QA issues.
+- Freeform and brand contact sheets were visually inspected for repeated slide
+  patterns, wrapping, empty slides, and layout rhythm.
 
 ### Frontend wizard + preview/regen fixes (2026-06-18)
 
@@ -247,6 +299,8 @@ architecture target is documented in [architecture.md](./architecture.md).
      surfaces.
    - Add more deterministic exhibit choices for richer tables, multi-series
      metrics, and source-derived diagrams.
+   - Expand clean Qwen no-warning smokes beyond the Beyond Vibe Coding source
+     document.
 
 3. **Diagram expansion**
    - Add more deterministic diagram kinds, starting with hub-spoke, layered
@@ -270,8 +324,8 @@ architecture target is documented in [architecture.md](./architecture.md).
 ## Verification Evidence
 
 - Backend tests: `cd backend && python -m pytest tests/ -q` passed
-  (`175 passed`) on 2026-06-19.
-- Backend lint: `cd backend && ruff check app/ tests/` passed on 2026-06-19.
+  (`234 passed`) on 2026-06-23.
+- Backend lint: `cd backend && ruff check app/ tests/` passed on 2026-06-23.
 - Backend coverage after refactor:
   - App total: `78%`.
   - `ContentPlanner` facade: `92%`; extracted planning modules range from
@@ -300,6 +354,15 @@ architecture target is documented in [architecture.md](./architecture.md).
   completion budget.
 - `data/Beyond Vibe Coding.docx` generated valid PPTX smoke artifacts with
   exact rendered slide images:
+  - Latest Qwen production-polish all-mode smoke
+    (`/private/tmp/slideagent-polish-qwen-allmodes-v9`) passed with no planner
+    fallback, no planning warnings, no build warnings, and clean final visual
+    QA in all modes:
+    - Freeform: 12 slides, zero final QA issues.
+    - Brand: 12 slides, zero final QA issues.
+    - Strict: 1 slide, zero final QA issues.
+    - Report:
+      `/private/tmp/slideagent-polish-qwen-allmodes-v9/all-mode-qwen-allmodes-fast-v9-smoke-report.json`.
   - Latest post-refactor exact-code Qwen all-mode smoke
     (`/private/tmp/slideagent-refactor-smoke`) passed with no planner fallback,
     no build warnings, and clean final QA:
@@ -367,7 +430,8 @@ architecture target is documented in [architecture.md](./architecture.md).
   numeric tokens are shown to the LLM, invented LLM source labels are
   normalized, missing source labels are repaired, prompt-only decks cannot
   claim `Uploaded source`, Qwen-style chart `data_points` become renderable
-  metrics, and unmapped strict fields emit
+  metrics, source-backed nonnumeric placeholder metadata is stripped before
+  spec-gate acceptance, and unmapped strict fields emit
   `[INSERT CONTENT HERE]` plus a warning.
 - Strict-template tests verify table-cell field extraction and XML-level table
   cell injection while preserving neighboring cells.
@@ -381,7 +445,8 @@ architecture target is documented in [architecture.md](./architecture.md).
 
 - Current backend tests: `python -m pytest tests -q` from `backend/`.
 - Current repeatable local-Qwen smoke:
-  `python -m app.tools.all_mode_smoke --vision` from `backend/`.
+  `python -m app.tools.all_mode_smoke --doc ../data/'Beyond Vibe Coding.docx' --modes freeform,brand,strict --quality-profile fast --length-strategy concise --label qwen-allmodes-fast`
+  from `backend/`.
 - Current Minimax structural smoke:
   `python -m app.tools.all_mode_smoke --base-url http://localhost:1240/v1 --model minimax-m2.7 --label minimax-m27`
   from `backend/`.

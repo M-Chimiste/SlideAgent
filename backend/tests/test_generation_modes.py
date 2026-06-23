@@ -1,4 +1,5 @@
 import json
+import re
 import zipfile
 from io import BytesIO
 from datetime import UTC, datetime
@@ -130,6 +131,18 @@ def test_planner_repairs_dangling_sentence_fragments() -> None:
     assert planner._truncate_title(
         "The Memory Bank consists of six core files arranged in a dependency hierarchy for optimal"
     ).endswith("optimal") is False
+    assert (
+        planner._truncate_title(
+            "Commit to the Agentic Coding framework to ensure reliable"
+        )
+        == "Commit to the Agentic Coding framework"
+    )
+    assert (
+        planner._truncate_title(
+            "Commit to Agentic Coding to ensure reliable, traceable"
+        )
+        == "Commit to Agentic Coding"
+    )
 
 
 def test_openai_compatible_client_sends_reasoning_effort(monkeypatch) -> None:
@@ -241,6 +254,23 @@ def test_openai_compatible_client_extracts_list_content_text() -> None:
     assert text == '{"deck_title":"A"\n,"slides":[]}'
 
 
+def test_openai_compatible_client_extracts_reasoning_content_when_content_empty() -> None:
+    text = OpenAICompatibleClient._extract_message_text(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "reasoning_content": '{"deck_title":"A","slides":[]}',
+                    }
+                }
+            ]
+        }
+    )
+
+    assert text == '{"deck_title":"A","slides":[]}'
+
+
 def test_freeform_planner_creates_consulting_slide_specs() -> None:
     planner = ContentPlanner()
     outlines, warnings = planner.plan(
@@ -290,6 +320,21 @@ def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
         and "not configured" in warning["message"]
         for warning in warnings
     )
+
+
+def test_source_rich_expanded_blueprint_matches_reference_deck_length() -> None:
+    planner = ContentPlanner()
+    blueprint = planner._build_blueprint(
+        _rich_bundle(),
+        "Create a consulting deck about moving beyond vibe coding.",
+        "freeform",
+        quality_profile="fast",
+        length_strategy="expanded",
+    )
+
+    assert blueprint.target_slide_count == 18
+    assert len(blueprint.archetype_sequence) == 18
+    assert len(set(blueprint.archetype_sequence)) >= 14
 
 
 def test_fallback_executive_summary_includes_metric_proof_points() -> None:
@@ -570,6 +615,44 @@ def test_planner_builds_contextual_code_panel_specs() -> None:
 
     assert manager_exhibit["title"] == "agent-brief.md"
     assert "assigning work" in manager_exhibit["lines"][0]
+
+
+def test_section_title_cleanup_removes_multi_level_numbers() -> None:
+    planner = ContentPlanner()
+
+    assert planner._clean_section_title("3.1 The Core Files") == "The Core Files"
+    assert planner._clean_section_title("8.3 The Accept-All Reflex") == "The Accept-All Reflex"
+    assert (
+        planner._clean_section_title("4.1 The Agentic Cycle: A Workflow for Reliability")
+        == "The Agentic Cycle"
+    )
+
+
+def test_update_section_title_rewrites_without_multiple_messages() -> None:
+    title = ContentPlanner()._action_title(
+        "3.3 When and How to Update",
+        "Update memory after meaningful changes so context does not go stale.",
+    )
+
+    assert title == "Update memory after meaningful changes"
+    assert " and " not in title.lower()
+
+
+def test_themed_title_frames_prioritize_specific_cues_before_memory() -> None:
+    planner = ContentPlanner()
+
+    assert planner._themed_action_title(
+        "context rot",
+        "context rot occurs when finite windows erase project memory",
+    ) == "Eliminate context rot before it undermines reliability"
+    assert planner._themed_action_title(
+        "the agentic cycle",
+        "the workflow uses a repeatable cycle and reset phase",
+    ) == "Run the agentic cycle as a repeatable operating loop"
+    assert planner._themed_action_title(
+        "markdown-driven development",
+        "markdown rules preserve constraints as context changes",
+    ) == "Codify markdown-driven development into rules the team can reuse"
 
 
 def test_fallback_section_selection_uses_blueprint_source_map() -> None:
@@ -889,6 +972,156 @@ def test_story_map_falls_back_on_malformed_llm_response() -> None:
     assert "contained no beats" in story_map["fallback_reason"]
 
 
+def test_qwen_planner_uses_deterministic_story_map_to_avoid_extra_llm_call() -> None:
+    class QwenDeckLLM:
+        model = "qwen3.6-35b-a3b-mtp"
+
+        def __init__(self) -> None:
+            self.prompts = []
+
+        def complete_json(self, **kwargs):
+            self.prompts.append(kwargs["user_prompt"])
+            assert "Create a consulting story map" not in kwargs["user_prompt"]
+            target = int(re.search(r"Create a (\d+)-slide", kwargs["user_prompt"]).group(1))
+            slides = [
+                {
+                    "slide_number": 1,
+                    "slide_type": "cover",
+                    "action_title": "Translate AI delivery into an executive operating decision",
+                    "subheading": "Persistent context improves delivery reliability.",
+                    "content_blocks": [
+                        {
+                            "type": "bullets",
+                            "body": ["Persistent context improves delivery reliability."],
+                            "annotations": [],
+                            "callouts": [],
+                        }
+                    ],
+                    "chart_spec": None,
+                    "sources": ["Uploaded source"],
+                    "speaker_notes": "Set the thesis.",
+                    "archetype": "cover",
+                    "narrative_role": "cover",
+                    "exhibit_spec": {"type": "cover"},
+                    "source_refs": ["doc-1:Developer Productivity"],
+                    "qa": {
+                        "consulting_status": "pending",
+                        "visual_status": "pending",
+                        "issues": [],
+                    },
+                }
+            ]
+            workflow_names = [
+                "priority intake",
+                "architecture review",
+                "acceptance testing",
+                "release readiness",
+                "handoff governance",
+                "memory refresh",
+                "quality review",
+                "decision logging",
+                "operating cadence",
+                "risk triage",
+            ]
+            for number in range(2, target + 1):
+                workflow = workflow_names[(number - 2) % len(workflow_names)]
+                slides.append(
+                    {
+                        "slide_number": number,
+                        "slide_type": "content",
+                        "action_title": f"Use source-backed review to reduce {workflow} risk",
+                        "subheading": "Evidence from uploaded source",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Testing and acceptance criteria reduce quality risk."],
+                                "annotations": [],
+                                "callouts": [],
+                            }
+                        ],
+                        "chart_spec": None,
+                        "sources": ["Uploaded source"],
+                        "speaker_notes": "Explain the implication.",
+                        "archetype": "callouts",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {
+                            "type": "callouts",
+                            "points": ["Testing and acceptance criteria reduce quality risk."],
+                        },
+                        "source_refs": ["doc-1:Quality Risk"],
+                        "qa": {
+                            "consulting_status": "pending",
+                            "visual_status": "pending",
+                            "issues": [],
+                        },
+                    }
+                )
+            return {
+                "deck_title": "Beyond Vibe Coding",
+                "audience": "Engineering leaders",
+                "goal": "Improve AI-assisted delivery quality",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": slides,
+            }
+
+    llm = QwenDeckLLM()
+    planner = ContentPlanner(llm_client=llm)
+    outlines, warnings = planner.plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a deck on moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="fast",
+    )
+
+    assert outlines
+    assert len(llm.prompts) == 1
+    story_map = planner.last_planning_artifacts["story-map"]
+    assert story_map["status"] == "fallback"
+    assert "local Qwen planner" in story_map["fallback_reason"]
+    assert not any(warning["field"] == "llm_planning" for warning in warnings)
+
+
+def test_llm_deck_payload_must_match_blueprint_slide_count() -> None:
+    blueprint = DeckBlueprint(
+        deck_title="Beyond Vibe Coding",
+        audience="Engineering leaders",
+        core_thesis="Persistent context improves delivery.",
+        target_slide_count=4,
+        archetype_sequence=["cover", "executive_summary", "comparison_table", "closing_recommendation"],
+        source_coverage_map={},
+    )
+    payload = {
+        "deck_title": "Beyond Vibe Coding",
+        "audience": "Engineering leaders",
+        "goal": "Improve AI-assisted delivery quality",
+        "narrative_arc": "Situation -> Complication -> Resolution",
+        "slides": [
+            {
+                "slide_number": 1,
+                "slide_type": "cover",
+                "action_title": "Translate AI delivery into an executive operating decision",
+                "subheading": "Persistent context improves delivery reliability.",
+                "content_blocks": [
+                    {
+                        "type": "bullets",
+                        "body": ["Persistent context improves delivery reliability."],
+                    }
+                ],
+                "sources": ["Uploaded source"],
+                "archetype": "cover",
+                "narrative_role": "cover",
+            }
+        ],
+    }
+    planner = ContentPlanner()
+
+    deck = planner._validate_deck_payload(payload, blueprint)
+
+    assert deck is None
+    assert "exactly 4 slides" in (planner._last_planning_error or "")
+
+
 def test_exhibit_selector_promotes_metric_claim_to_chart() -> None:
     planner = ContentPlanner()
     bundle = _bundle()
@@ -983,6 +1216,115 @@ def test_spec_gate_repairs_duplicate_and_over_budget_slide_specs() -> None:
     assert len(deck.slides[0].content_blocks[0].body) <= 5
 
 
+def test_spec_gate_removes_supported_model_source_placeholder() -> None:
+    planner = ContentPlanner()
+    bundle = _bundle()
+    bundle.sections[0].content += " Teams reported 42% fewer escaped defects."
+    blueprint = planner._build_blueprint(
+        bundle,
+        "Create a deck.",
+        "freeform",
+        quality_profile="fast",
+        length_strategy="concise",
+    )
+    compression = planner._build_source_compression(bundle, "fast")
+    story_map = StoryMap(
+        status="fallback",
+        thesis="Improve delivery quality.",
+        recommendation="Adopt source-backed review.",
+        beats=[],
+    )
+    deck = DeckSpec(
+        deck_title="Gate",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Reduce escaped defects by 42%",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Teams reported 42% fewer defects after adoption. [source needed]"],
+                    )
+                ],
+                sources=["Uploaded source", "[source needed]"],
+                source_refs=["doc-1:Developer Productivity", "[source needed]"],
+                archetype="two_column",
+                exhibit_spec={
+                    "type": "two_column",
+                    "points": ["Teams reported 42% fewer defects after adoption. [source needed]"],
+                },
+            )
+        ],
+        blueprint=blueprint,
+    )
+
+    report = planner._run_spec_gate(deck, bundle, compression, story_map)
+
+    assert "[source needed]" not in deck.slides[0].content_blocks[0].body[0]
+    assert "[source needed]" not in str(deck.slides[0].exhibit_spec)
+    assert deck.slides[0].sources == ["Uploaded source"]
+    assert deck.slides[0].source_refs == ["doc-1:Developer Productivity"]
+    assert any(
+        repair.action == "remove_supported_source_placeholder"
+        for repair in report.repairs
+    )
+    assert report.unresolved_count == 0
+
+
+def test_spec_gate_removes_nonnumeric_source_placeholder_when_slide_is_grounded() -> None:
+    planner = ContentPlanner()
+    bundle = _bundle()
+    blueprint = planner._build_blueprint(
+        bundle,
+        "Create a deck.",
+        "freeform",
+        quality_profile="fast",
+        length_strategy="concise",
+    )
+    compression = planner._build_source_compression(bundle, "fast")
+    story_map = StoryMap(
+        status="fallback",
+        thesis="Improve delivery quality.",
+        recommendation="Adopt source-backed review.",
+        beats=[],
+    )
+    deck = DeckSpec(
+        deck_title="Gate",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Persistent context reduces delivery ambiguity [source needed]",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Persistent context keeps review decisions traceable. [source needed]"],
+                    )
+                ],
+                sources=["Uploaded source", "[source needed]"],
+                source_refs=["doc-1:Developer Productivity", "[source needed]"],
+                archetype="two_column",
+                exhibit_spec={
+                    "type": "two_column",
+                    "points": [
+                        "Persistent context keeps review decisions traceable. [source needed]"
+                    ],
+                },
+            )
+        ],
+        blueprint=blueprint,
+    )
+
+    report = planner._run_spec_gate(deck, bundle, compression, story_map)
+
+    assert "[source needed]" not in deck.slides[0].action_title
+    assert "[source needed]" not in deck.slides[0].content_blocks[0].body[0]
+    assert "[source needed]" not in str(deck.slides[0].exhibit_spec)
+    assert deck.slides[0].source_refs == ["doc-1:Developer Productivity"]
+    assert report.unresolved_count == 0
+
+
 def test_planner_reports_llm_fallback_when_configured_client_fails() -> None:
     class FailingLLM:
         def complete_json(self, **kwargs):
@@ -1059,7 +1401,8 @@ def test_planner_ignores_malformed_llm_blueprint_metadata() -> None:
     )
 
     assert len(outlines) == 1
-    assert outlines[0].label == "Adopt Agentic Coding to Manage AI Reliability"
+    assert outlines[0].label == "Beyond Vibe Coding"
+    assert outlines[0].content_json["deck_title"] == "Beyond Vibe Coding"
     assert not any(warning["field"] == "llm_planning" for warning in warnings)
 
 
@@ -1110,6 +1453,58 @@ def test_planner_repairs_compound_llm_action_titles() -> None:
 
     assert outlines[0].label == "Identify structural barriers to scalable AI development"
     assert not warnings
+
+
+def test_planner_repairs_qwen_cover_title_concatenation() -> None:
+    planner = ContentPlanner()
+    deck = DeckSpec(
+        deck_title="Beyond Vibe Coding",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="cover",
+                action_title=(
+                    "Beyond Vibe Coding a Framework for Agentic Software "
+                    "Development How to stop chatting with AI"
+                ),
+                archetype="cover",
+                narrative_role="cover",
+            )
+        ],
+    )
+
+    planner._repair_model_titles(deck)
+
+    assert deck.slides[0].action_title == "Beyond Vibe Coding"
+
+
+def test_planner_repairs_reviewer_mode_title_artifact() -> None:
+    planner = ContentPlanner()
+    deck = DeckSpec(
+        deck_title="Beyond Vibe Coding",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="quote",
+                action_title=(
+                    "Review reviewer mode the developers new core competency "
+                    "before trusting the generated output"
+                ),
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Reviewer mode requires checking outputs against the plan."],
+                    )
+                ],
+                archetype="quote_sidebar",
+                narrative_role="decision",
+            )
+        ],
+    )
+
+    planner._repair_model_titles(deck)
+
+    assert deck.slides[0].action_title == "Use reviewer mode as the default quality gate"
 
 
 def test_planner_repairs_generic_model_action_titles() -> None:
@@ -1655,7 +2050,9 @@ def test_planner_repairs_wordy_section_divider_titles() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Shift From Ephemeral Chat to Persistent Context"
+    # Headline casing lowercases the minor word "from" (AP style, matching the
+    # reference deck's titles) while keeping the major words capitalized.
+    assert outlines[0].label == "Shift from Ephemeral Chat to Persistent Context"
     assert not warnings
 
 
@@ -2012,6 +2409,7 @@ def test_repeated_reference_titles_repair_to_code_panel_action() -> None:
 def test_planner_varies_generic_llm_slide_layouts() -> None:
     class GenericSlidesLLM:
         def complete_json(self, **kwargs):
+            target = int(re.search(r"Create a (\d+)-slide", kwargs["user_prompt"]).group(1))
             titles = [
                 "Improve agentic delivery discipline across priority workflows",
                 "Standardize context management across software delivery teams",
@@ -2019,8 +2417,22 @@ def test_planner_varies_generic_llm_slide_layouts() -> None:
                 "Adopt persistent memory to improve agent reliability",
                 "Secure production quality with structured oversight",
             ]
+            while len(titles) < target:
+                suffixes = [
+                    "intake",
+                    "review",
+                    "handoff",
+                    "release",
+                    "memory",
+                    "governance",
+                    "cadence",
+                ]
+                titles.append(
+                    "Improve delivery reliability through "
+                    f"{suffixes[len(titles) % len(suffixes)]} standards"
+                )
             slides = []
-            for number, title in enumerate(titles, start=1):
+            for number, title in enumerate(titles[:target], start=1):
                 slides.append(
                     {
                         "slide_number": number,

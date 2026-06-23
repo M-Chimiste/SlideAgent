@@ -180,6 +180,7 @@ class ContentPlanner(
         )
         self._enrich_deck_specs(deck, blueprint, bundle)
         self._apply_exhibit_selection(deck, bundle, selection_story_map)
+        self._ensure_core_exhibit_mix(deck, bundle)
         self._repair_model_titles(deck)
         self._repair_repeated_action_titles(deck)
         warnings.extend(self._normalize_source_labels(deck, bundle))
@@ -192,9 +193,41 @@ class ContentPlanner(
         )
         self.last_planning_artifacts["spec-gate"] = spec_gate_report.model_dump()
         warnings.extend(self._spec_gate_warnings(spec_gate_report))
+        self._repair_repeated_action_titles(deck)
         deck, qa_warnings = self.qa.inspect(deck)
         warnings.extend(qa_warnings)
         return deck, warnings
+
+    def _ensure_core_exhibit_mix(self, deck: DeckSpec, bundle: DocumentBundle) -> None:
+        if len(deck.slides) < 6 or not bundle.sections:
+            return
+        required = ["comparison_table", "code_panel", "matrix_2x2", "icon_rows"]
+        for required_archetype in required:
+            archetypes = [
+                self._normalize_archetype(slide.archetype or "")
+                for slide in deck.slides
+            ]
+            if required_archetype in archetypes:
+                continue
+            lightweight_counts = {
+                archetype: archetypes.count(archetype)
+                for archetype in {"callouts", "checklist", "icon_rows", "two_column"}
+            }
+            candidates = [
+                slide
+                for slide in deck.slides[2:-1]
+                if self._normalize_archetype(slide.archetype or "") in lightweight_counts
+                and lightweight_counts[self._normalize_archetype(slide.archetype or "")] > 1
+            ]
+            if not candidates:
+                return
+            slide = candidates[min(len(candidates) // 2, len(candidates) - 1)]
+            section = self._section_for_slide_sources(slide, bundle)
+            self._apply_selected_exhibit(slide, required_archetype, section, bundle)
+            if section is not None:
+                slide.action_title = self._clean_action_title_candidate(
+                    self._fallback_action_title(required_archetype, section.title, section)
+                )
 
     def _spec_gate_warnings(self, report) -> list[dict[str, Any]]:
         if not getattr(report, "unresolved_count", 0):
@@ -246,6 +279,7 @@ class ContentPlanner(
             issue_categories = {
                 str(issue.category or "") for issue in slide_issues
             }
+            prior_seen_bullets = set(seen_bullets)
             if "duplicate_slide" in issue_categories:
                 section = self._alternate_source_section(
                     section,
@@ -258,10 +292,10 @@ class ContentPlanner(
                 or revised.content_json.get("title")
                 or revised.label
             )
-            title_key = self._qa_key(current_title)
+            title_keys = self._title_seen_keys(current_title)
             if (
                 deck_level_issue
-                or title_key in seen_titles
+                or bool(title_keys & seen_titles)
                 or issue_categories
                 & {
                     "action_title",
@@ -277,7 +311,7 @@ class ContentPlanner(
                 revised.content_json["action_title"] = title
                 revised.content_json["title"] = title
             else:
-                seen_titles.add(title_key)
+                seen_titles.update(title_keys)
             if issue_categories & {
                 "duplicate_slide",
                 "generic_filler",
@@ -294,17 +328,65 @@ class ContentPlanner(
                 & {
                     "duplicate_slide",
                     "exhibit_structure",
+                    "generic_filler",
                     "missing_exhibit",
+                    "repeated_bullet",
                     "source_refs",
+                    "title_body_support",
                 }
             ):
+                if "exhibit_structure" in issue_categories:
+                    self._repair_outline_archetype_for_exhibit_issue(revised)
                 self._restore_outline_sources(revised, section, bundle)
                 self._rebuild_outline_exhibit(revised, section, bundle)
+                if "repeated_bullet" in issue_categories:
+                    self._dedupe_rebuilt_outline_exhibit(
+                        revised,
+                        section,
+                        prior_seen_bullets,
+                        seen_bullets,
+                    )
             elif issue_categories & {"source_refs"}:
                 self._restore_outline_sources(revised, section, bundle)
             self._track_outline_source_refs(revised, section, seen_source_refs)
             repaired.append(revised)
         return repaired
+
+    def _repair_outline_archetype_for_exhibit_issue(self, outline: SlideOutline) -> None:
+        preferred = self._preferred_archetype_for_outline_text(outline)
+        if not preferred:
+            return
+        outline.content_json["archetype"] = preferred
+        outline.layout_json["archetype"] = preferred
+        layout = "chart" if preferred == "metric_chart" else preferred
+        outline.layout_json["layout"] = layout
+        outline.layout_json["visual_elements"] = self._visual_elements_for_layout(layout)
+
+    def _preferred_archetype_for_outline_text(self, outline: SlideOutline) -> str:
+        content = outline.content_json
+        parts = [
+            str(content.get("action_title") or content.get("title") or outline.label),
+            str(content.get("summary") or content.get("subheading") or ""),
+            self._flatten_exhibit_value(content.get("exhibit_spec")),
+        ]
+        for bullet in self._outline_bullets(outline):
+            parts.append(str(bullet))
+        text = " ".join(parts).lower()
+        if re.search(
+            r"\b(directed dependency graph|dependency graph|file hierarchy|"
+            r"dependencies|relationship map)\b",
+            text,
+        ):
+            return "dependency_map"
+        if re.search(r"\b(six[- ]phase loop|cycle|operating loop)\b", text):
+            return "framework_cycle"
+        if re.search(
+            r"\b(six core files|core files|rules files|specification files|"
+            r"reference table)\b",
+            text,
+        ):
+            return "table_reference"
+        return ""
 
     def _source_section_for_outline(
         self, outline: SlideOutline, bundle: DocumentBundle
@@ -373,24 +455,73 @@ class ContentPlanner(
         seen_titles: set[str],
     ) -> str:
         candidate = self._truncate_title(title or "Clarify the next decision")
-        if self._qa_key(candidate) not in seen_titles:
-            seen_titles.add(self._qa_key(candidate))
+        candidate_keys = self._title_seen_keys(candidate)
+        if not (candidate_keys & seen_titles):
+            seen_titles.update(candidate_keys)
             return candidate
         source_label = self._clean_section_title(section.title) if section else "next step"
+        subject = source_label.lower()
+        themed = (
+            self._themed_action_title(subject, f"{section.title} {section.content}".lower())
+            if section
+            else ""
+        )
         alternatives = [
-            f"Use {source_label.lower()} to sharpen the decision",
-            f"Translate {source_label.lower()} into an owned action",
-            f"Prioritize {source_label.lower()} before scaling execution",
+            *self._question_subject_titles(subject),
+            themed,
+            f"Make {subject} an explicit operating decision",
+            f"Translate {subject} into an owned next step",
+            f"Address {subject} before it shapes delivery",
         ]
+        alternatives = [alternative for alternative in alternatives if alternative]
         for alternative in alternatives:
             candidate = self._truncate_title(alternative)
-            if self._qa_key(candidate) not in seen_titles:
-                seen_titles.add(self._qa_key(candidate))
+            candidate_keys = self._title_seen_keys(candidate)
+            if not (candidate_keys & seen_titles):
+                seen_titles.update(candidate_keys)
                 return candidate
         suffix = len(seen_titles) + 1
         candidate = self._truncate_title(f"Resolve decision path {suffix} with source evidence")
-        seen_titles.add(self._qa_key(candidate))
+        seen_titles.update(self._title_seen_keys(candidate))
         return candidate
+
+    def _question_subject_titles(self, subject: str) -> list[str]:
+        cleaned = " ".join(str(subject).split())
+        lowered = cleaned.lower()
+        if lowered.startswith("why "):
+            return [f"Clarify {cleaned} before teams act"]
+        if lowered.startswith("how to "):
+            return [f"Define how to {cleaned[7:]} before execution begins"]
+        if lowered.startswith("how "):
+            return [f"Define {cleaned} before execution begins"]
+        if lowered.startswith("when "):
+            return [f"Set {cleaned} before execution begins"]
+        if lowered.startswith("what "):
+            return [f"Clarify {cleaned} before teams act"]
+        return []
+
+    def _title_seen_keys(self, title: str) -> set[str]:
+        keys: set[str] = set()
+        title_key = self._qa_key(title)
+        if title_key:
+            keys.add(f"title:{title_key}")
+        frame_key = self._title_frame_key(title)
+        if frame_key:
+            keys.add(f"frame:{frame_key}")
+        return keys
+
+    def _title_frame_key(self, title: str) -> str:
+        words = self._qa_key(title).split()
+        if len(words) < 6:
+            return ""
+        for connector in ("so", "before", "after", "through", "with", "into", "as", "to"):
+            if connector not in words:
+                continue
+            index = words.index(connector)
+            tail = words[index + 1 :]
+            if index >= 2 and len(tail) >= 3:
+                return " ".join([words[0], connector, *tail])
+        return ""
 
     def _replace_outline_bullets_from_source(
         self,
@@ -508,6 +639,62 @@ class ContentPlanner(
             outline.content_json["chart_spec"] = chart_spec
             outline.content_json["metrics"] = chart_spec.get("metrics", [])
         outline.layout_json["exhibit_type"] = exhibit.get("type")
+
+    def _dedupe_rebuilt_outline_exhibit(
+        self,
+        outline: SlideOutline,
+        section: DocumentSection | None,
+        prior_seen_bullets: set[str],
+        seen_bullets: set[str],
+    ) -> None:
+        exhibit = outline.content_json.get("exhibit_spec")
+        if not isinstance(exhibit, dict):
+            return
+        pool = [
+            *self._section_phrases(section, 8),
+            "Assign an owner before the next implementation cycle.",
+            "Set the review cadence before scaling the workflow.",
+            "Capture lessons in the shared operating reference.",
+            "Retire stale context after each completed feature.",
+        ]
+
+        def unique_text(value: str) -> str:
+            key = self._qa_key(value)
+            if key and key not in prior_seen_bullets:
+                prior_seen_bullets.add(key)
+                seen_bullets.add(key)
+                return value
+            for candidate in pool:
+                candidate_key = self._qa_key(candidate)
+                if candidate_key and candidate_key not in prior_seen_bullets:
+                    prior_seen_bullets.add(candidate_key)
+                    seen_bullets.add(candidate_key)
+                    return candidate
+            return value
+
+        changed = False
+        for key in ("next_steps", "supporting_points", "points"):
+            values = exhibit.get(key)
+            if not isinstance(values, list):
+                continue
+            updated = [unique_text(str(item)) for item in values if str(item).strip()]
+            if updated != values:
+                exhibit[key] = updated
+                changed = True
+        items = exhibit.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict) or not str(item.get("action") or "").strip():
+                    continue
+                replacement = unique_text(str(item["action"]))
+                if replacement != item["action"]:
+                    item["action"] = replacement
+                    changed = True
+        if changed:
+            outline.content_json["content_blocks"] = [
+                block.model_dump()
+                for block in self.exhibit_compiler.content_blocks(exhibit)
+            ]
 
     def _nearby_tables(
         self, section: DocumentSection | None, bundle: DocumentBundle

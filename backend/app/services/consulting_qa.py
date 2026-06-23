@@ -20,8 +20,11 @@ GENERIC_TITLE_PATTERNS = {
 ACTION_VERBS = {
     "accelerate",
     "adopt",
+    "are",
     "build",
     "capture",
+    "clarify",
+    "clarifies",
     "codify",
     "commit",
     "compare",
@@ -34,37 +37,73 @@ ACTION_VERBS = {
     "deploy",
     "enforce",
     "establish",
+    "fail",
+    "fails",
     "explain",
     "expand",
     "focus",
+    "form",
+    "forms",
     "grow",
     "highlight",
     "identify",
     "improve",
     "implement",
+    "introduce",
+    "introduces",
     "increase",
+    "is",
+    "keep",
+    "keeps",
+    "make",
+    "makes",
     "manage",
     "map",
+    "occur",
+    "occurs",
+    "outpace",
+    "outpaces",
     "prioritize",
     "prevent",
+    "persist",
+    "persists",
+    "provide",
+    "provides",
     "quantify",
     "recognize",
     "reduce",
     "reframe",
     "replace",
+    "replaces",
+    "require",
+    "requires",
     "reset",
+    "reveal",
+    "revealed",
+    "reveals",
+    "review",
+    "reviews",
     "run",
     "secure",
+    "show",
+    "shows",
     "shift",
+    "specify",
+    "specifies",
     "standardize",
     "structure",
     "target",
+    "treat",
     "translate",
     "transition",
     "undermine",
     "unlock",
     "update",
     "use",
+    "visualize",
+    "visualizes",
+    "work",
+    "works",
 }
 
 GENERIC_FILLER_PATTERNS = {
@@ -110,6 +149,7 @@ class ConsultingQA:
         issues: list[QAIssue] = []
         flexible = [outline for outline in outlines if outline.mode == "flexible"]
         titles: dict[str, int] = {}
+        title_frames: dict[str, int] = {}
         bullets_seen: dict[str, int] = {}
         slide_fingerprints: list[tuple[int, set[str]]] = []
         roles = []
@@ -132,10 +172,24 @@ class ConsultingQA:
                         )
                     )
                 titles[normalized_title] = outline.slide_index
+            title_frame = self._title_frame_key(title)
+            if title_frame:
+                if title_frame in title_frames:
+                    issues.append(
+                        QAIssue(
+                            severity="WARNING",
+                            category="horizontal_flow",
+                            message=(
+                                "Repeated action-title sentence frame weakens the storyline."
+                            ),
+                            slide_index=outline.slide_index,
+                        )
+                    )
+                title_frames[title_frame] = outline.slide_index
             bullets = self._outline_bullets(outline)
             issues.extend(self._outline_content_issues(outline, title, bullets))
             for bullet in bullets:
-                normalized_bullet = self._normalize_text(bullet)
+                normalized_bullet = self._repeated_evidence_key(bullet)
                 if not normalized_bullet:
                     continue
                 if normalized_bullet in bullets_seen:
@@ -235,7 +289,7 @@ class ConsultingQA:
         words = {re.sub(r"[^a-z]", "", word.lower()) for word in title.split()}
         if words & ACTION_VERBS:
             return True
-        return any(word.endswith(("ing", "ed", "es")) for word in words if len(word) > 4)
+        return False
 
     def _outline_title_issues(
         self, outline: SlideOutline, title: str
@@ -250,6 +304,8 @@ class ConsultingQA:
                     slide_index=outline.slide_index,
                 )
             )
+            return issues
+        if self._outline_is_cover(outline):
             return issues
         if title.lower() in GENERIC_TITLE_PATTERNS:
             issues.append(
@@ -314,13 +370,34 @@ class ConsultingQA:
             in {"as", "for", "into", "of", "optimal", "prior", "to", "with"}
         )
 
+    def _title_frame_key(self, title: str) -> str:
+        words = self._normalize_text(title).split()
+        if len(words) < 6:
+            return ""
+        for connector in ("so", "before", "after", "through", "with", "into", "as", "to"):
+            if connector not in words:
+                continue
+            index = words.index(connector)
+            tail = words[index + 1 :]
+            if index >= 2 and len(tail) >= 3:
+                return " ".join([words[0], connector, *tail])
+        return ""
+
     def _outline_content_issues(
         self, outline: SlideOutline, title: str, bullets: list[str]
     ) -> list[QAIssue]:
         issues: list[QAIssue] = []
+        if self._outline_is_cover(outline):
+            return issues
         title_tokens = self._meaningful_tokens(title)
-        body_tokens = self._meaningful_tokens(" ".join(bullets))
-        if title_tokens and body_tokens and len(title_tokens & body_tokens) == 0:
+        body_text = self._outline_support_text(outline, bullets)
+        body_tokens = self._meaningful_tokens(body_text)
+        if (
+            title_tokens
+            and body_tokens
+            and len(title_tokens & body_tokens) == 0
+            and not self._has_semantic_support(title_tokens, body_tokens)
+        ):
             issues.append(
                 QAIssue(
                     severity="WARNING",
@@ -340,7 +417,151 @@ class ConsultingQA:
                     )
                 )
                 break
+        issues.extend(self._outline_exhibit_match_issues(outline, title, body_text))
         return issues
+
+    def _outline_exhibit_match_issues(
+        self,
+        outline: SlideOutline,
+        title: str,
+        body_text: str,
+    ) -> list[QAIssue]:
+        exhibit = outline.content_json.get("exhibit_spec")
+        if not isinstance(exhibit, dict):
+            return []
+        exhibit_type = str(exhibit.get("type") or "").lower().replace("-", "_")
+        title_text = title.lower()
+        expected: str | None = None
+        if re.search(
+            r"\b(directed dependency graph|dependency graph|file hierarchy|"
+            r"dependencies|relationship map)\b",
+            title_text,
+        ):
+            expected = "dependency_map"
+        elif re.search(r"\b(six[- ]phase loop|cycle|operating loop)\b", title_text):
+            expected = "cycle"
+        elif re.search(
+            r"\b(six core files|core files|rules files|specification files|"
+            r"reference table)\b",
+            title_text,
+        ):
+            expected = "reference_table"
+        if expected is None:
+            return []
+        compatible = {
+            "dependency_map": {"dependency_map"},
+            "cycle": {"cycle", "checklist"},
+            "reference_table": {"reference_table", "code_panel"},
+        }[expected]
+        if exhibit_type in compatible:
+            return []
+        return [
+            QAIssue(
+                severity="WARNING",
+                category="exhibit_structure",
+                message=(
+                    "Primary exhibit type does not match the action title's implied "
+                    "visual structure."
+                ),
+                slide_index=outline.slide_index,
+            )
+        ]
+
+    def _outline_support_text(self, outline: SlideOutline, bullets: list[str]) -> str:
+        content = outline.content_json
+        parts = [
+            str(content.get("subheading") or ""),
+            str(content.get("design_intent") or ""),
+            *bullets,
+        ]
+        exhibit = content.get("exhibit_spec")
+        if exhibit:
+            parts.append(self._flatten_for_similarity(exhibit))
+        return " ".join(parts)
+
+    def _has_semantic_support(
+        self,
+        title_tokens: set[str],
+        body_tokens: set[str],
+    ) -> bool:
+        families = [
+            {
+                "unverified",
+                "claim",
+                "claims",
+                "quality",
+                "risk",
+                "hallucination",
+                "hallucinations",
+                "fabricate",
+                "fabricated",
+                "ambiguity",
+                "ambiguous",
+                "vague",
+                "evidence",
+                "checked",
+                "verify",
+            },
+            {
+                "agent",
+                "agents",
+                "teammate",
+                "teammates",
+                "managed",
+                "manager",
+                "managers",
+                "manage",
+                "employee",
+                "employees",
+                "paradigm",
+                "developer",
+                "developers",
+            },
+            {
+                "context",
+                "memory",
+                "persistent",
+                "external",
+                "brain",
+                "window",
+                "windows",
+                "reset",
+                "session",
+            },
+            {
+                "specification",
+                "specifications",
+                "criteria",
+                "acceptance",
+                "requirements",
+                "prompt",
+                "prompts",
+                "rules",
+            },
+            {
+                "cycle",
+                "cycles",
+                "loop",
+                "loops",
+                "phase",
+                "phases",
+                "workflow",
+                "workflows",
+                "review",
+                "reviews",
+                "reset",
+                "reliability",
+                "repeatable",
+            },
+        ]
+        return any(title_tokens & family and body_tokens & family for family in families)
+
+    def _outline_is_cover(self, outline: SlideOutline) -> bool:
+        content = outline.content_json
+        layout = str(outline.layout_json.get("layout") or "").lower()
+        archetype = str(content.get("archetype") or outline.layout_json.get("archetype") or "").lower()
+        role = str(content.get("narrative_role") or "").lower()
+        return layout == "cover" or archetype == "cover" or role == "cover"
 
     def _outline_flow_issues(
         self, outlines: list[SlideOutline], roles: list[str]
@@ -453,6 +674,33 @@ class ConsultingQA:
     def _normalize_text(self, text: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", str(text).lower())
         return " ".join(normalized.split())
+
+    def _repeated_evidence_key(self, text: str) -> str:
+        normalized = self._normalize_text(text)
+        tokens = normalized.split()
+        if not tokens:
+            return ""
+        low_signal = {
+            "action",
+            "current",
+            "dimension",
+            "implication",
+            "item",
+            "owner",
+            "signal",
+            "state",
+            "target",
+            "timing",
+            "trigger",
+            "update",
+            "when",
+            "conditions",
+            "change",
+        }
+        meaningful = [token for token in tokens if token not in low_signal]
+        if len(meaningful) < 5:
+            return ""
+        return normalized
 
     def _meaningful_tokens(self, text: str) -> set[str]:
         stop = {

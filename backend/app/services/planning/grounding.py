@@ -30,24 +30,30 @@ class SourceGroundingMixin:
             had_missing_sources = not any(
                 str(source).strip() for source in original_sources
             )
+            def source_ref_is_allowed(ref: str) -> bool:
+                return self._source_ref_is_valid(ref, bundle) and (
+                    has_source_material or ref != UPLOADED_SOURCE_LABEL
+                )
+
             has_invented_source_label = any(
                 str(source).strip()
                 and not self._canonical_source_label(
                     str(source).strip(), has_source_material
                 )
+                and not source_ref_is_allowed(str(source).strip())
                 for source in original_sources
             )
             valid_source_refs = [
                 str(ref).strip()
                 for ref in slide.source_refs
-                if self._source_ref_is_valid(str(ref).strip(), bundle)
+                if source_ref_is_allowed(str(ref).strip())
             ]
             invalid_source_refs = [
                 str(ref).strip()
                 for ref in slide.source_refs
                 if str(ref).strip()
-                and not self._source_ref_is_valid(str(ref).strip(), bundle)
-                and str(ref).strip() not in {UPLOADED_SOURCE_LABEL, SOURCE_NEEDED_LABEL}
+                and not source_ref_is_allowed(str(ref).strip())
+                and str(ref).strip() != SOURCE_NEEDED_LABEL
             ]
             if valid_source_refs:
                 slide.source_refs = self._dedupe_preserving_order(valid_source_refs)
@@ -69,6 +75,9 @@ class SourceGroundingMixin:
                 canonical = self._canonical_source_label(label, has_source_material)
                 if canonical:
                     normalized.append(canonical)
+                elif source_ref_is_allowed(label):
+                    for resolved in self._source_labels_for_refs([label], bundle):
+                        normalized.append(resolved)
                 elif label:
                     invalid_sources.append(label)
 
@@ -312,6 +321,23 @@ class SourceGroundingMixin:
 
     def _visual_metadata_keys(self) -> set[str]:
         return {
+            "id",
+            "ids",
+            "source_id",
+            "source_ids",
+            "source_ref",
+            "source_refs",
+            "source_doc_id",
+            "doc_id",
+            "document_id",
+            "section_id",
+            "table_id",
+            "metric_id",
+            "provenance",
+            "kind",
+            "index",
+            "slide_number",
+            "order",
             "width",
             "height",
             "x",
@@ -364,18 +390,34 @@ class SourceGroundingMixin:
     def _body_to_bullets(self, slide: GeneratedSlideSpec) -> list[str]:
         bullets: list[str] = []
         for block in slide.content_blocks:
+            # Chart bodies carry metric phrasing that belongs in the exhibit, not
+            # in the bullet stream; skip them so KPI cards never become bullets.
+            if block.type == "chart":
+                continue
             for item in block.body:
-                if isinstance(item, str):
-                    cleaned = self._clean_generated_visual_placeholder(item)
-                    if cleaned:
-                        bullets.append(cleaned)
+                if isinstance(item, dict):
+                    text = self._metric_bullet_from_dict(item)
                 elif isinstance(item, list):
-                    cleaned = self._clean_generated_visual_placeholder(
-                        " | ".join(str(value) for value in item)
-                    )
-                    if cleaned:
-                        bullets.append(cleaned)
+                    text = " | ".join(str(value) for value in item)
+                else:
+                    text = str(item)
+                cleaned = self._clean_generated_visual_placeholder(text)
+                if cleaned:
+                    bullets.append(cleaned)
         return bullets[:5]
+
+    def _metric_bullet_from_dict(self, item: dict[str, Any]) -> str:
+        label = " ".join(str(item.get("label") or item.get("name") or "").split())
+        value = item.get("value", "")
+        unit = str(item.get("unit") or "").strip()
+        if str(value).strip():
+            rendered = f"{value}{unit}" if unit == "%" else f"{value} {unit}".strip()
+            return f"{label} — {rendered}".strip(" —") if label else rendered
+        for key in ("text", "description"):
+            text = str(item.get(key) or "").strip()
+            if text:
+                return f"{label}: {text}" if label and label.lower() not in text.lower() else text
+        return label
 
     def _clean_generated_visual_placeholder(self, text: str) -> str:
         cleaned = re.sub(
@@ -588,6 +630,12 @@ class SourceGroundingMixin:
             "closing_recommendation": "closing_recommendation",
             "reference": "code_panel",
         }
+        if (
+            slide.slide_type == "executive_summary"
+            and archetype != "executive_summary"
+            and slide.slide_number != 1
+        ):
+            return "callouts"
         if archetype in archetype_layouts:
             if archetype == "metric_chart" and not self._metrics_from_slide(slide):
                 return "table_reference"

@@ -43,6 +43,26 @@ def test_parse_report_uses_actual_image_index_for_single_slide_inspection() -> N
     assert issues[0].slide_index == 4
 
 
+def test_rule_checks_ignore_stale_source_placeholder_when_refs_are_valid() -> None:
+    outline = SlideOutline(
+        id="outline-source-stale",
+        job_id="job-source",
+        slide_index=0,
+        mode="flexible",
+        label="Context rot makes long-running work unreliable",
+        content_json={
+            "sources": ["[source needed]", "Beyond Vibe Coding > Context Rot"],
+            "source_refs": ["doc-1:section:context-rot"],
+        },
+        layout_json={"layout": "chart", "visual_elements": ["charts"]},
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    issues = VisualQAAgent()._rule_based_checks([outline])
+
+    assert "source_placeholder" not in {issue.category for issue in issues}
+
+
 class DummyVisionClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -231,6 +251,37 @@ def test_rule_based_checks_detect_source_and_layout_risks() -> None:
     assert "source_coverage" in categories
     assert "layout_variety" in categories
     assert "layout_repetition" in categories
+
+
+def test_rule_based_checks_detect_repeated_heavy_comparison_treatment() -> None:
+    outlines = []
+    for idx, layout in enumerate(
+        ["comparison_table", "callouts", "comparison_table", "icon_rows"]
+    ):
+        outlines.append(
+            SlideOutline(
+                id=f"outline-heavy-repeat-{idx}",
+                job_id="job-heavy-repeat",
+                slide_index=idx,
+                mode="flexible",
+                label=f"Slide {idx}",
+                content_json={
+                    "title": f"Slide {idx}",
+                    "sources": ["Uploaded source"],
+                    "exhibit_spec": {
+                        "type": layout if layout != "icon_rows" else "callouts",
+                        "columns": ["Dimension", "Current state", "Target state"],
+                        "rows": [{"label": "Process", "values": ["Ad hoc", "Managed"]}],
+                    },
+                },
+                layout_json={"layout": layout, "visual_elements": ["structured_text"]},
+                created_at="2026-01-01T00:00:00Z",
+            )
+        )
+
+    issues = VisualQAAgent()._rule_based_checks(outlines)
+
+    assert "visual_repetition" in {issue.category for issue in issues}
 
 
 def test_pptx_structure_checks_detect_text_density(tmp_path) -> None:

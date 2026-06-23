@@ -18,6 +18,7 @@ from app.models.document import (
 )
 from app.models.generation import ContentBlock, DeckSpec, GeneratedSlideSpec
 from app.models.outline import SlideOutline
+from app.models.qa import QAIssue
 from app.models.template import TemplateProfile
 from app.services.consulting_qa import ConsultingQA
 from app.services.content_planner import ContentPlanner
@@ -165,6 +166,33 @@ def test_grounding_resolves_source_refs_to_section_labels() -> None:
     assert deck.slides[0].sources == ["Beyond Vibe Coding > External Brain"]
 
 
+def test_grounding_accepts_source_ids_in_human_source_labels() -> None:
+    bundle = _source_bundle()
+    deck = DeckSpec(
+        deck_title="Polish",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Use persistent context to improve handoffs",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Persistent context improves handoffs."],
+                    )
+                ],
+                sources=[bundle.sections[0].source_id],
+                source_refs=[bundle.sections[0].source_id],
+            )
+        ],
+    )
+
+    warnings = ContentPlanner()._normalize_source_labels(deck, bundle)
+
+    assert warnings == []
+    assert deck.slides[0].sources == ["Beyond Vibe Coding > External Brain"]
+
+
 def test_grounding_rejects_invented_source_labels() -> None:
     bundle = _source_bundle()
     deck = DeckSpec(
@@ -192,6 +220,39 @@ def test_grounding_rejects_invented_source_labels() -> None:
     assert warnings[0]["field"] == "source_label"
 
 
+def test_numeric_grounding_ignores_source_metadata_ids() -> None:
+    bundle = _source_bundle()
+    deck = DeckSpec(
+        deck_title="Polish",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Use persistent context to improve handoffs",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Persistent context improves handoffs."],
+                    )
+                ],
+                sources=["Uploaded source"],
+                source_refs=[bundle.sections[0].source_id],
+                exhibit_spec={
+                    "type": "callouts",
+                    "source_id": "doc:section:1:06845393",
+                    "source_refs": ["doc:section:2:4206"],
+                    "points": ["Persistent context improves handoffs."],
+                },
+            )
+        ],
+    )
+
+    warnings = ContentPlanner()._ground_numeric_claims(deck, bundle)
+
+    assert warnings == []
+    assert "[source needed]" not in str(deck.slides[0].exhibit_spec)
+
+
 def test_consulting_qa_flags_outline_polish_issues() -> None:
     duplicate = "Overview"
     outlines = [
@@ -210,6 +271,319 @@ def test_consulting_qa_flags_outline_polish_issues() -> None:
         "source_refs",
         "missing_exhibit",
     } <= categories
+
+
+def test_consulting_qa_ignores_repeated_table_headers_as_evidence() -> None:
+    outlines = [
+        _outline(
+            0,
+            "Use persistent context to improve handoffs",
+            [],
+            source_refs=["source-doc:section:1:external-brain"],
+            exhibit_spec={"type": "reference_table"},
+        ),
+        _outline(
+            1,
+            "Codify rules before assigning agent work",
+            [],
+            source_refs=["source-doc:section:2:rules"],
+            exhibit_spec={"type": "reference_table"},
+        ),
+    ]
+    for idx, outline in enumerate(outlines):
+        outline.content_json["content_blocks"] = [
+            {
+                "type": "table",
+                "body": [
+                    ["Item", "Implication", "Update trigger"],
+                    [
+                        "Context" if idx == 0 else "Rules",
+                        "Persistent memory reduces handoff loss."
+                        if idx == 0
+                        else "Explicit rules make review gates inspectable.",
+                        "When conditions change",
+                    ],
+                ],
+            }
+        ]
+
+    issues = ConsultingQA().inspect_outlines(outlines, has_source_material=True)
+
+    assert "repeated_bullet" not in {issue.category for issue in issues}
+
+
+def test_consulting_qa_uses_real_verbs_not_gerund_noise_for_titles() -> None:
+    issues = ConsultingQA().inspect_outlines(
+        [
+            _outline(
+                0,
+                "Specify the six-phase loop before delegating it to the agent",
+                ["Finite context windows make prior decisions disappear."],
+                source_refs=["source-doc:section:1:external-brain"],
+                exhibit_spec={"type": "callouts"},
+            ),
+            _outline(
+                1,
+                "Vibe coding operating patterns",
+                ["Unstructured prompting makes work harder to reproduce."],
+                source_refs=["source-doc:section:1:external-brain"],
+                exhibit_spec={"type": "callouts"},
+            ),
+        ],
+        has_source_material=True,
+    )
+
+    action_title_issues = {
+        issue.slide_index
+        for issue in issues
+        if issue.category == "action_title"
+        and "verb" in issue.message.lower()
+    }
+
+    assert 0 not in action_title_issues
+    assert 1 in action_title_issues
+
+
+def test_consulting_qa_flags_repeated_action_title_frames() -> None:
+    issues = ConsultingQA().inspect_outlines(
+        [
+            _outline(
+                0,
+                "Persist core files so context survives every reset",
+                ["Core files make context survive resets."],
+                source_refs=["source-doc:section:1:external-brain"],
+                exhibit_spec={"type": "callouts"},
+            ),
+            _outline(
+                1,
+                "Persist six-phase loop so context survives every reset",
+                ["The six-phase loop preserves context between sessions."],
+                source_refs=["source-doc:section:1:external-brain"],
+                exhibit_spec={"type": "callouts"},
+            ),
+        ],
+        has_source_material=True,
+    )
+
+    frame_issues = [
+        issue
+        for issue in issues
+        if issue.category == "horizontal_flow"
+        and "sentence frame" in issue.message.lower()
+    ]
+
+    assert [issue.slide_index for issue in frame_issues] == [1]
+
+
+def test_consulting_repair_avoids_repeated_action_title_frames() -> None:
+    sections = [
+        DocumentSection(
+            title="Core Files",
+            level=1,
+            content="Core files preserve decisions for future sessions.",
+            source_doc_id="source-doc",
+            source_id="source-doc:section:1:core-files",
+        ),
+        DocumentSection(
+            title="Six-Phase Loop",
+            level=1,
+            content="The operating loop reviews output before context is reset.",
+            source_doc_id="source-doc",
+            source_id="source-doc:section:2:six-phase-loop",
+        ),
+    ]
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=sections,
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+    )
+    outlines = [
+        _outline(
+            0,
+            "Persist core files so context survives every reset",
+            ["Core files make context survive resets."],
+            source_refs=[sections[0].source_id],
+            exhibit_spec={"type": "callouts"},
+        ),
+        _outline(
+            1,
+            "Persist six-phase loop so context survives every reset",
+            ["The six-phase loop preserves context between sessions."],
+            source_refs=[sections[1].source_id],
+            exhibit_spec={"type": "callouts"},
+        ),
+    ]
+    planner = ContentPlanner()
+    issues = ConsultingQA().inspect_outlines(outlines, has_source_material=True)
+
+    repaired = planner.repair_outlines_for_consulting(outlines, issues, bundle)
+    frame_keys = [
+        planner._title_frame_key(outline.label)
+        for outline in repaired
+        if planner._title_frame_key(outline.label)
+    ]
+
+    assert len(frame_keys) == len(set(frame_keys))
+    assert repaired[1].label != outlines[1].label
+
+
+def test_consulting_qa_flags_exhibit_type_mismatches() -> None:
+    outline = _outline(
+        0,
+        "The Memory Bank files form a directed dependency graph",
+        ["The files feed one another in sequence."],
+        source_refs=["source-doc:section:1:external-brain"],
+        exhibit_spec={"type": "callouts", "points": ["The files feed one another."]},
+    )
+
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    assert any(issue.category == "exhibit_structure" for issue in issues)
+
+
+def test_consulting_qa_exhibit_mismatch_uses_title_not_supporting_body() -> None:
+    outline = _outline(
+        0,
+        "Adopt Markdown-Driven Development to communicate intent through files",
+        [
+            "Specification files and rules files preserve intent for later sessions.",
+            "The workflow can reference those files before execution.",
+        ],
+        source_refs=["source-doc:section:1:external-brain"],
+        exhibit_spec={"type": "checklist", "items": [{"action": "Write the file"}]},
+    )
+
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    assert not any(issue.category == "exhibit_structure" for issue in issues)
+
+
+def test_consulting_qa_allows_checklist_for_phase_loop_titles() -> None:
+    outline = _outline(
+        0,
+        "Specify the six-phase loop before delegating it to the agent",
+        ["Every development session follows five ordered phases."],
+        source_refs=["source-doc:section:1:external-brain"],
+        exhibit_spec={
+            "type": "checklist",
+            "items": [
+                {"action": "Load context"},
+                {"action": "Plan"},
+                {"action": "Review"},
+            ],
+        },
+    )
+
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    assert not any(issue.category == "exhibit_structure" for issue in issues)
+
+
+def test_consulting_repair_rebuilds_mismatched_dependency_exhibit() -> None:
+    section = DocumentSection(
+        title="3.2 The File Hierarchy",
+        level=2,
+        content=(
+            "The Memory Bank files form a directed dependency graph. "
+            "project_brief.md feeds product_context.md, system_patterns.md, and progress.md."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:1:file-hierarchy",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+    )
+    outline = _outline(
+        0,
+        "The Memory Bank files form a directed dependency graph",
+        ["The files feed one another in sequence."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "callouts", "points": ["The files feed one another."]},
+    )
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    repaired = ContentPlanner().repair_outlines_for_consulting([outline], issues, bundle)
+
+    assert repaired[0].content_json["archetype"] == "dependency_map"
+    assert repaired[0].content_json["exhibit_spec"]["type"] == "dependency_map"
+    assert repaired[0].layout_json["layout"] == "dependency_map"
+
+
+def test_consulting_title_repair_uses_grammatical_question_heading_frames() -> None:
+    planner = ContentPlanner()
+
+    why_titles = planner._question_subject_titles("why the reset matters")
+    how_titles = planner._question_subject_titles("how to review AI plans")
+
+    assert why_titles == ["Clarify why the reset matters before teams act"]
+    assert how_titles == ["Define how to review AI plans before execution begins"]
+    assert not any(title.lower().startswith("make why") for title in why_titles)
+
+
+def test_consulting_qa_does_not_force_cover_into_action_title_shape() -> None:
+    cover = _outline(
+        0,
+        "Beyond Vibe Coding",
+        ["How to stop chatting with AI and start managing it."],
+        source_refs=["source-doc:section:1:external-brain"],
+        exhibit_spec={"type": "cover"},
+    )
+    cover.content_json["narrative_role"] = "cover"
+    cover.content_json["archetype"] = "cover"
+    cover.layout_json["layout"] = "cover"
+
+    issues = ConsultingQA().inspect_outlines([cover], has_source_material=True)
+
+    assert not any(issue.category == "action_title" for issue in issues)
+    assert not any(issue.category == "title_body_support" for issue in issues)
+
+
+def test_consulting_qa_recognizes_semantic_body_support() -> None:
+    outlines = [
+        _outline(
+            0,
+            "Unverified claims create quality risk before evidence is checked",
+            [
+                "Hallucinations in AI-generated code are correlated with ambiguity.",
+                "Vague prompts make fabricated solutions harder to catch.",
+            ],
+            source_refs=["source-doc:section:1:external-brain"],
+            exhibit_spec={
+                "type": "checklist",
+                "items": [
+                    {"action": "Verify claims against source evidence before review."}
+                ],
+            },
+        ),
+        _outline(
+            1,
+            "Make the six-phase loop an explicit operating decision",
+            [
+                "Every development session follows six phases.",
+                "The workflow resets context after review.",
+            ],
+            source_refs=["source-doc:section:1:external-brain"],
+            exhibit_spec={"type": "cycle", "steps": [{"label": "Review"}]},
+        ),
+    ]
+
+    issues = ConsultingQA().inspect_outlines(outlines, has_source_material=True)
+
+    unsupported = (
+        issue.slide_index
+        for issue in issues
+        if issue.category == "title_body_support"
+    )
+
+    assert set(unsupported).isdisjoint({0, 1})
 
 
 def test_consulting_qa_flags_near_duplicate_slides() -> None:
@@ -263,6 +637,10 @@ def test_consulting_repair_rewrites_titles_sources_and_exhibits() -> None:
         "Beyond Vibe Coding > External Brain"
     ]
     assert repaired[0].content_json["exhibit_spec"]["type"] == "comparison_table"
+    assert "Preserve context before work begins" not in str(
+        repaired[0].content_json["exhibit_spec"]
+    )
+    assert "external brain" in str(repaired[0].content_json["exhibit_spec"]).lower()
 
 
 def test_consulting_repair_moves_duplicate_slide_to_unused_source() -> None:
@@ -333,6 +711,330 @@ def test_consulting_repair_moves_duplicate_slide_to_unused_source() -> None:
     assert repaired[1].content_json["source_refs"] == [second.source_id]
     assert repaired[1].label != repaired[0].label
     assert "Reviewer Mode" in repaired[1].content_json["sources"][0]
+
+
+def test_consulting_repair_dedupes_rebuilt_closing_recommendation_steps() -> None:
+    repeated = "The Memory Bank consists of six core files arranged in a dependency hierarchy."
+    closing_section = DocumentSection(
+        title="File Hierarchy",
+        level=2,
+        content=(
+            f"{repeated} "
+            "Tools will change and models will improve, but disciplined workflows endure. "
+            "The developer who thrives writes specifications and reviews logic."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:2:file-hierarchy",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[closing_section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+    )
+    prior = _outline(
+        0,
+        "Use a memory bank to turn ad hoc work into persistent context",
+        [repeated],
+        source_refs=[closing_section.source_id],
+        exhibit_spec={"type": "code_panel", "lines": [repeated]},
+    )
+    closing = _outline(
+        1,
+        "Commit to the Memory Bank framework for reliable AI-assisted development",
+        [repeated],
+        source_refs=[closing_section.source_id],
+        exhibit_spec={
+            "type": "recommendation",
+            "recommendation": "Keep persistent context current through named ownership.",
+            "next_steps": [repeated],
+        },
+    )
+    closing.content_json["archetype"] = "closing_recommendation"
+    closing.content_json["narrative_role"] = "closing"
+    closing.layout_json["layout"] = "closing_recommendation"
+    closing.layout_json["archetype"] = "closing_recommendation"
+
+    repaired = ContentPlanner().repair_outlines_for_consulting(
+        [prior, closing],
+        [
+            QAIssue(
+                severity="WARNING",
+                category="repeated_bullet",
+                message="Repeated evidence bullet appears on multiple slides.",
+                slide_index=1,
+            )
+        ],
+        bundle,
+    )
+
+    closing_exhibit = repaired[1].content_json["exhibit_spec"]
+    assert repeated not in closing_exhibit["next_steps"]
+
+
+def test_exhibit_selection_diversifies_repeated_visual_motifs() -> None:
+    bundle = _source_bundle()
+    repeated_exhibit = {
+        "type": "dependency_map",
+        "left_node": "Source evidence",
+        "middle_nodes": ["Context rot", "Hallucination amplification", "Reproducibility gap"],
+        "right_outcome": "Confident decision",
+        "connector_labels": ["feeds", "constrains", "verifies"],
+    }
+    deck = DeckSpec(
+        deck_title="Polish",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Map source dependencies before teams make the decision",
+                subheading="Dependency map from the source",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Source context feeds the decision model."],
+                    )
+                ],
+                sources=["Uploaded source"],
+                source_refs=[bundle.sections[0].source_id],
+                archetype="dependency_map",
+                narrative_role="evidence",
+                exhibit_spec=repeated_exhibit,
+            ),
+            GeneratedSlideSpec(
+                slide_number=2,
+                slide_type="content",
+                action_title="Map source dependencies before teams scale the workflow",
+                subheading="Dependency map from the source",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["Source context feeds the decision model."],
+                    )
+                ],
+                sources=["Uploaded source"],
+                source_refs=[bundle.sections[0].source_id],
+                archetype="dependency_map",
+                narrative_role="evidence",
+                exhibit_spec=dict(repeated_exhibit),
+            ),
+        ],
+    )
+
+    ContentPlanner()._apply_exhibit_selection(deck, bundle)
+
+    assert deck.slides[0].archetype == "dependency_map"
+    assert deck.slides[1].archetype != "dependency_map"
+    assert deck.slides[1].exhibit_spec["type"] != "dependency_map"
+
+
+def test_exhibit_selection_keeps_strong_dependency_cues_out_of_metric_cards() -> None:
+    sections = [
+        DocumentSection(
+            title="External Brain",
+            level=1,
+            content="Source context feeds the decision model.",
+            source_doc_id="source-doc",
+            source_id="source-doc:section:1:external-brain",
+        ),
+        DocumentSection(
+            title="3.2 The File Hierarchy",
+            level=2,
+            content=(
+                "These files are not independent; they form a directed dependency graph. "
+                "project_brief.md feeds product_context.md, system_patterns.md, and progress.md."
+            ),
+            source_doc_id="source-doc",
+            source_id="source-doc:section:2:file-hierarchy",
+        ),
+    ]
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=sections,
+        tables=[],
+        metrics=[
+            DocumentMetric(label="Developers using AI tools", value=85, unit="%", source_doc_id="source-doc"),
+            DocumentMetric(label="AI-generated codebases", value=95, unit="%", source_doc_id="source-doc"),
+            DocumentMetric(label="Context window minimum", value=32000, unit="tokens", source_doc_id="source-doc"),
+        ],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+    )
+    deck = DeckSpec(
+        deck_title="Polish",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Map source dependencies before teams make the decision",
+                content_blocks=[ContentBlock(type="bullets", body=["Source context feeds decisions."])],
+                sources=["Uploaded source"],
+                source_refs=[sections[0].source_id],
+                archetype="dependency_map",
+                exhibit_spec={
+                    "type": "dependency_map",
+                    "left_node": "Source evidence",
+                    "middle_nodes": ["Context", "Rules", "Review"],
+                    "right_outcome": "Confident decision",
+                },
+            ),
+            GeneratedSlideSpec(
+                slide_number=2,
+                slide_type="content",
+                action_title="These files are not independent; they form a directed dependency graph",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=["85% adoption should not replace the actual file hierarchy."],
+                    )
+                ],
+                sources=["Uploaded source"],
+                source_refs=[sections[1].source_id],
+                archetype="callouts",
+                exhibit_spec={
+                    "type": "callouts",
+                    "metrics": [
+                        {"label": "Developers using AI tools", "value": 85, "unit": "%"},
+                    ],
+                },
+            ),
+        ],
+    )
+
+    ContentPlanner()._apply_exhibit_selection(deck, bundle)
+
+    assert deck.slides[1].archetype == "dependency_map"
+    assert deck.slides[1].exhibit_spec["type"] == "dependency_map"
+    assert "metrics" not in deck.slides[1].exhibit_spec
+
+
+def test_exhibit_selection_promotes_core_files_to_reference_table() -> None:
+    section = DocumentSection(
+        title="3.1 The Core Files",
+        level=2,
+        content=(
+            "The Memory Bank consists of six core files arranged in a dependency hierarchy. "
+            "project_brief.md is the foundation and active_context.md tracks current work."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:1:core-files",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+    )
+    slide = GeneratedSlideSpec(
+        slide_number=1,
+        slide_type="comparison",
+        action_title="Structure the Memory Bank with six core files in a dependency hierarchy",
+        content_blocks=[ContentBlock(type="bullets", body=["Six core files define the Memory Bank."])],
+        sources=["Uploaded source"],
+        source_refs=[section.source_id],
+        archetype="comparison_table",
+        exhibit_spec={
+            "type": "comparison_table",
+            "columns": ["Current", "Target"],
+            "rows": [{"label": "Context", "values": ["Fragmented", "Persistent"]}],
+        },
+    )
+    deck = DeckSpec(deck_title="Polish", slides=[slide])
+
+    ContentPlanner()._apply_exhibit_selection(deck, bundle)
+
+    assert deck.slides[0].archetype == "table_reference"
+    assert deck.slides[0].exhibit_spec["type"] == "reference_table"
+
+
+def test_exhibit_selection_prioritizes_dependency_graph_over_file_reference() -> None:
+    sections = [
+        DocumentSection(
+            title="External Brain",
+            level=1,
+            content="Source context feeds the decision model.",
+            source_doc_id="source-doc",
+            source_id="source-doc:section:1:external-brain",
+        ),
+        DocumentSection(
+            title="3.1 The Core Files",
+            level=2,
+            content="The Memory Bank consists of six core files.",
+            source_doc_id="source-doc",
+            source_id="source-doc:section:2:core-files",
+        ),
+        DocumentSection(
+            title="3.2 The File Hierarchy",
+            level=2,
+            content=(
+                "The Memory Bank files form a directed dependency graph. "
+                "project_brief.md feeds product_context.md, system_patterns.md, and progress.md."
+            ),
+            source_doc_id="source-doc",
+            source_id="source-doc:section:3:file-hierarchy",
+        ),
+    ]
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=sections,
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Beyond Vibe Coding"),
+        content_inventory=[],
+    )
+    deck = DeckSpec(
+        deck_title="Polish",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Map source dependencies before teams make the decision",
+                content_blocks=[ContentBlock(type="bullets", body=["Source context feeds decisions."])],
+                sources=["Uploaded source"],
+                source_refs=[sections[0].source_id],
+                archetype="dependency_map",
+                exhibit_spec={
+                    "type": "dependency_map",
+                    "left_node": "Source evidence",
+                    "middle_nodes": ["Context", "Rules", "Review"],
+                    "right_outcome": "Decision",
+                },
+            ),
+            GeneratedSlideSpec(
+                slide_number=2,
+                slide_type="reference",
+                action_title="Standardize Memory Bank files as a reusable reference",
+                content_blocks=[ContentBlock(type="bullets", body=["Six core files define the system."])],
+                sources=["Uploaded source"],
+                source_refs=[sections[1].source_id],
+                archetype="table_reference",
+                exhibit_spec={
+                    "type": "reference_table",
+                    "columns": ["File", "Role"],
+                    "rows": [["project_brief.md", "Foundation"]],
+                },
+            ),
+            GeneratedSlideSpec(
+                slide_number=3,
+                slide_type="content",
+                action_title="The Memory Bank files form a directed dependency graph",
+                content_blocks=[ContentBlock(type="bullets", body=["The files feed one another."])],
+                sources=["Uploaded source"],
+                source_refs=[sections[2].source_id],
+                archetype="callouts",
+                exhibit_spec={"type": "callouts", "points": ["The files feed one another."]},
+            ),
+        ],
+    )
+
+    ContentPlanner()._apply_exhibit_selection(deck, bundle)
+
+    assert deck.slides[2].archetype == "dependency_map"
+    assert deck.slides[2].exhibit_spec["type"] == "dependency_map"
 
 
 def test_unrelated_source_fallback_does_not_leak_demo_language() -> None:
@@ -580,6 +1282,30 @@ def test_quote_sidebar_does_not_render_meta_instruction_text(tmp_path: Path) -> 
     assert "Treat the model as a managed teammate" in text
 
 
+def test_cover_stack_handles_null_model_signals() -> None:
+    outline = SlideOutline(
+        id="outline-cover-null-signals",
+        job_id="job-cover",
+        slide_index=0,
+        mode="flexible",
+        label="Beyond Vibe Coding",
+        content_json={
+            "action_title": "Beyond Vibe Coding",
+            "bullets": ["Persistent context improves handoffs."],
+        },
+        layout_json={"layout": "cover"},
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    items = DeterministicPptxRenderer()._cover_stack_items(
+        {"type": "cover", "signals": None},
+        outline,
+    )
+
+    assert len(items) == 3
+    assert items[0][1] == "Persistent context improves"
+
+
 def _all_slide_text(slide) -> str:
     parts = [
         shape.text
@@ -769,6 +1495,8 @@ def test_section_numbers_are_sequential_and_cover_uses_deck_title() -> None:
 
     # C2: the cover carries the real deck title, not the meta action title.
     assert outlines[0].content_json.get("deck_title") == "Beyond Vibe Coding"
+    assert outlines[0].content_json.get("action_title") == "Beyond Vibe Coding"
+    assert outlines[0].label == "Beyond Vibe Coding"
     assert outlines[0].layout_json.get("section_number") == ""
 
     # C1: section numbers are monotonic; contiguous same-label slides share one.

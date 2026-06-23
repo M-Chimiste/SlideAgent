@@ -4,20 +4,25 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BrandColors(BaseModel):
-    primary: str = Field(default="1E2761")
-    secondary: str = Field(default="4B5563")
-    accent: str = Field(default="FF6B35")
-    background_dark: str = Field(default="1E2761")
-    background_light: str = Field(default="F5F7FA")
-    text_dark: str = Field(default="1E2761")
+    # Freeform house palette, tuned to the reference whitepaper: a deep navy ink,
+    # a slate secondary, a refined bronze/gold accent (not a loud orange), cool
+    # light-blue card fills, and white. Bronze tints to a warm blush for emphasis
+    # cards, matching the reference deck's accent rhythm.
+    primary: str = Field(default="14213D")
+    secondary: str = Field(default="44506A")
+    accent: str = Field(default="C8893B")
+    background_dark: str = Field(default="0D1426")
+    background_light: str = Field(default="EAEEF5")
+    text_dark: str = Field(default="14213D")
     text_light: str = Field(default="FFFFFF")
 
 
 class BrandFonts(BaseModel):
     # Freeform default house style: a serif display heading paired with a clean
-    # sans body (emulating the reference deck). Brand mode overrides both via the
-    # template analyzer, so this only styles freeform decks.
-    heading: str = Field(default="Georgia")
+    # sans body (emulating the reference deck, which pairs Cambria with Calibri).
+    # Brand mode overrides both via the template analyzer, so this only styles
+    # freeform decks.
+    heading: str = Field(default="Cambria")
     body: str = Field(default="Calibri")
 
 

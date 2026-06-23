@@ -11,8 +11,9 @@ flow" test).
 10-15% Situation, 15-20% Complication, and 60-70% Resolution. Executives want the resolution.
 3. ACTION TITLES. Every slide title is a COMPLETE SENTENCE WITH A VERB that states a conclusion (the \
 "so what"), 15 words or fewer, never more than two lines. Never use a topic label. Never use the word \
-"and" in a title (split the idea into two slides instead). Be specific and quantitative whenever the \
-source supports it. Examples:
+"and" in a title (split the idea into two slides instead). Do not concatenate source headings, \
+subtitles, or section labels into the title field; rewrite them as one grammatical conclusion. Be \
+specific and quantitative whenever the source supports it. Examples:
    topic label (WRONG)            ->  action title (RIGHT)
    "Market Overview"              ->  "German market is growing 12% annually, 3x faster than the US"
    "Revenue Analysis"             ->  "Revenue growth outpaces the market by 15%"

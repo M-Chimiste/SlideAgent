@@ -34,6 +34,8 @@ class ExhibitCompiler:
         bullets = self._section_bullets(section)
         if normalized == "comparison_table":
             return self._comparison_from_bullets(bullets)
+        if normalized == "dependency_map":
+            return self._dependency_from_bullets(section, bullets)
         if normalized in {"matrix", "2x2", "2x2_matrix", "matrix_2x2"}:
             return self._matrix_from_bullets(bullets)
         if normalized in {"checklist", "process"} or self._looks_ordered(bullets):
@@ -99,7 +101,20 @@ class ExhibitCompiler:
     def content_blocks(self, exhibit: dict[str, Any]) -> list[ContentBlock]:
         exhibit_type = str(exhibit.get("type") or "")
         if exhibit_type in {"metric_chart", "line_chart"}:
-            return [ContentBlock(type="chart", body=exhibit.get("metrics", []))]
+            # Carry the metrics as readable strings, never raw dicts: if this slide
+            # is later diversified to a non-chart layout, the bullet fallback must
+            # render "Adoption — 95%", not "{'label': 'Adoption', 'value': 95}".
+            return [
+                ContentBlock(
+                    type="chart",
+                    body=[
+                        text
+                        for metric in exhibit.get("metrics", [])
+                        if isinstance(metric, dict)
+                        and (text := self._metric_phrase(metric))
+                    ],
+                )
+            ]
         if exhibit_type in {"comparison_table", "reference_table"}:
             rows = []
             columns = exhibit.get("columns")
@@ -150,6 +165,14 @@ class ExhibitCompiler:
                     ],
                 )
             ]
+        if exhibit_type == "dependency_map":
+            middle = exhibit.get("middle_nodes", [])
+            body = [
+                str(exhibit.get("left_node") or ""),
+                *[str(item) for item in middle if str(item).strip()],
+                str(exhibit.get("right_outcome") or ""),
+            ]
+            return [ContentBlock(type="bullets", body=[item for item in body if item])]
         body = []
         for key in ("supporting_points", "next_steps", "points"):
             value = exhibit.get(key)
@@ -167,6 +190,23 @@ class ExhibitCompiler:
             return {"type": "bar", "metrics": exhibit.get("metrics", [])}
         return None
 
+    def _dependency_from_bullets(
+        self,
+        section: DocumentSection | None,
+        bullets: list[str],
+    ) -> dict[str, Any]:
+        items = self._ensure_items(bullets, 3)
+        middle = [self._short_label(item) for item in items[:4]]
+        title = self._clean_section_title(section.title) if section else ""
+        left = title or "Source context"
+        return {
+            "type": "dependency_map",
+            "left_node": left,
+            "middle_nodes": middle,
+            "right_outcome": "Reliable output",
+            "connector_labels": ["feeds", "constrains", "updates"],
+        }
+
     def _section_bullets(self, section: DocumentSection | None) -> list[str]:
         text = section.content if section else ""
         bullets = []
@@ -177,9 +217,46 @@ class ExhibitCompiler:
             if len(bullets) >= 5:
                 break
         if bullets:
+            subject = self._short_label(
+                self._clean_section_title(section.title if section else "Source evidence")
+            ).lower()
+            source_specific = [
+                f"Use {subject} as the operating reference.",
+                f"Connect {subject} to explicit review gates.",
+                f"Refresh {subject} when assumptions change.",
+            ]
+            for item in source_specific:
+                if len(bullets) >= 4:
+                    break
+                if item not in bullets:
+                    bullets.append(item)
             return bullets
         title = section.title if section else "Decision"
-        return [f"Clarify the implication of {title}."]
+        return [f"Clarify the implication of {self._clean_section_title(title)}."]
+
+    def _metric_phrase(self, metric: dict[str, Any]) -> str:
+        label = " ".join(str(metric.get("label") or "").split()).strip()
+        raw = metric.get("value", "")
+        unit = str(metric.get("unit") or "").strip()
+        try:
+            numeric = float(str(raw).replace(",", "").rstrip("%"))
+            if abs(numeric) >= 1_000_000:
+                value = f"{numeric / 1_000_000:g}M"
+            elif abs(numeric) >= 1_000:
+                value = f"{numeric / 1_000:g}k"
+            elif numeric.is_integer():
+                value = str(int(numeric))
+            else:
+                value = f"{numeric:g}"
+        except (TypeError, ValueError):
+            value = str(raw).strip()
+        if unit == "%":
+            value = f"{value}%"
+        elif unit:
+            value = f"{value} {unit}"
+        if not value.strip():
+            return label
+        return f"{label} — {value}".strip(" —") if label else value
 
     def _metric_dicts(self, metrics: list[DocumentMetric]) -> list[dict[str, Any]]:
         return [
@@ -301,6 +378,11 @@ class ExhibitCompiler:
     def _short_label(self, text: str) -> str:
         words = re.sub(r"[^A-Za-z0-9\s%-]", "", str(text)).split()
         return " ".join(words[:4]) or "Signal"
+
+    def _clean_section_title(self, title: str) -> str:
+        cleaned = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", str(title)).strip()
+        cleaned = re.sub(r"[^A-Za-z0-9\s%-]", "", cleaned)
+        return " ".join(cleaned.split()) or "Source evidence"
 
     def _truncate(self, text: str, limit: int) -> str:
         cleaned = " ".join(str(text).split())

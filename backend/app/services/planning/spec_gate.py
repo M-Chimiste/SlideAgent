@@ -37,6 +37,12 @@ class SpecGateMixin:
             self._gate_repair_title(slide, seen_titles, issues, repairs)
             self._gate_repair_exhibit(slide, bundle, story_map, issues, repairs)
             self._gate_repair_metric_repetition(slide, bundle, seen_metric_keys, issues, repairs)
+            self._gate_repair_supported_source_placeholders(
+                slide,
+                bundle,
+                issues,
+                repairs,
+            )
             self._gate_repair_content_budget(slide, issues, repairs)
             self._gate_repair_heavy_repetition(slide, bundle, heavy_counts, issues, repairs)
             self._gate_repair_duplicate(
@@ -263,13 +269,17 @@ class SpecGateMixin:
         before = json.dumps([block.model_dump() for block in slide.content_blocks], ensure_ascii=True)
         for block in slide.content_blocks:
             limit = 5
-            if block.type == "table":
-                block.body = self._gate_trim_table(block.body)
+            if block.type in {"table", "chart"}:
+                # Table rows are lists and chart bodies are metric dicts; never
+                # coerce these to ``str`` here or a dict reaches the slide as its
+                # raw ``{'label': ...}`` repr. Tables still get a row trim.
+                if block.type == "table":
+                    block.body = self._gate_trim_table(block.body)
             else:
                 block.body = [
                     self._truncate_at_word(str(item), 145)
                     for item in block.body[:limit]
-                    if str(item).strip()
+                    if isinstance(item, str) and item.strip()
                 ]
             if block.annotations:
                 block.annotations = [
@@ -303,6 +313,102 @@ class SpecGateMixin:
                 after=after[:240],
             )
         )
+
+    def _gate_repair_supported_source_placeholders(
+        self,
+        slide: GeneratedSlideSpec,
+        bundle: DocumentBundle,
+        issues: list[SpecGateIssue],
+        repairs: list[SpecGateRepair],
+    ) -> None:
+        claim_text = self._slide_claim_text(slide)
+        if SOURCE_NEEDED_LABEL.lower() not in claim_text.lower():
+            return
+        cleaned_claim_text = self._strip_source_needed_marker(claim_text)
+        numeric_tokens = self._numeric_tokens(cleaned_claim_text)
+        if numeric_tokens:
+            unsupported = numeric_tokens - self._supported_numeric_tokens(bundle)
+            if unsupported:
+                return
+        elif not self._gate_slide_has_real_source(slide, bundle):
+            return
+        before = claim_text[:240]
+        slide.action_title = self._strip_source_needed_marker(slide.action_title)
+        slide.subheading = self._strip_source_needed_marker(slide.subheading)
+        for block in slide.content_blocks:
+            block.body = [
+                self._strip_source_needed_from_value(item) for item in block.body
+            ]
+            block.annotations = [
+                self._strip_source_needed_marker(item) for item in block.annotations
+            ]
+            block.callouts = [
+                self._strip_source_needed_marker(item) for item in block.callouts
+            ]
+        if slide.chart_spec:
+            slide.chart_spec = self._strip_source_needed_from_value(slide.chart_spec)
+        if slide.exhibit_spec:
+            slide.exhibit_spec = self._strip_source_needed_from_value(slide.exhibit_spec)
+        if slide.diagram_spec:
+            slide.diagram_spec = self._strip_source_needed_from_value(slide.diagram_spec)
+        slide.sources = [
+            source for source in slide.sources if source != SOURCE_NEEDED_LABEL
+        ]
+        slide.source_refs = [
+            ref for ref in slide.source_refs if ref != SOURCE_NEEDED_LABEL
+        ]
+        if not slide.source_refs and self._has_uploaded_source_material(bundle):
+            slide.source_refs = self._fallback_source_refs_for_slide(slide, bundle)
+        if not slide.sources:
+            slide.sources = self._source_labels_for_refs(slide.source_refs, bundle) or [
+                UPLOADED_SOURCE_LABEL
+            ]
+        issues.append(
+            SpecGateIssue(
+                slide_number=slide.slide_number,
+                category="unsupported_numeric_claim",
+                message="Model-inserted [source needed] marker was removed from a source-backed claim.",
+                repaired=True,
+            )
+        )
+        repairs.append(
+            SpecGateRepair(
+                slide_number=slide.slide_number,
+                action="remove_supported_source_placeholder",
+                before=before,
+                after=self._slide_claim_text(slide)[:240],
+            )
+        )
+
+    def _gate_slide_has_real_source(
+        self,
+        slide: GeneratedSlideSpec,
+        bundle: DocumentBundle,
+    ) -> bool:
+        return any(
+            ref != SOURCE_NEEDED_LABEL and self._source_ref_is_valid(ref, bundle)
+            for ref in slide.source_refs
+        )
+
+    def _strip_source_needed_from_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._strip_source_needed_marker(value)
+        if isinstance(value, list):
+            return [self._strip_source_needed_from_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._strip_source_needed_from_value(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _strip_source_needed_marker(self, text: str) -> str:
+        return re.sub(
+            r"\s*\[source needed\]",
+            "",
+            str(text),
+            flags=re.IGNORECASE,
+        ).strip()
 
     def _gate_repair_heavy_repetition(
         self,
@@ -367,12 +473,33 @@ class SpecGateMixin:
             return
         section = self._gate_unused_section(bundle, seen_source_refs, slide.slide_number)
         if section is None:
+            before = self._normalize_archetype(slide.archetype or "")
+            replacement = self._gate_replacement_archetype(slide, bundle)
+            if replacement == before:
+                replacement = "callouts" if before != "callouts" else "icon_rows"
+            self._apply_selected_exhibit(
+                slide,
+                replacement,
+                self._section_for_slide_sources(slide, bundle),
+                bundle,
+            )
             issues.append(
                 SpecGateIssue(
                     slide_number=slide.slide_number,
                     category="duplicate_slide",
-                    message=f"Slide duplicates slide {duplicate}.",
-                    repaired=False,
+                    message=(
+                        f"Slide duplicated slide {duplicate}; exhibit focus was "
+                        "changed because no unused source section remained."
+                    ),
+                    repaired=True,
+                )
+            )
+            repairs.append(
+                SpecGateRepair(
+                    slide_number=slide.slide_number,
+                    action="diversify_duplicate_slide",
+                    before=before,
+                    after=replacement,
                 )
             )
             return

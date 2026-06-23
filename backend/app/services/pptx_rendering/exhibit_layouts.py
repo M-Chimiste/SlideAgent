@@ -384,9 +384,15 @@ class ExhibitLayoutRenderingMixin:
         panel.fill.solid()
         panel.fill.fore_color.rgb = self._rgb(brand.colors.primary)
         panel.line.color.rgb = self._rgb(brand.colors.primary)
-        self._add_dark_text(slide, "NEXT 30 DAYS", 8.82, 2.0, 1.8, 0.28, brand, size=10, color=brand.colors.accent)
-        self._add_dark_text(slide, "Turn the checklist into operating cadence, not a one-time cleanup.", 8.82, 2.52, 2.8, 1.0, brand, size=16, bold=True)
-        self._add_dark_text(slide, "Review the evidence and update the shared record before scaling.", 8.84, 4.15, 2.8, 0.62, brand, size=9, color=self._tint(brand.colors.primary, 0.72))
+        kicker, headline, support = self._emphasis_panel_text(
+            outline,
+            bullets,
+            default_headline="Turn the checklist into operating cadence, not a one-time cleanup.",
+            default_support="Review the evidence and update the shared record before scaling.",
+        )
+        self._add_dark_text(slide, kicker, 8.82, 2.0, 2.9, 0.28, brand, size=10, color=brand.colors.accent)
+        self._add_dark_text(slide, headline, 8.82, 2.52, 2.8, 1.5, brand, size=16, bold=True)
+        self._add_dark_text(slide, support, 8.84, 4.55, 2.8, 0.9, brand, size=9, color=self._tint(brand.colors.primary, 0.72))
 
     def _add_code_panel(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         exhibit = self._exhibit(outline)
@@ -655,13 +661,38 @@ class ExhibitLayoutRenderingMixin:
         if len(bullets) in {2, 3}:
             card_w = 5.35 if len(bullets) == 2 else 3.55
             gap = 0.55
+            card_h = 3.05
+            card_y = 2.05
             total_w = len(bullets) * card_w + (len(bullets) - 1) * gap
             start_x = (SLIDE_W - total_w) / 2
             for idx, text in enumerate(bullets):
                 x = start_x + idx * (card_w + gap)
-                self._add_card(slide, x, 1.85, card_w, 3.55, "FFFFFF", brand.colors.background_light)
-                self._add_icon(slide, icons[idx], x + 0.34, 2.04, 0.98, brand, self._icon_fill(brand, idx))
-                self._add_body_text(slide, text, x + 0.4, 3.22, card_w - 0.8, 1.24, brand, center=False, size=14)
+                accent = self._icon_fill(brand, idx)
+                self._add_card(slide, x, card_y, card_w, card_h, "FFFFFF", brand.colors.background_light)
+                strip = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    Inches(x),
+                    Inches(card_y),
+                    Inches(card_w),
+                    Inches(0.1),
+                )
+                strip.fill.solid()
+                strip.fill.fore_color.rgb = self._rgb(accent)
+                strip.line.color.rgb = strip.fill.fore_color.rgb
+                self._add_icon(slide, icons[idx], x + 0.34, card_y + 0.32, 0.86, brand, accent)
+                lead, rest = self._split_lead(text)
+                self._add_label(slide, lead, x + 1.36, card_y + 0.52, card_w - 1.6, brand, bold=True)
+                self._add_body_text(
+                    slide,
+                    rest or lead,
+                    x + 0.4,
+                    card_y + 1.42,
+                    card_w - 0.8,
+                    card_h - 1.6,
+                    brand,
+                    center=False,
+                    size=13,
+                )
             return
         for idx, text in enumerate(bullets):
             row = idx // 2

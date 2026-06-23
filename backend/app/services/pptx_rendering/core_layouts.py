@@ -80,11 +80,7 @@ class CoreLayoutRenderingMixin:
             color=self._tint(brand.colors.primary, 0.76),
         )
         stack_x, stack_y = 9.0, 1.22
-        stack_items = [
-            ("01", "Context", "Persist the source of truth"),
-            ("02", "Rules", "Constrain generation"),
-            ("03", "Review", "Verify before scale"),
-        ]
+        stack_items = self._cover_stack_items(exhibit, outline)
         for idx, (number, label, detail) in enumerate(stack_items):
             y = stack_y + idx * 1.22
             card = slide.shapes.add_shape(
@@ -142,6 +138,46 @@ class CoreLayoutRenderingMixin:
                     brand.colors.accent,
                     width=1.2,
                 )
+
+    def _cover_stack_items(
+        self, exhibit: dict[str, Any], outline: SlideOutline
+    ) -> list[tuple[str, str, str]]:
+        raw_signals = exhibit.get("signals") if isinstance(exhibit, dict) else []
+        if not isinstance(raw_signals, list):
+            raw_signals = []
+        signals = [
+            self._truncate_at_word(self._clean_display_text(str(item)), 28)
+            for item in raw_signals
+            if self._clean_display_text(str(item))
+        ]
+        if not signals:
+            signals = [
+                self._truncate_at_word(text, 28)
+                for text in self._bullets(outline)[:3]
+                if text
+            ]
+        defaults = ["Context", "Decision", "Execution"]
+        items: list[tuple[str, str, str]] = []
+        for idx in range(3):
+            signal = signals[idx] if idx < len(signals) else defaults[idx]
+            items.append((f"{idx + 1:02d}", signal, self._cover_signal_detail(signal, idx)))
+        return items
+
+    def _cover_signal_detail(self, signal: str, index: int) -> str:
+        lowered = signal.lower()
+        if any(token in lowered for token in ("memory", "context", "brain")):
+            return "Keep knowledge persistent"
+        if any(token in lowered for token in ("rule", "spec", "standard")):
+            return "Make criteria explicit"
+        if any(token in lowered for token in ("review", "quality", "evidence")):
+            return "Verify before scale"
+        if any(token in lowered for token in ("cycle", "workflow", "loop")):
+            return "Run the operating cadence"
+        return [
+            "Frame the decision",
+            "Pressure-test the change",
+            "Commit to next actions",
+        ][index % 3]
 
     def _add_executive_summary(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         exhibit = self._exhibit(outline)
@@ -367,9 +403,18 @@ class CoreLayoutRenderingMixin:
         self._add_bullets(slide, right, 7.2, 2.52, 4.95, 2.82, brand)
 
     def _add_callouts(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
-        metrics = outline.content_json.get("metrics") or []
-        if not metrics:
-            metrics = [{"label": item, "value": idx + 1} for idx, item in enumerate(self._bullets(outline)[:3])]
+        metrics = [
+            metric
+            for metric in (outline.content_json.get("metrics") or [])
+            if isinstance(metric, dict)
+        ]
+        quantitative = [metric for metric in metrics if self._is_quantitative_metric(metric)]
+        if len(quantitative) < 2:
+            # A "1 / 2 / 3" sequence rendered as big numbers reads as filler;
+            # show the points as labeled cards instead of fake KPIs.
+            self._add_grid(slide, outline, brand)
+            return
+        metrics = quantitative
         icons = self._icons(outline)
         for idx, metric in enumerate(metrics[:3]):
             x = 0.95 + idx * 4.05
@@ -481,6 +526,18 @@ class CoreLayoutRenderingMixin:
         if unit:
             return self._format_compact_number(numeric), self._truncate_at_word(unit, 12)
         return self._format_compact_number(numeric), ""
+
+    def _is_quantitative_metric(self, metric: dict[str, Any]) -> bool:
+        """True when a metric carries a real measurement worth a big number, as
+        opposed to a sequence index (1, 2, 3) used as a list ordinal."""
+        unit = str(metric.get("unit") or "").strip()
+        if unit:
+            return True
+        try:
+            number = float(str(metric.get("value", "")).replace(",", "").rstrip("%"))
+        except (TypeError, ValueError):
+            return False
+        return abs(number) >= 10
 
     def _format_metric_value(self, metric: dict[str, Any]) -> str:
         value = metric.get("value", "")

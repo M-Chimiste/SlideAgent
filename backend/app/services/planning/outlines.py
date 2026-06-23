@@ -26,7 +26,10 @@ class OutlinePlanningMixin:
         prev_section_label: str | None = None
         for slide in deck.slides:
             content = slide.model_dump()
-            content["title"] = slide.action_title
+            is_cover = self._normalize_archetype(slide.archetype or "") == "cover"
+            display_title = deck.deck_title if is_cover else slide.action_title
+            content["action_title"] = display_title
+            content["title"] = display_title
             content["summary"] = slide.subheading
             content["bullets"] = self._body_to_bullets(slide)
             content["metrics"] = self._metrics_from_slide(slide)
@@ -40,7 +43,7 @@ class OutlinePlanningMixin:
             # Assign a monotonic section number that only advances when the section
             # label changes, so kickers read 01 -> 0N in order instead of jumping
             # around by per-slide archetype (the cover carries no section kicker).
-            if self._normalize_archetype(archetype) == "cover":
+            if is_cover:
                 section_marker, section_label = "", ""
                 content["deck_title"] = deck.deck_title
             else:
@@ -55,7 +58,7 @@ class OutlinePlanningMixin:
                     job_id=job_id,
                     slide_index=slide.slide_number - 1,
                     mode="flexible",
-                    label=slide.action_title,
+                    label=display_title,
                     content_json=content,
                     layout_json={
                         "layout": layout,
@@ -295,23 +298,64 @@ class OutlinePlanningMixin:
         if keyword_title:
             return keyword_title
         first_sentence = self._summarize(content)
-        if 5 <= len(first_sentence.split()) <= 16:
-            return first_sentence[:110]
+        first_sentence = re.sub(r"^\s*Pattern:\s*", "", first_sentence, flags=re.IGNORECASE)
+        # Prefer a real claim from the source over any template. Accept a slightly
+        # wider window and a leading verb, so the title reads as a conclusion.
+        words = first_sentence.split()
+        if 5 <= len(words) <= 18 and self._reads_as_claim(first_sentence):
+            return first_sentence.rstrip(".")[:110]
         base = self._clean_section_title(title)
         if not base:
-            base = "The analysis"
-        if re.search(r"\b\d+(\.\d+)?%?\b", first_sentence):
-            return f"{base} shows a measurable signal worth acting on"[:110]
-        return f"{base} reshapes how the work should be managed"[:110]
+            base = "this work"
+        subject = base[0].lower() + base[1:] if base[:1].isupper() and base[1:2].islower() else base
+        return self._themed_action_title(subject, f"{title} {content}".lower())[:110]
+
+    def _reads_as_claim(self, sentence: str) -> bool:
+        """A usable action title is a clause, not a fragment or a heading echo."""
+        lowered = sentence.lower().strip()
+        if not lowered or lowered.endswith(":"):
+            return False
+        if lowered.split()[0] in {"the", "a", "an", "this", "these", "section", "chapter"}:
+            # Headings/fragments tend to start like this; only keep if a verb-ish
+            # token follows soon (kept simple: presence of a common verb cue).
+            return bool(re.search(r"\b(is|are|makes?|creates?|drives?|requires?|reduces?|"
+                                  r"improves?|turns?|keeps?|gives?|prevents?|shifts?|"
+                                  r"replaces?|breaks?|enables?)\b", lowered))
+        return True
+
+    def _themed_action_title(self, subject: str, theme_text: str) -> str:
+        frames = [
+            (("risk", "failure", "anti", "pitfall", "trap", "rot"),
+             f"Eliminate {subject} before it undermines reliability"),
+            (("spec", "acceptance", "criteria", "requirement", "authentication", "feature"),
+             f"Specify {subject} before delegating it to the agent"),
+            (("review", "plan", "verify", "evidence", "quality", "test"),
+             f"Review {subject} before trusting the generated output"),
+            (("cycle", "loop", "workflow", "phase", "cadence", "reset"),
+             f"Run {subject} as a repeatable operating loop"),
+            (("rule", "prompt", "markdown", "constraint", "standard"),
+             f"Codify {subject} into rules the team can reuse"),
+            (("memory", "context", "external brain", "documentation", "stale"),
+             f"Keep {subject} current across context resets"),
+        ]
+        for cues, framed in frames:
+            if any(cue in theme_text for cue in cues):
+                return framed
+        return f"Turn {subject} into a managed operating decision"
 
     def _clean_section_title(self, title: str) -> str:
-        cleaned = re.sub(r"^\d+(\.\d+)*\s*", "", title).strip()
+        cleaned = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", title).strip()
+        cleaned = cleaned.split(":", 1)[0].strip()
         cleaned = re.sub(r"[^A-Za-z0-9\s%-]", "", cleaned)
         return " ".join(cleaned.split())
 
     def _keyword_action_title(self, title: str, content: str) -> str | None:
         combined = f"{title} {content}".lower()
         rules = [
+            (
+                "when and how to update",
+                "Update memory after meaningful changes",
+            ),
             (
                 "context rot",
                 "Context rot makes long-running work increasingly unreliable",
@@ -339,6 +383,10 @@ class OutlinePlanningMixin:
             (
                 "memory bank",
                 "Use a memory bank to turn ad hoc work into persistent context",
+            ),
+            (
+                "accept-all reflex",
+                "Review generated changes before accepting them",
             ),
         ]
         for keyword, action_title in rules:
