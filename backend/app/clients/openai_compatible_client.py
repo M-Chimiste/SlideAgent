@@ -24,6 +24,7 @@ class OpenAICompatibleClient:
         user_prompt: str,
         max_tokens: int = 8192,
         temperature: float = 0.2,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         system_prompt = self._system_prompt(system_prompt)
         payload = {
@@ -35,6 +36,8 @@ class OpenAICompatibleClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if response_format:
+            payload["response_format"] = response_format
         if self.settings.openai_compatible_reasoning_effort:
             payload["reasoning_effort"] = self.settings.openai_compatible_reasoning_effort
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -55,11 +58,13 @@ class OpenAICompatibleClient:
         max_tokens: int = 16384,
         temperature: float = 0.2,
     ) -> Optional[dict[str, Any]]:
+        response_format = self._json_response_format()
         text = self.complete_text(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
+            response_format=response_format,
         )
         payload = self.extract_json(text)
         if payload is not None:
@@ -75,8 +80,20 @@ class OpenAICompatibleClient:
             user_prompt=repair_prompt,
             max_tokens=max_tokens,
             temperature=0,
+            response_format=response_format,
         )
         return self.extract_json(repaired)
+
+    def _json_response_format(self) -> dict[str, Any] | None:
+        if "qwen3.6" not in self.model.lower():
+            return None
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "JsonPayload",
+                "schema": {"type": "object", "additionalProperties": True},
+            },
+        }
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     def complete_vision(
@@ -155,7 +172,7 @@ class OpenAICompatibleClient:
             return ""
         message = choices[0].get("message", {})
         content = message.get("content", "")
-        if isinstance(content, str):
+        if isinstance(content, str) and content.strip():
             return content
         if isinstance(content, list):
             parts: list[str] = []
@@ -164,7 +181,12 @@ class OpenAICompatibleClient:
                     parts.append(item["text"])
                 elif isinstance(item, str):
                     parts.append(item)
-            return "\n".join(parts)
+            joined = "\n".join(parts)
+            if joined.strip():
+                return joined
+        reasoning_content = message.get("reasoning_content", "")
+        if isinstance(reasoning_content, str) and reasoning_content.strip():
+            return reasoning_content
         return ""
 
     def _system_prompt(self, system_prompt: str) -> str:

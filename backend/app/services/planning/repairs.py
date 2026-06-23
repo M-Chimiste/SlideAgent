@@ -36,6 +36,15 @@ class PlanningRepairMixin:
         )
         if clause_match and self._ends_with_dangling_token(cleaned[clause_match.start() :]):
             cleaned = cleaned[: clause_match.start()].rstrip(" ,;:")
+        incomplete_quality_goal = re.search(
+            r"\s+to\s+(?:ensure|enable|keep|make)\s+"
+            r"(?:reliable|scalable|effective|successful|consistent|repeatable)"
+            r"(?:,\s*(?:traceable|reliable|scalable|effective|successful|consistent|repeatable))*$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if incomplete_quality_goal and incomplete_quality_goal.start() >= 12:
+            cleaned = cleaned[: incomplete_quality_goal.start()].rstrip(" ,;:")
         words = cleaned.split()
         while len(words) > 4 and self._is_dangling_token(words[-1]):
             words.pop()
@@ -82,7 +91,68 @@ class PlanningRepairMixin:
     def _truncate_title(self, title: str) -> str:
         words = title.rstrip(".").split()
         truncated = " ".join(words[:15] if len(words) > 15 else words).rstrip(".,;:")
-        return self._repair_dangling_fragment(truncated)
+        repaired = self._repair_dangling_fragment(truncated)
+        repaired = self._normalize_title_acronyms(repaired)
+        return self._normalize_title_case(repaired)
+
+    # Minor words a headline lowercases (matches the reference deck's AP-style
+    # titles, e.g. "The Problem with Vibe Coding"), unless they lead the title.
+    _TITLE_MINOR_WORDS = frozenset(
+        {
+            "a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet",
+            "as", "at", "by", "in", "of", "on", "to", "up", "off", "per",
+            "via", "vs", "with", "from", "into", "onto", "over", "than",
+            "while", "when", "where", "plus", "versus", "without", "across",
+        }
+    )
+
+    def _normalize_title_case(self, title: str) -> str:
+        """Lowercase over-capitalized minor words so a Title-Cased model title
+        reads as a refined headline. Sentence-case titles and acronyms/coined
+        terms are left untouched."""
+        words = title.split()
+        if len(words) < 3:
+            return title
+        capitalized = sum(1 for word in words if word[:1].isupper())
+        # Only touch titles the model rendered in Title Case; leave sentence case.
+        if capitalized < max(3, int(len(words) * 0.6)):
+            return title
+        normalized: list[str] = []
+        for index, word in enumerate(words):
+            stripped = word.strip(",.;:!?()").lower()
+            keep_caps = (
+                index == 0
+                or index == len(words) - 1
+                or stripped not in self._TITLE_MINOR_WORDS
+                or (index > 0 and words[index - 1].endswith(":"))
+                # Preserve acronyms / mixed-caps tokens (AI, JWT, McKinsey), but
+                # not a lone capital "A", which is just an over-capitalized article.
+                or (len(stripped) >= 2 and word.isupper())
+                or any(char.isupper() for char in word[1:])
+            )
+            if keep_caps:
+                normalized.append(word)
+            else:
+                normalized.append(word.lower())
+        return " ".join(normalized)
+
+    def _normalize_title_acronyms(self, title: str) -> str:
+        replacements = {
+            "ai": "AI",
+            "api": "API",
+            "llm": "LLM",
+            "ui": "UI",
+            "ux": "UX",
+        }
+        normalized = title
+        for token, replacement in replacements.items():
+            normalized = re.sub(
+                rf"\b{token}\b",
+                replacement,
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        return normalized
 
     def _default_pattern(self, index: int) -> str:
         return [
@@ -164,6 +234,11 @@ class PlanningRepairMixin:
             title = " ".join(slide.action_title.split())
             title = title.rstrip(".")
             title = self._strip_meta_title_text(title)
+            if self._normalize_archetype(slide.archetype or "") == "cover":
+                title = self._repair_cover_title(title, deck.deck_title)
+                if title.casefold() == " ".join(str(deck.deck_title).split()).casefold():
+                    slide.action_title = title
+                    continue
             compound = re.match(
                 r"^(Identify|Recognize|Address|Explain|Describe)\s+(.+?)\s+and\s+(.+?)\s+as\s+(.+)$",
                 title,
@@ -185,6 +260,15 @@ class PlanningRepairMixin:
                 title = " ".join(title.split()[:16]).rstrip(".,;:")
             title = self._repair_weak_action_title(slide, title)
             slide.action_title = self._clean_action_title_candidate(title)
+
+    def _repair_cover_title(self, title: str, deck_title: str) -> str:
+        cleaned_title = " ".join(str(title).split())
+        cleaned_deck_title = " ".join(str(deck_title).split())
+        if not cleaned_title or not cleaned_deck_title:
+            return cleaned_title
+        # Cover slides should carry the deck name, not an action-title fragment
+        # or subtitle that the model promoted into the title field.
+        return cleaned_deck_title
 
     def _repair_repeated_action_titles(self, deck: DeckSpec) -> None:
         seen: set[str] = set()
@@ -475,6 +559,7 @@ class PlanningRepairMixin:
                     flags=re.IGNORECASE,
                 )
             )
+            or bool(re.match(r"^review\s+reviewer\s+mode\b", normalized, flags=re.IGNORECASE))
             or bool(
                 re.match(
                     r"^(define|quantify|enforce|structure|create|build|show|explain|"
@@ -530,6 +615,8 @@ class PlanningRepairMixin:
         if archetype == "code_panel":
             return "Codify operating rules where teams already work"
         if archetype == "quote_sidebar":
+            if "reviewer mode" in intent_lower:
+                return "Use reviewer mode as the default quality gate"
             return "Reframe the operating model around persistent context"
         if archetype == "table_reference" and self._is_memory_text(intent_lower):
             return "Standardize Memory Bank roles through refresh-triggered files"

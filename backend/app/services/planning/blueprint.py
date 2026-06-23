@@ -97,7 +97,7 @@ class BlueprintPlanningMixin:
         if not has_source:
             low, high = 5, 8
         elif source_rich:
-            low, high = 12, 16
+            low, high = 12, 18
         else:
             low, high = 8, 12
 
@@ -113,7 +113,7 @@ class BlueprintPlanningMixin:
         if re.search(r"\b(\d{2,})\s+slides?\b", instructions.lower()):
             requested = int(re.search(r"\b(\d{2,})\s+slides?\b", instructions.lower()).group(1))
             return max(1, requested)
-        return min(target, 16)
+        return min(target, high)
 
     def _archetype_sequence(
         self, target_slide_count: int, bundle: DocumentBundle | None = None

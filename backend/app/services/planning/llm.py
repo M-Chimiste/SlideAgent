@@ -45,11 +45,15 @@ class LLMPlanningMixin:
         user_prompt = (
             f"Create a {blueprint.target_slide_count}-slide consulting deck plan as strict JSON. "
             "Use the supplied blueprint as the deck plan, but improve wording and exhibit details from the source. "
+            f"The slides array must contain exactly {blueprint.target_slide_count} slide objects; "
+            "do not return a sample, partial deck, or cover-only deck. "
             "Use distinct slide archetypes across the deck: cover, executive summary, section divider, "
             "comparison table, dependency map, framework/cycle, code/reference panel, checklist, "
             "anti-pattern cards, quote/sidebar, metric chart, table/reference, 2x2 matrix, "
             "callouts, icon rows, two column, or closing recommendation. "
             "Avoid repeating the same slide type on adjacent slides. "
+            "Do not reuse the same dependency map, framework cycle, code panel, reference table, or metric block; "
+            "when a topic recurs, change the exhibit family or focus on a different source section. "
             "Use exactly this shape: "
             "{\"deck_title\":\"string\",\"audience\":\"string\",\"goal\":\"string\","
             "\"narrative_arc\":\"Situation -> Complication -> Resolution\","
@@ -71,6 +75,7 @@ class LLMPlanningMixin:
             "\"speaker_notes\":\"short presenter note\",\"qa\":{\"consulting_status\":\"pending\","
             "\"visual_status\":\"pending\",\"issues\":[]}}]}. "
             "Every non-cover slide should have exactly one primary exhibit_spec. "
+            "Rewrite source headings and subtitles into grammatical action titles; do not concatenate them. "
             "Comparison exhibits need clear columns and row labels. "
             "Dependency, cycle, checklist, code, anti-pattern, and quote exhibits need structured arrays, not prose blobs. "
             "For dependency_map and framework/cycle slides, include diagram_spec with kind dependency_flow or cycle when useful; otherwise use null. "
@@ -106,7 +111,12 @@ class LLMPlanningMixin:
         if payload is None:
             self._last_planning_error = "model response did not contain a JSON object"
             return None
-        deck = self._validate_deck_payload(payload, blueprint)
+        require_exact_slide_count = self._requires_complete_llm_deck()
+        deck = self._validate_deck_payload(
+            payload,
+            blueprint,
+            require_exact_slide_count=require_exact_slide_count,
+        )
         if deck is not None:
             return deck
         # One schema-repair retry: re-prompt with the validation error before
@@ -134,10 +144,17 @@ class LLMPlanningMixin:
                 "model repair response did not contain a JSON object"
             )
             return None
-        return self._validate_deck_payload(payload, blueprint)
+        return self._validate_deck_payload(
+            payload,
+            blueprint,
+            require_exact_slide_count=require_exact_slide_count,
+        )
 
     def _validate_deck_payload(
-        self, payload: dict[str, Any], blueprint: DeckBlueprint
+        self,
+        payload: dict[str, Any],
+        blueprint: DeckBlueprint,
+        require_exact_slide_count: bool = True,
     ) -> DeckSpec | None:
         payload = self._normalize_llm_payload(payload, blueprint)
         try:
@@ -145,8 +162,26 @@ class LLMPlanningMixin:
         except Exception as exc:
             self._last_planning_error = f"DeckSpec validation failed: {exc}"
             return None
+        if require_exact_slide_count and len(deck.slides) != blueprint.target_slide_count:
+            self._last_planning_error = (
+                f"Deck must contain exactly {blueprint.target_slide_count} slides; "
+                f"got {len(deck.slides)}."
+            )
+            return None
         self._repair_model_titles(deck)
         return deck
+
+    def _requires_complete_llm_deck(self) -> bool:
+        client = self.llm_client
+        if client is None:
+            return False
+        if getattr(client, "require_exact_slide_count", False):
+            return True
+        module = client.__class__.__module__
+        if module.startswith("app.clients."):
+            return True
+        model = str(getattr(client, "model", "") or "").lower()
+        return bool(model)
 
     def _normalize_llm_payload(
         self, payload: dict[str, Any], blueprint: DeckBlueprint
@@ -157,7 +192,7 @@ class LLMPlanningMixin:
 
     def _planner_max_tokens(self, quality_profile: str, target_slide_count: int) -> int:
         if quality_profile == "fast":
-            return max(12000, min(16000, target_slide_count * 1000))
+            return max(6000, min(9000, target_slide_count * 800))
         if quality_profile == "showcase":
             return max(32000, min(40000, target_slide_count * 2600))
         return max(24000, min(32000, target_slide_count * 1800))

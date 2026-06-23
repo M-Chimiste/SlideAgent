@@ -29,6 +29,11 @@ and visual QA, repairs generated-slide issues when possible, then emits:
 
 The quality rubric lives in [project_docs/style_guide.md](project_docs/style_guide.md).
 
+Current local Qwen baseline: the `data/Beyond Vibe Coding.docx` all-mode smoke
+passes across freeform, brand, and strict with no planner fallback, no planning
+warnings, no build warnings, and no final visual-QA issues. The latest verified
+backend suite is `234 passed`.
+
 ## App Architecture
 
 ```text
@@ -205,6 +210,18 @@ cd backend
 python -m app.tools.all_mode_smoke --vision
 ```
 
+Fast Qwen production-polish smoke used for the current baseline:
+
+```bash
+cd backend
+python -m app.tools.all_mode_smoke \
+  --doc ../data/'Beyond Vibe Coding.docx' \
+  --modes freeform,brand,strict \
+  --quality-profile fast \
+  --length-strategy concise \
+  --label qwen-allmodes-fast
+```
+
 Premium/deep planner smoke, when a separate planner server is available:
 
 ```bash
@@ -289,11 +306,13 @@ scripts/
 - Use safe XML parsing with
   `lxml.etree.XMLParser(resolve_entities=False, no_network=True)`.
 - Generated-mode smoke gates should pass without planner fallback or build
-  warnings.
+  warnings. The current Qwen acceptance gate also expects no final planning
+  warnings and no final visual-QA issues for the Beyond Vibe Coding smoke.
 
 ## Current Caveat
 
 SlideForge works end-to-end locally across freeform, brand, and strict modes,
-but the main quality frontier is still manual Office compatibility review,
-richer diagram/chart families, deeper brand/layout fidelity, and broader
-smoke coverage across non-demo source documents.
+and the current Qwen path can produce polished, production-grade PPTX artifacts
+for the Beyond Vibe Coding smoke. The broader quality frontier is still manual
+Office compatibility review, richer diagram/chart families, deeper brand/layout
+fidelity, and broader smoke coverage across non-demo source documents.

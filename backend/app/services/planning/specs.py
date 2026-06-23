@@ -702,9 +702,16 @@ class SlideSpecPlanningMixin:
         return intents.get(archetype, "structured exhibit with concise body text")
 
     def _section_phrases(self, section: DocumentSection, count: int) -> list[str]:
+        raw_phrases = []
+        for line in self._to_bullets(section.content):
+            raw_phrases.extend(
+                item.strip()
+                for item in re.split(r"(?<=[.!?])\s+", line)
+                if item.strip()
+            )
         phrases = [
             self._phrase(line, "")
-            for line in self._to_bullets(section.content)
+            for line in raw_phrases
             if self._phrase(line, "")
         ]
         if not phrases:
@@ -718,17 +725,15 @@ class SlideSpecPlanningMixin:
         return phrases[:count]
 
     def _filler_phrases(self, section: DocumentSection, needed: int) -> list[str]:
-        # Draw deterministic filler from a wider pool, offset by the section so two
-        # thin slides do not surface the identical bullets side by side.
+        subject = self._clean_section_title(section.title) or "the source evidence"
+        subject = self._truncate_at_word(subject.lower(), 44).removesuffix("...")
         pool = (
-            "Preserve context before work begins.",
-            "Make review criteria explicit before execution.",
-            "Keep decisions traceable across handoffs.",
-            "Turn lessons into durable operating rules.",
-            "Assign one clear owner for each step of the workflow.",
-            "Validate every output against the original intent.",
-            "Capture assumptions so they can be revisited later.",
-            "Close the loop with a short, honest retrospective.",
+            f"Use {subject} as the operating reference.",
+            f"Connect {subject} to an explicit review gate.",
+            f"Make {subject} visible before execution starts.",
+            f"Refresh {subject} when assumptions change.",
+            f"Assign ownership for {subject} before scaling.",
+            f"Test generated work against {subject}.",
         )
         seed = sum(ord(char) for char in (section.title or "section")) % len(pool)
         return [pool[(seed + index) % len(pool)] for index in range(needed)]

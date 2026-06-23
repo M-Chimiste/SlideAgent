@@ -25,12 +25,21 @@ class ExhibitSelectionMixin:
         story_map: StoryMap | None = None,
     ) -> None:
         used_metric_ids: set[str] = set()
+        used_exhibit_fingerprints: set[str] = set()
+        exhibit_type_counts: dict[str, int] = {}
+        metric_slide_count = 0
+        # The same KPI block on three slides is the most visible repetition tell.
+        # Allow a single dedicated metric slide for a thin metric set, two when the
+        # source is metric-rich; every other "metric signal" slide gets a distinct
+        # non-metric exhibit instead.
+        metric_slide_budget = 2 if len(bundle.metrics) >= 6 else 1
         for slide in deck.slides:
             archetype = self._normalize_archetype(slide.archetype or "")
             if archetype in {"cover", "executive_summary", "closing_recommendation"}:
                 continue
             beat = self._story_beat_for_slide(story_map, slide.slide_number) if story_map else None
             section = self._section_for_slide_sources(slide, bundle)
+            current_exhibit_type = str((slide.exhibit_spec or {}).get("type") or "")
             if (
                 beat is None
                 and archetype
@@ -42,11 +51,44 @@ class ExhibitSelectionMixin:
                 )
                 and not bundle.tables
             ):
-                continue
+                if not self._exhibit_repeats(
+                    slide,
+                    used_exhibit_fingerprints,
+                    exhibit_type_counts,
+                    bundle,
+                ):
+                    if current_exhibit_type in {"metric_chart", "line_chart"}:
+                        self._register_used_metrics(slide, used_metric_ids)
+                        metric_slide_count += 1
+                    self._register_exhibit_usage(
+                        slide,
+                        used_exhibit_fingerprints,
+                        exhibit_type_counts,
+                    )
+                    continue
             desired = self._select_exhibit_archetype(slide, section, bundle, beat)
             if not desired:
                 continue
-            current_exhibit_type = str((slide.exhibit_spec or {}).get("type") or "")
+            # Steer metric slides away from repetition: switch to a distinct
+            # exhibit once the metric budget is spent or no fresh metrics remain.
+            if desired == "metric_chart":
+                fresh = self._fresh_metrics(bundle, used_metric_ids)
+                first_metric_slide = metric_slide_count == 0
+                enough = len(fresh) >= 2 or (first_metric_slide and len(bundle.metrics) >= 2)
+                if metric_slide_count >= metric_slide_budget or not enough:
+                    desired = self._nonmetric_alternative(slide, section, bundle, beat)
+            if self._exhibit_type_over_budget(
+                self._expected_exhibit_type(desired),
+                exhibit_type_counts,
+                bundle,
+            ):
+                desired = self._nonmetric_alternative(
+                    slide,
+                    section,
+                    bundle,
+                    beat,
+                    avoid={desired, self._expected_exhibit_type(desired)},
+                )
             desired_exhibit_type = self._expected_exhibit_type(desired)
             should_refresh = (
                 desired != archetype
@@ -60,9 +102,285 @@ class ExhibitSelectionMixin:
                     )
                 )
             )
+            current_repeats = self._exhibit_repeats(
+                slide,
+                used_exhibit_fingerprints,
+                exhibit_type_counts,
+                bundle,
+            )
+            if current_repeats:
+                desired = self._nonmetric_alternative(
+                    slide,
+                    section,
+                    bundle,
+                    beat,
+                    avoid={archetype, current_exhibit_type},
+                )
+                should_refresh = True
+            # A kept metric exhibit that re-uses already-shown numbers, or that
+            # blows the metric budget, must be reworked rather than silently
+            # repeating the prior KPI block.
+            if not should_refresh and current_exhibit_type in {"metric_chart", "line_chart"}:
+                if (
+                    metric_slide_count >= metric_slide_budget
+                    or self._exhibit_metrics_mostly_used(slide, used_metric_ids)
+                ):
+                    desired = (
+                        "metric_chart"
+                        if metric_slide_count < metric_slide_budget
+                        and len(self._fresh_metrics(bundle, used_metric_ids)) >= 2
+                        else self._nonmetric_alternative(slide, section, bundle, beat)
+                    )
+                    should_refresh = True
             if not should_refresh:
+                if current_exhibit_type in {"metric_chart", "line_chart"}:
+                    self._register_used_metrics(slide, used_metric_ids)
+                    metric_slide_count += 1
+                self._register_exhibit_usage(
+                    slide,
+                    used_exhibit_fingerprints,
+                    exhibit_type_counts,
+                )
                 continue
             self._apply_selected_exhibit(slide, desired, section, bundle, used_metric_ids)
+            if str((slide.exhibit_spec or {}).get("type") or "") in {"metric_chart", "line_chart"}:
+                metric_slide_count += 1
+            self._register_exhibit_usage(
+                slide,
+                used_exhibit_fingerprints,
+                exhibit_type_counts,
+            )
+
+    def _fresh_metrics(
+        self, bundle: DocumentBundle, used_metric_ids: set[str]
+    ) -> list[Any]:
+        return [
+            metric
+            for metric in bundle.metrics
+            if self._metric_key(metric.label, metric.value, metric.unit) not in used_metric_ids
+        ]
+
+    def _register_used_metrics(
+        self, slide: GeneratedSlideSpec, used_metric_ids: set[str]
+    ) -> None:
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        for metric in exhibit.get("metrics", []):
+            if isinstance(metric, dict):
+                used_metric_ids.add(
+                    self._metric_key(
+                        metric.get("label"), metric.get("value"), metric.get("unit")
+                    )
+                )
+
+    def _exhibit_metrics_mostly_used(
+        self, slide: GeneratedSlideSpec, used_metric_ids: set[str]
+    ) -> bool:
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        metrics = [m for m in exhibit.get("metrics", []) if isinstance(m, dict)]
+        if not metrics:
+            return False
+        used = sum(
+            1
+            for metric in metrics
+            if self._metric_key(metric.get("label"), metric.get("value"), metric.get("unit"))
+            in used_metric_ids
+        )
+        return used >= max(1, len(metrics) - 1)
+
+    def _nonmetric_alternative(
+        self,
+        slide: GeneratedSlideSpec,
+        section: DocumentSection | None,
+        bundle: DocumentBundle,
+        beat: StoryBeat | None,
+        avoid: set[str] | None = None,
+    ) -> str:
+        avoid_keys = {
+            self._normalize_archetype(item)
+            for item in (avoid or set())
+            if str(item).strip()
+        }
+        avoid_keys.update(
+            self._archetypes_for_exhibit_type(item)
+            for item in (avoid or set())
+            if str(item).strip()
+        )
+        text = self._selection_text(slide, section, beat)
+        candidates: list[str] = []
+        if bundle.tables and (
+            self._claim_has_comparison_signal(text)
+            or self._tables_have_comparison_shape(bundle)
+        ):
+            candidates.append("comparison_table")
+        if self._claim_has_ordered_signal(text):
+            candidates.append("checklist")
+        if self._claim_has_strong_reference_signal(text):
+            candidates.append("table_reference")
+        if self._claim_has_dependency_signal(text):
+            candidates.append("dependency_map")
+        if self._claim_has_cycle_signal(text):
+            candidates.append("framework_cycle")
+        if self._claim_has_tradeoff_signal(text):
+            candidates.append("matrix_2x2")
+        if self._claim_has_mindset_signal(text):
+            candidates.append("quote_sidebar")
+        if bundle.tables and self._claim_has_reference_signal(text):
+            candidates.append("table_reference")
+        candidates.extend(
+            [
+                "comparison_table",
+                "checklist",
+                "quote_sidebar",
+                "matrix_2x2",
+                "icon_rows",
+                "two_column",
+                "callouts",
+            ]
+        )
+        for candidate in candidates:
+            if self._normalize_archetype(candidate) not in avoid_keys:
+                return candidate
+        return "two_column"
+
+    def _exhibit_repeats(
+        self,
+        slide: GeneratedSlideSpec,
+        used_fingerprints: set[str],
+        type_counts: dict[str, int],
+        bundle: DocumentBundle,
+    ) -> bool:
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        exhibit_type = str(exhibit.get("type") or "")
+        if not exhibit_type:
+            return False
+        fingerprint = self._exhibit_fingerprint(slide)
+        if fingerprint and fingerprint in used_fingerprints:
+            return True
+        return self._exhibit_type_over_budget(exhibit_type, type_counts, bundle)
+
+    def _register_exhibit_usage(
+        self,
+        slide: GeneratedSlideSpec,
+        used_fingerprints: set[str],
+        type_counts: dict[str, int],
+    ) -> None:
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        exhibit_type = str(exhibit.get("type") or "")
+        if exhibit_type:
+            type_counts[exhibit_type] = type_counts.get(exhibit_type, 0) + 1
+        fingerprint = self._exhibit_fingerprint(slide)
+        if fingerprint:
+            used_fingerprints.add(fingerprint)
+
+    def _exhibit_type_over_budget(
+        self,
+        exhibit_type: str,
+        type_counts: dict[str, int],
+        bundle: DocumentBundle,
+    ) -> bool:
+        if not exhibit_type:
+            return False
+        budgets = {
+            "dependency_map": 2,
+            "cycle": 1,
+            "code_panel": 1,
+            "matrix_2x2": 1,
+            "anti_patterns": 1,
+            "quote_sidebar": 2,
+            "checklist": 2,
+            "reference_table": 2 if bundle.tables else 1,
+            "comparison_table": 2 if bundle.tables else 1,
+            "callouts": 1,
+        }
+        budget = budgets.get(exhibit_type)
+        return budget is not None and type_counts.get(exhibit_type, 0) >= budget
+
+    def _exhibit_fingerprint(self, slide: GeneratedSlideSpec) -> str:
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        exhibit_type = str(exhibit.get("type") or "")
+        if not exhibit_type:
+            return ""
+        parts = [exhibit_type]
+        if exhibit_type == "dependency_map":
+            parts.extend(
+                [
+                    str(exhibit.get("left_node") or ""),
+                    str(exhibit.get("right_outcome") or ""),
+                    *[str(item) for item in exhibit.get("middle_nodes", [])],
+                ]
+            )
+        elif exhibit_type == "cycle":
+            parts.append(str(exhibit.get("center_label") or ""))
+            parts.extend(
+                str(step.get("label") or step.get("description") or "")
+                for step in exhibit.get("steps", [])
+                if isinstance(step, dict)
+            )
+        elif exhibit_type in {"reference_table", "comparison_table"}:
+            parts.extend(str(column) for column in exhibit.get("columns", []))
+            for row in exhibit.get("rows", [])[:6]:
+                if isinstance(row, dict):
+                    parts.append(str(row.get("label") or ""))
+                    parts.extend(str(value) for value in row.get("values", []))
+                elif isinstance(row, list):
+                    parts.extend(str(value) for value in row)
+        elif exhibit_type == "code_panel":
+            parts.extend(str(line) for line in exhibit.get("lines", []))
+        elif exhibit_type == "metric_chart":
+            parts.extend(
+                self._metric_key(metric.get("label"), metric.get("value"), metric.get("unit"))
+                for metric in exhibit.get("metrics", [])
+                if isinstance(metric, dict)
+            )
+        else:
+            parts.extend(
+                self._flatten_exhibit_value(value)
+                for key, value in sorted(exhibit.items())
+                if key != "type"
+            )
+        tokens = re.sub(r"[^a-z0-9]+", " ", " ".join(parts).lower()).split()
+        meaningful = [
+            token
+            for token in tokens
+            if len(token) > 2
+            and token
+            not in {
+                "the",
+                "and",
+                "for",
+                "with",
+                "source",
+                "context",
+                "review",
+                "next",
+            }
+        ]
+        return " ".join(meaningful[:36])
+
+    def _flatten_exhibit_value(self, value: Any) -> str:
+        if isinstance(value, dict):
+            return " ".join(self._flatten_exhibit_value(item) for item in value.values())
+        if isinstance(value, list):
+            return " ".join(self._flatten_exhibit_value(item) for item in value)
+        return str(value)
+
+    def _archetypes_for_exhibit_type(self, exhibit_type: str) -> str:
+        mapping = {
+            "cycle": "framework_cycle",
+            "reference_table": "table_reference",
+            "metric_chart": "metric_chart",
+            "line_chart": "metric_chart",
+            "dependency_map": "dependency_map",
+            "comparison_table": "comparison_table",
+            "code_panel": "code_panel",
+            "matrix_2x2": "matrix_2x2",
+            "quote_sidebar": "quote_sidebar",
+            "checklist": "checklist",
+            "callouts": "callouts",
+            "icon_rows": "icon_rows",
+            "two_column": "two_column",
+        }
+        return mapping.get(exhibit_type, self._normalize_archetype(exhibit_type))
 
     def _select_exhibit_archetype(
         self,
@@ -75,8 +393,20 @@ class ExhibitSelectionMixin:
         preferred = self._normalize_archetype(beat.preferred_exhibit) if beat else ""
         if preferred == "cycle":
             preferred = "framework_cycle"
+        if (
+            slide.slide_type == "executive_summary"
+            and slide.slide_number != 1
+            and self._normalize_archetype(slide.archetype or "") == "callouts"
+        ):
+            return "callouts"
         if preferred in {"cover", "executive_summary", "closing_recommendation"}:
             return self._normalize_archetype(slide.archetype or "") or "two_column"
+        if self._claim_has_strong_reference_signal(text):
+            return "table_reference"
+        if self._claim_has_strong_dependency_signal(text):
+            return "dependency_map"
+        if self._claim_has_cycle_signal(text):
+            return "framework_cycle"
         if self._claim_has_metric_signal(text) and bundle.metrics:
             return "metric_chart"
         if bundle.tables:
@@ -105,8 +435,6 @@ class ExhibitSelectionMixin:
             return "matrix_2x2"
         if self._claim_has_dependency_signal(text):
             return "dependency_map"
-        if self._claim_has_cycle_signal(text):
-            return "framework_cycle"
         if self._claim_has_reference_signal(text):
             return "code_panel"
         if self._claim_has_mindset_signal(text):
@@ -265,8 +593,26 @@ class ExhibitSelectionMixin:
     def _claim_has_dependency_signal(self, text: str) -> bool:
         return bool(re.search(r"\b(depend|driver|flow|feed|constraint|cause|map|relationship|link)\b", text))
 
+    def _claim_has_strong_dependency_signal(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(directed dependency graph|dependency graph|file hierarchy|hierarchy|"
+                r"dependencies|dependent|feeds into|relationship map|system map)\b",
+                text,
+            )
+        )
+
     def _claim_has_cycle_signal(self, text: str) -> bool:
         return bool(re.search(r"\b(cycle|loop|workflow|phase|operating model|cadence|iterate)\b", text))
+
+    def _claim_has_strong_reference_signal(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(six core files|core files|reference table|rules file|rules files|"
+                r"specification files|memory bank files|file catalog|artifact catalog)\b",
+                text,
+            )
+        )
 
     def _claim_has_mindset_signal(self, text: str) -> bool:
         return bool(re.search(r"\b(mindset|reframe|role|belief|quote|mental model|manager|teammate)\b", text))

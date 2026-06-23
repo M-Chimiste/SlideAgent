@@ -333,18 +333,29 @@ class DesignAgent:
             intended = self._intent_layout(revised, index) or current
             if index > 0 and intended == "executive_summary" and current != "executive_summary":
                 intended = current if current != "executive_summary" else "two_column"
-            if intended == last_layout or seen_counts.get(
-                intended, 0
-            ) >= self._layout_repeat_limit(intended):
+            if (
+                intended == last_layout
+                or seen_counts.get(intended, 0) >= self._layout_repeat_limit(intended)
+            ) and not self._should_preserve_repeated_exhibit_layout(
+                intended,
+                revised,
+                last_layout,
+                seen_counts,
+            ):
                 intended = self._next_diverse_layout(
                     fallback_cycle,
                     last_layout,
                     seen_counts,
                     revised,
+                    preferred=intended,
                 )
             revised.layout_json["layout"] = intended
             revised.layout_json["visual_elements"] = self._visuals_for_layout(intended)
             if intended != current:
+                # Keep the archetype label consistent with the diversified layout
+                # so downstream repetition checks see the same variety the deck
+                # actually renders, instead of a stale archetype sequence.
+                revised.layout_json["archetype"] = self._archetype_for_layout(intended)
                 revised.layout_json.setdefault("qa_repair", {"applied": True})
                 revised.layout_json["qa_repair"]["layout_variety"] = True
             revised.layout_json["icons"] = self._select_icons(revised)
@@ -353,14 +364,79 @@ class DesignAgent:
             diversified.append(revised)
         return diversified
 
+    def _should_preserve_repeated_exhibit_layout(
+        self,
+        layout: str,
+        outline: SlideOutline,
+        last_layout: str | None,
+        seen_counts: dict[str, int],
+    ) -> bool:
+        if layout == last_layout:
+            return False
+        text = self._outline_text(outline)
+        exhibit = outline.content_json.get("exhibit_spec")
+        exhibit_type = str(exhibit.get("type") or "") if isinstance(exhibit, dict) else ""
+        if layout == "dependency_map":
+            return (
+                seen_counts.get(layout, 0) < 2
+                and exhibit_type == "dependency_map"
+                and any(
+                    token in text
+                    for token in (
+                        "directed dependency graph",
+                        "dependency graph",
+                        "file hierarchy",
+                        "relationship map",
+                    )
+                )
+            )
+        if layout == "table_reference":
+            return (
+                seen_counts.get(layout, 0) < 2
+                and exhibit_type == "reference_table"
+                and any(
+                    token in text
+                    for token in (
+                        "six core files",
+                        "core files",
+                        "rules files",
+                        "specification files",
+                    )
+                )
+            )
+        if layout == "framework_cycle":
+            return (
+                seen_counts.get(layout, 0) < 2
+                and exhibit_type == "cycle"
+                and any(
+                    token in text
+                    for token in (
+                        "six-phase loop",
+                        "six phase loop",
+                        "agentic cycle",
+                        "operating loop",
+                    )
+                )
+            )
+        return False
+
+    def _archetype_for_layout(self, layout: str) -> str:
+        return {
+            "chart": "metric_chart",
+            "process": "table_reference",
+            "icon_grid": "callouts",
+        }.get(layout, layout)
+
     def _next_diverse_layout(
         self,
         fallback_cycle: list[str],
         last_layout: str | None,
         seen_counts: dict[str, int],
         outline: SlideOutline,
+        preferred: str | None = None,
     ) -> str:
-        for layout in fallback_cycle:
+        semantic_fallbacks = self._semantic_layout_fallbacks(preferred)
+        for layout in [*semantic_fallbacks, *fallback_cycle]:
             if layout in {"cover", "executive_summary", "section_divider"}:
                 continue
             if layout == last_layout:
@@ -376,6 +452,19 @@ class DesignAgent:
                 return layout
         return "two_column"
 
+    def _semantic_layout_fallbacks(self, preferred: str | None) -> list[str]:
+        if preferred == "framework_cycle":
+            return ["checklist", "icon_rows", "two_column"]
+        if preferred == "dependency_map":
+            return ["table_reference", "comparison_table", "icon_rows"]
+        if preferred == "table_reference":
+            return ["code_panel", "comparison_table", "two_column"]
+        if preferred == "anti_patterns":
+            return ["icon_rows", "comparison_table", "two_column"]
+        if preferred == "comparison_table":
+            return ["process", "callouts", "icon_rows", "two_column"]
+        return []
+
     def _layout_repeat_limit(self, layout: str) -> int:
         if layout in {
             "cover",
@@ -386,10 +475,12 @@ class DesignAgent:
             return 99
         if layout in {
             "anti_patterns",
+            "chart",
             "dependency_map",
             "framework_cycle",
             "code_panel",
             "table_reference",
+            "comparison_table",
             "matrix_2x2",
             "quote_sidebar",
         }:

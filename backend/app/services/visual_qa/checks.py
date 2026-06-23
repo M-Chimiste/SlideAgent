@@ -50,14 +50,21 @@ class RuleAndPackageChecksMixin:
                     )
                 )
             elif any("source needed" in str(source).lower() for source in sources):
-                issues.append(
-                    QAIssue(
-                        severity="WARNING",
-                        message="Slide still contains a [source needed] placeholder.",
-                        slide_index=outline.slide_index,
-                        category="source_placeholder",
-                    )
+                source_refs = outline.content_json.get("source_refs") or []
+                has_real_source_ref = any(
+                    str(ref).strip()
+                    and "source needed" not in str(ref).lower()
+                    for ref in source_refs
                 )
+                if not has_real_source_ref:
+                    issues.append(
+                        QAIssue(
+                            severity="WARNING",
+                            message="Slide still contains a [source needed] placeholder.",
+                            slide_index=outline.slide_index,
+                            category="source_placeholder",
+                        )
+                    )
         issues.extend(self._layout_variety_checks(outlines))
         issues.extend(self._narrative_rhythm_checks(outlines))
         issues.extend(self._exhibit_checks(outlines))
@@ -90,6 +97,25 @@ class RuleAndPackageChecksMixin:
                     )
                 )
                 break
+        seen_heavy: set[str] = set()
+        heavy_repeat_layouts = {"comparison_table"}
+        for idx, layout in enumerate(layouts):
+            if layout not in heavy_repeat_layouts:
+                continue
+            if layout in seen_heavy:
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        message=(
+                            "Repeated heavy comparison-table treatment may make "
+                            "separated slides feel visually redundant."
+                        ),
+                        slide_index=flexible[idx].slide_index,
+                        category="visual_repetition",
+                    )
+                )
+                break
+            seen_heavy.add(layout)
         return issues
 
     def _narrative_rhythm_checks(self, outlines: list[SlideOutline]) -> list[QAIssue]:

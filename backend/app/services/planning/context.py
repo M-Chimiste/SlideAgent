@@ -102,6 +102,17 @@ class ContextPlanningMixin:
         quality_profile: str,
     ) -> StoryMap:
         self._last_story_map_error = None
+        if self._should_use_deterministic_story_map():
+            return self._fallback_story_map(
+                bundle,
+                instructions,
+                blueprint,
+                source_compression,
+                (
+                    "Deterministic story map used for local Qwen planner to avoid "
+                    "an extra pre-planning model call."
+                ),
+            )
         story_map = self._story_map_with_llm(
             instructions,
             blueprint,
@@ -122,6 +133,10 @@ class ContextPlanningMixin:
             source_compression,
             reason,
         )
+
+    def _should_use_deterministic_story_map(self) -> bool:
+        model = str(getattr(self.llm_client, "model", "") or "").lower()
+        return "qwen3.6-35b-a3b-mtp" in model
 
     def _story_map_with_llm(
         self,

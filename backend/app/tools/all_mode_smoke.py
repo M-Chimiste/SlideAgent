@@ -74,6 +74,16 @@ def run_smoke(
             quality_profile=quality_profile,
             length_strategy=length_strategy,
         )
+        consulting_repair_history = [
+            warning
+            for warning in planning_warnings
+            if _is_initial_consulting_warning(warning)
+        ]
+        planning_warnings = [
+            warning
+            for warning in planning_warnings
+            if not _is_initial_consulting_warning(warning)
+        ]
         if _has_planner_fallback(planning_warnings) and not allow_planner_fallback:
             reason = _planner_fallback_reason(planning_warnings)
             raise RuntimeError(
@@ -84,13 +94,14 @@ def run_smoke(
             )
         _progress(progress, f"[{mode}] applying design")
         outlines = designer.apply_design(outlines)
-        outlines, consulting_warnings = _run_consulting_repairs(
+        outlines, consulting_warnings, consulting_history = _run_consulting_repairs(
             planner,
             designer,
             outlines,
             bundle,
             settings.qa_max_rounds,
         )
+        consulting_repair_history.extend(consulting_history)
         planning_warnings.extend(consulting_warnings)
         output_path = out_dir / f"{mode}-beyond-vibe-{label}.pptx"
         _progress(progress, f"[{mode}] building {output_path.name}")
@@ -115,13 +126,14 @@ def run_smoke(
             qa_rounds += 1
             _progress(progress, f"[{mode}] repair round {qa_rounds}")
             outlines = designer.revise_deck_for_qa(outlines, qa_result.issues)
-            outlines, consulting_warnings = _run_consulting_repairs(
+            outlines, consulting_warnings, consulting_history = _run_consulting_repairs(
                 planner,
                 designer,
                 outlines,
                 bundle,
                 settings.qa_max_rounds,
             )
+            consulting_repair_history.extend(consulting_history)
             planning_warnings.extend(consulting_warnings)
             repair_warnings = builder.build_deck(
                 template, outlines, output_path, out_dir / f"{mode}-{label}-work"
@@ -145,6 +157,7 @@ def run_smoke(
             preview_images=preview_images,
             qa_rounds=qa_rounds,
             qa_history=qa_history,
+            consulting_repair_history=consulting_repair_history,
         )
 
     if "strict" in selected_modes:
@@ -224,6 +237,13 @@ def _planner_fallback_reason(warnings: list[dict[str, Any]]) -> str:
     return "No fallback reason was reported."
 
 
+def _is_initial_consulting_warning(warning: dict[str, Any]) -> bool:
+    # ContentPlanner runs ConsultingQA before the outline repair loop. Keep
+    # those initial findings as repair history so the report's planning_warnings
+    # field only reflects unresolved final issues.
+    return warning.get("field") in {"consulting_qa", "horizontal_flow"}
+
+
 def _normalize_modes(modes: list[str] | None) -> list[str]:
     allowed = ["freeform", "brand", "strict"]
     if not modes:
@@ -250,9 +270,9 @@ def _run_consulting_repairs(
     outlines,
     bundle,
     max_rounds: int,
-) -> tuple[list, list[dict[str, Any]]]:
+) -> tuple[list, list[dict[str, Any]], list[dict[str, Any]]]:
     repaired = outlines
-    warnings: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
     seen_signatures: set[tuple[tuple[int, str, str], ...]] = set()
     for round_index in range(max(1, max_rounds)):
         issues = planner.consulting_issues_for_outlines(repaired, bundle)
@@ -269,7 +289,7 @@ def _run_consulting_repairs(
         )
         if not signature:
             break
-        warnings.extend(
+        history.extend(
             {
                 "slide_index": issue.slide_index,
                 "field": "consulting_qa",
@@ -283,7 +303,26 @@ def _run_consulting_repairs(
         seen_signatures.add(signature)
         repaired = planner.repair_outlines_for_consulting(repaired, issues, bundle)
         repaired = designer.apply_design(repaired)
-    return repaired, warnings
+    unresolved = _consulting_warnings(
+        planner.consulting_issues_for_outlines(repaired, bundle),
+        "final",
+    )
+    return repaired, unresolved, history
+
+
+def _consulting_warnings(
+    issues: list[QAIssue],
+    round_label: int | str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "slide_index": issue.slide_index,
+            "field": "consulting_qa",
+            "message": f"Round {round_label}: {issue.message}",
+        }
+        for issue in issues
+        if issue.severity in {"CRITICAL", "WARNING"}
+    ]
 
 
 def deck_report(
@@ -298,6 +337,7 @@ def deck_report(
     preview_images: list[Path],
     qa_rounds: int = 0,
     qa_history: list[dict[str, Any]] | None = None,
+    consulting_repair_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "mode": mode,
@@ -306,7 +346,8 @@ def deck_report(
         "titles": titles,
         "layouts": layouts,
         "planner_fallback": _has_planner_fallback(planning_warnings),
-        "planning_warnings": planning_warnings,
+        "planning_warnings": _dedupe_warning_dicts(planning_warnings),
+        "consulting_repair_history": consulting_repair_history or [],
         "build_warnings": build_warnings,
         "qa_rounds": qa_rounds,
         "qa_passed": qa_result.passed,
@@ -315,6 +356,22 @@ def deck_report(
         "qa_history": qa_history or [summarize_qa(qa_result.issues)],
         "preview_images": [path.as_posix() for path in preview_images],
     }
+
+
+def _dedupe_warning_dicts(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for warning in warnings:
+        key = (
+            warning.get("slide_index"),
+            warning.get("field"),
+            warning.get("message"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(warning)
+    return deduped
 
 
 def summarize_qa(issues: list[QAIssue]) -> dict[str, Any]:

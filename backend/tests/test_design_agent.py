@@ -134,6 +134,143 @@ def test_apply_design_caps_repeated_heavy_layouts() -> None:
     assert not any(left == right for left, right in zip(layouts, layouts[1:]))
 
 
+def test_apply_design_caps_repeated_comparison_tables_with_distinct_treatment() -> None:
+    outlines = []
+    for idx in range(3):
+        outline = _outline(index=idx, layout="comparison_table")
+        outline.content_json["archetype"] = "comparison_table"
+        outline.content_json["action_title"] = f"Compare current and target state {idx}"
+        outline.content_json["content_blocks"] = [
+            {
+                "type": "table",
+                "body": [
+                    ["Dimension", "Current state", "Target state"],
+                    ["Process", "Ad hoc", "Managed"],
+                    ["Evidence", "Chats", "Artifacts"],
+                ],
+            }
+        ]
+        outline.layout_json["archetype"] = "comparison_table"
+        outlines.append(outline)
+
+    designed = DesignAgent().apply_design(outlines)
+    layouts = [outline.layout_json["layout"] for outline in designed]
+
+    assert layouts.count("comparison_table") == 1
+    assert "process" in layouts
+    assert not any(left == right for left, right in zip(layouts, layouts[1:]))
+
+
+def test_apply_design_preserves_distinct_source_specific_dependency_maps() -> None:
+    outlines = [
+        _outline(index=0, layout="dependency_map"),
+        _outline(index=1, layout="checklist"),
+        _outline(index=2, layout="dependency_map"),
+    ]
+    for outline, title in zip(
+        [outlines[0], outlines[2]],
+        [
+            "Map source dependencies before teams make the decision",
+            "These files form a directed dependency graph",
+        ],
+    ):
+        outline.label = title
+        outline.content_json["title"] = title
+        outline.content_json["action_title"] = title
+        outline.content_json["archetype"] = "dependency_map"
+        outline.content_json["exhibit_spec"] = {
+            "type": "dependency_map",
+            "left_node": "Source evidence",
+            "middle_nodes": ["Context", "Rules", "Review"],
+            "right_outcome": "Decision",
+        }
+        outline.layout_json["archetype"] = "dependency_map"
+
+    designed = DesignAgent().apply_design(outlines)
+    layouts = [outline.layout_json["layout"] for outline in designed]
+
+    assert layouts == ["dependency_map", "checklist", "dependency_map"]
+
+
+def test_apply_design_preserves_distinct_source_specific_cycle_layouts() -> None:
+    outlines = [
+        _outline(index=0, layout="framework_cycle"),
+        _outline(index=1, layout="checklist"),
+        _outline(index=2, layout="framework_cycle"),
+    ]
+    for outline, title in zip(
+        [outlines[0], outlines[2]],
+        [
+            "Run the operating cycle with explicit review gates",
+            "Specify the six-phase loop before delegating it to the agent",
+        ],
+    ):
+        outline.label = title
+        outline.content_json["title"] = title
+        outline.content_json["action_title"] = title
+        outline.content_json["archetype"] = "framework_cycle"
+        outline.content_json["exhibit_spec"] = {
+            "type": "cycle",
+            "center_label": "Operating loop",
+            "steps": [
+                {"label": "Frame", "description": "Set the goal."},
+                {"label": "Review", "description": "Check the work."},
+            ],
+        }
+        outline.layout_json["archetype"] = "framework_cycle"
+
+    designed = DesignAgent().apply_design(outlines)
+    layouts = [outline.layout_json["layout"] for outline in designed]
+
+    assert layouts == ["framework_cycle", "checklist", "framework_cycle"]
+
+
+def test_apply_design_uses_checklist_as_adjacent_cycle_fallback() -> None:
+    outlines = [_outline(index=idx, layout="framework_cycle") for idx in range(2)]
+    for idx, outline in enumerate(outlines):
+        title = [
+            "Review the agentic cycle before trusting the generated output",
+            "Specify the six-phase loop before delegating it to the agent",
+        ][idx]
+        outline.label = title
+        outline.content_json["title"] = title
+        outline.content_json["action_title"] = title
+        outline.content_json["archetype"] = "framework_cycle"
+        outline.content_json["exhibit_spec"] = {
+            "type": "cycle",
+            "center_label": "Operating loop",
+            "steps": [
+                {"label": "Frame", "description": "Set the goal."},
+                {"label": "Review", "description": "Check the work."},
+            ],
+        }
+        outline.layout_json["archetype"] = "framework_cycle"
+
+    designed = DesignAgent().apply_design(outlines)
+    layouts = [outline.layout_json["layout"] for outline in designed]
+
+    assert layouts == ["framework_cycle", "checklist"]
+
+
+def test_apply_design_caps_repeated_chart_layouts() -> None:
+    outlines = []
+    for idx in range(3):
+        outline = _outline(index=idx, layout="chart")
+        outline.content_json["metrics"] = [
+            {"label": "Developers using AI", "value": 85, "unit": "%"},
+            {"label": "AI-generated codebases", "value": 95, "unit": "%"},
+        ]
+        outline.content_json["archetype"] = "metric_chart"
+        outline.layout_json["archetype"] = "metric_chart"
+        outlines.append(outline)
+
+    designed = DesignAgent().apply_design(outlines)
+    layouts = [outline.layout_json["layout"] for outline in designed]
+
+    assert layouts.count("chart") == 1
+    assert len(set(layouts)) >= 2
+
+
 def test_apply_design_preserves_explicit_mid_deck_section_divider() -> None:
     outlines = [_outline(index=idx, layout="two_column") for idx in range(6)]
     outlines[3].content_json["archetype"] = "section_divider"

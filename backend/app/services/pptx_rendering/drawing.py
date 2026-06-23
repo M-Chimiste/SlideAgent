@@ -1,5 +1,7 @@
 # ruff: noqa: F401
 from pathlib import Path
+import ast
+import json
 import math
 import re
 import shutil
@@ -282,6 +284,13 @@ class DrawingMixin:
         dict reach a text frame as ``str(dict)``.
         """
         if isinstance(item, str):
+            stripped = item.strip()
+            # A stringified dict/JSON object must never reach a text frame as raw
+            # ``{'label': ...}``. Parse it and coerce like a real dict.
+            if stripped.startswith("{") and stripped.endswith("}") and ":" in stripped:
+                parsed = self._try_parse_mapping(stripped)
+                if parsed is not None:
+                    return self._coerce_item_text(parsed)
             return item
         if isinstance(item, dict):
             label = str(
@@ -300,6 +309,95 @@ class DrawingMixin:
                     )
             return label
         return ""
+
+    def _emphasis_panel_text(
+        self,
+        outline: SlideOutline,
+        bullets: list[str],
+        default_headline: str,
+        default_support: str,
+    ) -> tuple[str, str, str]:
+        """A side-panel takeaway derived from the slide so two slides with the
+        same archetype never show an identical hardcoded panel.
+
+        Returns (kicker, headline, support). The headline prefers the slide's
+        own subheading/summary (the "so what" of this exhibit); the support line
+        prefers a bullet not already prominent, falling back to sane defaults.
+        """
+        title = self._clean_display_text(
+            str(
+                outline.content_json.get("action_title")
+                or outline.content_json.get("title")
+                or outline.label
+            )
+        )
+        sub = str(
+            outline.content_json.get("subheading")
+            or outline.content_json.get("summary")
+            or ""
+        )
+        if self._looks_like_meta_subheading(sub):
+            sub = ""
+        sub = self._clean_display_text(sub)
+        headline = default_headline
+        if sub and 3 <= len(sub.split()) <= 18 and sub.casefold() != title.casefold():
+            headline = sub if sub.endswith(".") else f"{sub}."
+        support = default_support
+        for bullet in bullets:
+            cleaned = self._clean_display_text(bullet)
+            if (
+                cleaned
+                and cleaned.casefold() not in headline.casefold()
+                and cleaned.casefold() != title.casefold()
+                and len(cleaned.split()) >= 4
+            ):
+                support = self._truncate_phrase(cleaned, 120)
+                break
+        kicker = self._panel_kicker(title)
+        return kicker, self._truncate_phrase(headline, 130), support
+
+    def _split_lead(self, text: str) -> tuple[str, str]:
+        """Split a sentence into a short bold lead and the remaining body, so a
+        sparse card reads as heading + detail instead of one floating line."""
+        cleaned = self._clean_display_text(text)
+        if not cleaned:
+            return "", ""
+        for delimiter in (": ", " — ", " - ", ", "):
+            if delimiter in cleaned:
+                lead, rest = cleaned.split(delimiter, 1)
+                if 1 <= len(lead.split()) <= 6 and rest.strip():
+                    return (
+                        self._truncate_phrase(lead, 46),
+                        self._truncate_phrase(rest, 130),
+                    )
+        words = cleaned.split()
+        if len(words) <= 6:
+            return self._truncate_phrase(cleaned, 50), ""
+        lead = " ".join(words[:5]).rstrip(",.;:")
+        rest = " ".join(words[5:])
+        return lead, self._truncate_phrase(rest, 130)
+
+    def _panel_kicker(self, title: str) -> str:
+        lowered = title.lower()
+        if any(token in lowered for token in ("review", "verify", "evidence", "quality")):
+            return "WHY IT MATTERS"
+        if any(token in lowered for token in ("memory", "context", "persist", "update")):
+            return "KEEP IT CURRENT"
+        if any(token in lowered for token in ("rule", "spec", "standard", "codify")):
+            return "THE OPERATING TEST"
+        if any(token in lowered for token in ("reset", "cycle", "loop", "cadence")):
+            return "THE CADENCE"
+        return "THE NEXT MOVE"
+
+    def _try_parse_mapping(self, text: str) -> dict[str, Any] | None:
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                value = parser(text)
+            except (ValueError, SyntaxError, TypeError):
+                continue
+            if isinstance(value, dict):
+                return value
+        return None
 
     def _clean_display_text(self, text: str) -> str:
         cleaned = re.sub(
