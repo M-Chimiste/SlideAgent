@@ -2,12 +2,19 @@ import { useEffect, useState } from "react";
 import {
   analyzeTemplate,
   createJob,
+  getJobOutline,
   getJobStatus,
+  getPlanningArtifact,
   JobRecord,
+  JobOutlineSlide,
   JobStatus,
   listJobs,
   listTemplates,
+  OutlineEdit,
+  patchJobOutline,
+  PlanningArtifactName,
   regenerateSlide,
+  renderPlannedJob,
   SlideSpec,
   TemplateProfile,
   updateTemplate,
@@ -19,12 +26,14 @@ import ModeScreen from "./components/ModeScreen";
 import SetupScreen from "./components/SetupScreen";
 import BriefScreen from "./components/BriefScreen";
 import JobScreen from "./components/JobScreen";
+import PlanReviewScreen from "./components/PlanReviewScreen";
 import ReviewScreen from "./components/ReviewScreen";
 import SlideLightbox from "./components/SlideLightbox";
 import LibraryRail from "./components/LibraryRail";
 import StrictSchemaEditor from "./components/StrictSchemaEditor";
 
-const TERMINAL = new Set(["done", "error"]);
+const TERMINAL = new Set(["planned", "done", "error"]);
+type PlanningArtifacts = { source?: any; story?: any; gate?: any };
 
 export default function App() {
   // ── presentation ──
@@ -57,6 +66,14 @@ export default function App() {
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // ── plan review ──
+  const [outline, setOutline] = useState<JobOutlineSlide[]>([]);
+  const [planningArtifacts, setPlanningArtifacts] = useState<PlanningArtifacts>({});
+  const [planningLoading, setPlanningLoading] = useState(false);
+  const [planningError, setPlanningError] = useState<string | null>(null);
+  const [outlineSaving, setOutlineSaving] = useState(false);
+  const [renderingPlan, setRenderingPlan] = useState(false);
 
   // ── review / lightbox ──
   const [openSlide, setOpenSlide] = useState<number | null>(null);
@@ -109,6 +126,42 @@ export default function App() {
     };
   }, [jobId, screen]);
 
+  useEffect(() => {
+    if (!jobId || !status || (screen !== "plan" && screen !== "review")) return;
+    loadPlanningContext(jobId);
+  }, [jobId, screen, status?.job.status]);
+
+  async function loadPlanningContext(targetJobId: string) {
+    setPlanningLoading(true);
+    setPlanningError(null);
+    try {
+      const artifactNames: PlanningArtifactName[] = ["source-compression", "story-map", "spec-gate"];
+      const [outlineResult, ...artifactResults] = await Promise.allSettled([
+        getJobOutline(targetJobId),
+        ...artifactNames.map((artifact) => getPlanningArtifact(targetJobId, artifact)),
+      ]);
+      if (outlineResult.status === "fulfilled") {
+        setOutline(outlineResult.value.slides);
+      } else {
+        setOutline([]);
+        setPlanningError(outlineResult.reason?.message || "Failed to load plan outline.");
+      }
+      const nextArtifacts: PlanningArtifacts = {};
+      artifactResults.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
+        const key = artifactNames[index] === "source-compression"
+          ? "source"
+          : artifactNames[index] === "story-map"
+            ? "story"
+            : "gate";
+        nextArtifacts[key] = result.value;
+      });
+      setPlanningArtifacts(nextArtifacts);
+    } finally {
+      setPlanningLoading(false);
+    }
+  }
+
   const changeMode = (m: Mode) => {
     if (m === mode) return;
     setMode(m);
@@ -120,8 +173,11 @@ export default function App() {
     setScreen("mode");
     setJobId(null);
     setStatus(null);
+    setOutline([]);
+    setPlanningArtifacts({});
     setOpenSlide(null);
     setSubmitError(null);
+    setPlanningError(null);
     setRegenError(null);
   };
 
@@ -146,7 +202,13 @@ export default function App() {
     try {
       const nextStatus = await getJobStatus(job.id);
       setStatus(nextStatus);
-      setScreen(nextStatus.job.status === "done" ? "review" : "job");
+      setScreen(
+        nextStatus.job.status === "planned"
+          ? "plan"
+          : nextStatus.job.status === "done"
+            ? "review"
+            : "job"
+      );
     } catch (err: any) {
       setLibraryError(err?.message || "Failed to open job.");
     }
@@ -206,7 +268,7 @@ export default function App() {
     }
   };
 
-  const startJob = async () => {
+  const startJob = async (planOnly = false) => {
     if (!brief.trim() && docs.length === 0) {
       setSubmitError("Add a brief or at least one source document.");
       return;
@@ -228,6 +290,7 @@ export default function App() {
       form.append("quality_profile", quality);
       form.append("length_strategy", length);
       form.append("run_visual_qa", String(visualQa));
+      form.append("plan_only", String(planOnly));
       if (mode !== "freeform" && template) form.append("template_id", template.id);
       form.append("instructions", instructions);
       docs.forEach((doc) => form.append("documents", doc));
@@ -236,6 +299,9 @@ export default function App() {
       setJobId(job.id);
       setJobs((prev) => [job, ...prev.filter((existing) => existing.id !== job.id)]);
       setStatus(null);
+      setOutline([]);
+      setPlanningArtifacts({});
+      setPlanningError(null);
       setRegenError(null);
       setScreen("job");
       await refreshLibrary();
@@ -243,6 +309,36 @@ export default function App() {
       setSubmitError(err?.message || "Failed to start the job.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const savePlanEdits = async (edits: OutlineEdit[]) => {
+    if (!jobId || edits.length === 0) return;
+    setOutlineSaving(true);
+    setPlanningError(null);
+    try {
+      const next = await patchJobOutline(jobId, edits);
+      setOutline(next.slides);
+    } catch (err: any) {
+      setPlanningError(err?.message || "Failed to save outline edits.");
+    } finally {
+      setOutlineSaving(false);
+    }
+  };
+
+  const renderPlan = async () => {
+    if (!jobId) return;
+    setRenderingPlan(true);
+    setPlanningError(null);
+    try {
+      const queuedJob = await renderPlannedJob(jobId);
+      setStatus((prev) => (prev ? { ...prev, job: queuedJob, warnings: queuedJob.warnings ?? prev.warnings } : prev));
+      setScreen("job");
+      await refreshLibrary();
+    } catch (err: any) {
+      setPlanningError(err?.message || "Failed to render the planned deck.");
+    } finally {
+      setRenderingPlan(false);
     }
   };
 
@@ -291,6 +387,7 @@ export default function App() {
           gap: 28,
           alignItems: "start",
         }}
+        className="sf-app-shell"
       >
         <LibraryRail
           jobs={jobs}
@@ -343,7 +440,8 @@ export default function App() {
               onToggleVisualQa={() => setVisualQa((v) => !v)}
               submitting={submitting}
               error={submitError}
-              onGenerate={startJob}
+              onGenerate={() => startJob(false)}
+              onPreviewPlan={() => startJob(true)}
             />
           )}
 
@@ -354,7 +452,22 @@ export default function App() {
               progress={status?.job.progress ?? 0}
               errorMessage={status?.job.error_message ?? null}
               onCancel={() => setScreen("brief")}
-              onReview={() => setScreen("review")}
+              onReview={() => setScreen(status?.job.status === "planned" ? "plan" : "review")}
+            />
+          )}
+
+          {screen === "plan" && jobId && status && (
+            <PlanReviewScreen
+              status={status}
+              outline={outline}
+              artifacts={planningArtifacts}
+              loading={planningLoading}
+              saving={outlineSaving}
+              rendering={renderingPlan}
+              error={planningError}
+              onSave={savePlanEdits}
+              onRender={renderPlan}
+              onBack={() => setScreen("brief")}
             />
           )}
 
@@ -366,6 +479,7 @@ export default function App() {
               planner={planner}
               quality={quality}
               deckTitle={deckTitle}
+              outline={outline}
               onOpenSlide={(i) => {
                 setOpenSlide(i);
                 setRegenError(null);
@@ -380,6 +494,7 @@ export default function App() {
           jobId={jobId}
           status={status}
           index={openSlide}
+          outlineSlide={outline.find((slide) => slide.slide_index === openSlide)}
           regening={regening}
           regenError={regenError}
           onClose={() => setOpenSlide(null)}

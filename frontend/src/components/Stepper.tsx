@@ -14,6 +14,16 @@ export default function Stepper({ mode, screen, onJump }: Props) {
           ["mode", "New"],
           ["brief", "Brief"],
           ["job", "Generate"],
+          ["plan", "Plan"],
+          ["review", "Review"],
+        ]
+      : mode === "brand"
+      ? [
+          ["mode", "New"],
+          ["setup", "Setup"],
+          ["brief", "Brief"],
+          ["job", "Generate"],
+          ["plan", "Plan"],
           ["review", "Review"],
         ]
       : [

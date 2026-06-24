@@ -1,11 +1,16 @@
 import re
 import uuid
+import csv
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
-from markitdown import FileConversionException
-from markitdown import MarkItDown
+try:
+    from markitdown import FileConversionException
+    from markitdown import MarkItDown
+except Exception:  # pragma: no cover - exercised in ARM Docker images without markitdown
+    FileConversionException = Exception
+    MarkItDown = None
 
 from app.models.document import (
     DocumentBundle,
@@ -24,7 +29,15 @@ MONTH_OR_SEASON_PATTERN = (
 
 class DocumentIngester:
     def __init__(self) -> None:
-        self.markitdown = MarkItDown()
+        self.markitdown = self._build_markitdown()
+
+    def _build_markitdown(self):
+        if MarkItDown is None:
+            return None
+        try:
+            return MarkItDown()
+        except Exception:
+            return None
 
     def ingest_documents(
         self, job_id: str, file_paths: Iterable[Path]
@@ -138,13 +151,35 @@ class DocumentIngester:
         return cleaned[:48] or "source"
 
     def _convert_to_markdown(self, file_path: Path) -> str:
-        try:
-            result = self.markitdown.convert(file_path.as_posix())
-            return result.text_content or ""
-        except FileConversionException:
-            if file_path.suffix.lower() == ".docx":
-                return self._convert_docx_fallback(file_path)
-            raise
+        conversion_error: Exception | None = None
+        if self.markitdown is not None:
+            try:
+                result = self.markitdown.convert(file_path.as_posix())
+                return result.text_content or ""
+            except FileConversionException as exc:
+                conversion_error = exc
+            except Exception as exc:
+                conversion_error = exc
+        fallback = self._convert_with_native_fallback(file_path)
+        if fallback is not None:
+            return fallback
+        if conversion_error is not None:
+            raise conversion_error
+        return ""
+
+    def _convert_with_native_fallback(self, file_path: Path) -> str | None:
+        suffix = file_path.suffix.lower()
+        if suffix == ".docx":
+            return self._convert_docx_fallback(file_path)
+        if suffix == ".pptx":
+            return self._convert_pptx_fallback(file_path)
+        if suffix == ".xlsx":
+            return self._convert_xlsx_fallback(file_path)
+        if suffix == ".csv":
+            return self._convert_csv_fallback(file_path)
+        if suffix in {".md", ".markdown", ".txt"}:
+            return file_path.read_text(encoding="utf-8", errors="ignore")
+        return None
 
     def _convert_docx_fallback(self, file_path: Path) -> str:
         from docx import Document
@@ -174,6 +209,68 @@ class DocumentIngester:
             for row in rows[1:]:
                 lines.append("| " + " | ".join(row) + " |")
         return "\n\n".join(lines)
+
+    def _convert_pptx_fallback(self, file_path: Path) -> str:
+        from pptx import Presentation
+
+        presentation = Presentation(file_path.as_posix())
+        lines: list[str] = []
+        for slide_index, slide in enumerate(presentation.slides, start=1):
+            slide_lines: list[str] = []
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    text = "\n".join(
+                        paragraph.text.strip()
+                        for paragraph in shape.text_frame.paragraphs
+                        if paragraph.text.strip()
+                    )
+                    if text:
+                        slide_lines.append(text)
+                if getattr(shape, "has_table", False):
+                    table = shape.table
+                    rows = [
+                        [cell.text.strip() for cell in row.cells]
+                        for row in table.rows
+                    ]
+                    slide_lines.extend(self._markdown_table(rows))
+            if slide_lines:
+                lines.append(f"# Slide {slide_index}\n\n" + "\n\n".join(slide_lines))
+        return "\n\n".join(lines)
+
+    def _convert_xlsx_fallback(self, file_path: Path) -> str:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(file_path.as_posix(), data_only=True, read_only=True)
+        lines: list[str] = []
+        for worksheet in workbook.worksheets:
+            rows = [
+                ["" if cell is None else str(cell) for cell in row]
+                for row in worksheet.iter_rows(values_only=True)
+            ]
+            rows = [row for row in rows if any(cell.strip() for cell in row)]
+            if rows:
+                lines.append(f"# {worksheet.title}")
+                lines.extend(self._markdown_table(rows))
+        workbook.close()
+        return "\n\n".join(lines)
+
+    def _convert_csv_fallback(self, file_path: Path) -> str:
+        with file_path.open(newline="", encoding="utf-8", errors="ignore") as handle:
+            rows = [[cell.strip() for cell in row] for row in csv.reader(handle)]
+        rows = [row for row in rows if any(cell for cell in row)]
+        return "\n".join(self._markdown_table(rows))
+
+    def _markdown_table(self, rows: list[list[str]]) -> list[str]:
+        if not rows:
+            return []
+        width = max(len(row) for row in rows)
+        normalized = [row + [""] * (width - len(row)) for row in rows]
+        header = normalized[0]
+        lines = ["| " + " | ".join(header) + " |"]
+        lines.append("| " + " | ".join(["---"] * width) + " |")
+        for row in normalized[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+        return lines
 
     def _parse_sections(self, doc_id: str, markdown: str) -> list[DocumentSection]:
         sections: list[DocumentSection] = []

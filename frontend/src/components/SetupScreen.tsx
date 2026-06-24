@@ -1,6 +1,12 @@
-import { CSSProperties } from "react";
+import { CSSProperties, useEffect, useState } from "react";
 import { card, eyebrow, ghostBtn, h1, microLabel, primaryBtn, SERIF } from "../ui";
-import { TemplateProfile } from "../api/client";
+import {
+  getTemplateAssets,
+  templateLogoUrl,
+  templateThumbnailUrl,
+  TemplateAssets,
+  TemplateProfile,
+} from "../api/client";
 import { Mode } from "../types";
 
 type Props = {
@@ -40,6 +46,23 @@ export default function SetupScreen({
   onContinue,
 }: Props) {
   const isBrand = mode === "brand";
+  const [assets, setAssets] = useState<TemplateAssets | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setAssets(null);
+    if (!template) return;
+    getTemplateAssets(template.id)
+      .then((next) => {
+        if (active) setAssets(next);
+      })
+      .catch(() => {
+        if (active) setAssets(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [template]);
 
   const setupTitle = isBrand ? "Match an existing brand" : "Preserve a rigid template";
   const setupSub = isBrand
@@ -62,7 +85,10 @@ export default function SetupScreen({
         {setupSub}
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 24, alignItems: "start" }}>
+      <div
+        className="sf-setup-grid"
+        style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 24, alignItems: "start" }}
+      >
         {/* upload column */}
         <div style={{ ...card, padding: 20 }}>
           <div style={{ ...microLabel, marginBottom: 12 }}>TEMPLATE FILE</div>
@@ -194,6 +220,34 @@ export default function SetupScreen({
           {template && (
             <>
               <div style={{ height: 1, background: "var(--line)", margin: "18px 0" }} />
+              {(assets?.thumbnails?.length ?? 0) > 0 && (
+                <>
+                  <div style={{ ...microLabel, marginBottom: 10 }}>THUMBNAILS</div>
+                  <div
+                    className="sf-template-thumbnails"
+                    style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8, marginBottom: 16 }}
+                  >
+                    {assets?.thumbnails.slice(0, 4).map((image) => (
+                      <div
+                        key={image}
+                        style={{
+                          aspectRatio: "16 / 9",
+                          border: "1px solid var(--line)",
+                          borderRadius: 7,
+                          overflow: "hidden",
+                          background: "var(--surface-2)",
+                        }}
+                      >
+                        <img
+                          src={templateThumbnailUrl(template.id, image)}
+                          alt={image}
+                          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
               <div style={{ ...microLabel, marginBottom: 10 }}>SLIDE INVENTORY</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                 {template.slides.map((iv, i) => {
@@ -265,7 +319,7 @@ export default function SetupScreen({
                 : "Upload a rigid template to review its field schema — the fields SlideForge will inject via XML will appear here."}
             </div>
           ) : isBrand ? (
-            <BrandProfile template={template} />
+            <BrandProfile template={template} assets={assets} />
           ) : (
             <StrictSchema template={template} />
           )}
@@ -299,7 +353,7 @@ export default function SetupScreen({
   );
 }
 
-function BrandProfile({ template }: { template: TemplateProfile }) {
+function BrandProfile({ template, assets }: { template: TemplateProfile; assets: TemplateAssets | null }) {
   const c = template.brand.colors;
   const swatches = [c.primary, c.secondary, c.accent, c.background_light].filter(Boolean);
   const fonts = [
@@ -381,11 +435,20 @@ function BrandProfile({ template }: { template: TemplateProfile }) {
               justifyContent: "center",
               background:
                 "repeating-linear-gradient(135deg,var(--surface-2),var(--surface-2) 7px,transparent 7px,transparent 14px)",
+              overflow: "hidden",
             }}
           >
-            <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
-              logo · {logoPlacement}
-            </span>
+            {assets?.logo_available ? (
+              <img
+                src={templateLogoUrl(template.id)}
+                alt="Extracted logo"
+                style={{ maxWidth: "80%", maxHeight: "58px", objectFit: "contain" }}
+              />
+            ) : (
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+                logo · {logoPlacement}
+              </span>
+            )}
           </div>
           <div style={{ ...microLabel, margin: "22px 0 11px" }}>LAYOUT NOTES</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
@@ -418,8 +481,10 @@ function BrandProfile({ template }: { template: TemplateProfile }) {
 }
 
 function StrictSchema({ template }: { template: TemplateProfile }) {
-  const slide = template.slides.find((s) => (s.schema?.fields?.length ?? 0) > 0);
-  const fields = slide?.schema?.fields ?? [];
+  const schemaSlides = template.slides.filter((s) => (s.schema?.fields?.length ?? 0) > 0);
+  const fields = schemaSlides.flatMap((slide) =>
+    (slide.schema?.fields ?? []).map((field) => ({ ...field, slide }))
+  );
 
   return (
     <div style={{ ...card, padding: 24 }}>
@@ -433,7 +498,7 @@ function StrictSchema({ template }: { template: TemplateProfile }) {
       >
         <div style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 600 }}>Strict field schema</div>
         <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
-          {slide ? `Slide ${(slide.index ?? 0) + 1} · ${slide.label}` : "No mapped fields"}
+          {schemaSlides.length ? `${schemaSlides.length} mapped slides` : "No mapped fields"}
         </span>
       </div>
       <div style={{ fontSize: 13, color: "var(--ink-2)", marginBottom: 20 }}>
@@ -453,10 +518,10 @@ function StrictSchema({ template }: { template: TemplateProfile }) {
           <div style={colHead}>TYPE</div>
           <div style={colHead}>REQUIRED</div>
           <div style={colHead}>MAX</div>
-          {fields.map((fd) => {
+          {fields.map(({ slide, ...fd }) => {
             const req = fd.required ? "YES" : "NO";
             return (
-              <div key={fd.id} style={{ display: "contents" }}>
+              <div key={`${slide.index}-${fd.id}`} style={{ display: "contents" }}>
                 <div
                   style={{
                     fontFamily: MONO,
@@ -466,7 +531,7 @@ function StrictSchema({ template }: { template: TemplateProfile }) {
                     borderBottom: "1px solid var(--line)",
                   }}
                 >
-                  {fd.id}
+                  {`S${(slide.index ?? 0) + 1} · ${fd.id}`}
                 </div>
                 <div
                   style={{

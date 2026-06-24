@@ -1,6 +1,8 @@
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
@@ -58,6 +60,67 @@ async def get_template(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found.")
     return template
+
+
+@router.get("/templates/{template_id}/assets")
+async def get_template_assets(
+    template_id: str,
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+) -> dict[str, object]:
+    template = await store.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    thumbnail_dir = storage.template_dir(template_id) / "thumbnails"
+    thumbnails = []
+    if thumbnail_dir.exists():
+        thumbnails = sorted(
+            [
+                path.name
+                for path in thumbnail_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            ]
+        )
+    logo_path = Path(template.brand.logo.path) if template.brand.logo else None
+    return {
+        "template_id": template_id,
+        "thumbnails": thumbnails,
+        "logo_available": bool(logo_path and logo_path.exists()),
+    }
+
+
+@router.get("/templates/{template_id}/thumbnail/{image_name}")
+async def get_template_thumbnail(
+    template_id: str,
+    image_name: str,
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+) -> FileResponse:
+    template = await store.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    if Path(image_name).name != image_name:
+        raise HTTPException(status_code=404, detail="Thumbnail not found.")
+    image_path = storage.template_dir(template_id) / "thumbnails" / image_name
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Thumbnail not found.")
+    return FileResponse(image_path.as_posix(), filename=image_path.name)
+
+
+@router.get("/templates/{template_id}/logo")
+async def get_template_logo(
+    template_id: str,
+    store: SQLiteStore = Depends(_get_store),
+) -> FileResponse:
+    template = await store.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    if not template.brand.logo:
+        raise HTTPException(status_code=404, detail="Logo not found.")
+    logo_path = Path(template.brand.logo.path)
+    if not logo_path.exists() or not logo_path.is_file():
+        raise HTTPException(status_code=404, detail="Logo not found.")
+    return FileResponse(logo_path.as_posix(), filename=logo_path.name)
 
 
 @router.patch("/templates/{template_id}", response_model=TemplateProfile)
