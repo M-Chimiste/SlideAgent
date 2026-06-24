@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app.config import Settings
+from app.models.document import DocumentBundle
 
 
 class LocalStorage:
@@ -77,6 +78,21 @@ class LocalStorage:
 
     def planning_artifact_path(self, job_id: str, artifact: str) -> Path:
         return self.job_dir(job_id) / "planning" / f"{artifact}.json"
+
+    def save_document_bundle(self, job_id: str, bundle: DocumentBundle) -> Path:
+        self.ensure_job_dirs(job_id)
+        target = self.job_dir(job_id) / "planning" / "document-bundle.json"
+        target.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+        return target
+
+    def load_document_bundle(self, job_id: str) -> DocumentBundle | None:
+        path = self.job_dir(job_id) / "planning" / "document-bundle.json"
+        if not path.exists():
+            return None
+        try:
+            return DocumentBundle.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
 
     def save_slide_script(self, job_id: str, slide_id: str, script: str) -> Path:
         self.ensure_job_dirs(job_id)

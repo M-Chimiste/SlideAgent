@@ -21,4 +21,5 @@ class JobStatusResponse(BaseModel):
     preview_images: Optional[List[str]] = None
     qa_summary: Optional[dict[str, Any]] = None
     qa_issues: Optional[List[QAIssue]] = None
+    qa_history: Optional[List[dict[str, Any]]] = None
     planning_summary: Optional[dict[str, Any]] = None

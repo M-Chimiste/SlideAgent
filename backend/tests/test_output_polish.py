@@ -139,6 +139,40 @@ def test_ingester_assigns_source_ids_and_source_index(tmp_path: Path) -> None:
     assert source_index[tables[0].source_id]["kind"] == "table"
 
 
+def test_ingester_native_fallbacks_work_without_markitdown(tmp_path: Path) -> None:
+    from docx import Document
+    from openpyxl import Workbook
+
+    ingester = DocumentIngester()
+    ingester.markitdown = None
+
+    docx_path = tmp_path / "notes.docx"
+    document = Document()
+    document.add_heading("Executive Context", level=1)
+    document.add_paragraph("Structured source review improves deck quality.")
+    document.save(docx_path.as_posix())
+
+    pptx_path = tmp_path / "source-deck.pptx"
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(Inches(0.8), Inches(0.7), Inches(8), Inches(1)).text = (
+        "Review checkpoints build user trust."
+    )
+    presentation.save(pptx_path.as_posix())
+
+    xlsx_path = tmp_path / "metrics.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Metrics"
+    sheet.append(["Metric", "Value"])
+    sheet.append(["Trust lift", "42%"])
+    workbook.save(xlsx_path.as_posix())
+
+    assert "# Executive Context" in ingester._convert_to_markdown(docx_path)
+    assert "Review checkpoints build user trust." in ingester._convert_to_markdown(pptx_path)
+    assert "| Metric | Value |" in ingester._convert_to_markdown(xlsx_path)
+
+
 def test_grounding_resolves_source_refs_to_section_labels() -> None:
     bundle = _source_bundle()
     deck = DeckSpec(

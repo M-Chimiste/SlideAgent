@@ -26,6 +26,7 @@ type Props = {
   submitting: boolean;
   error: string | null;
   onGenerate: () => void;
+  onPreviewPlan: () => void;
 };
 
 function Segmented<T extends string>({
@@ -94,7 +95,10 @@ export default function BriefScreen(p: Props) {
         storyline before a single slide is rendered.
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 24, alignItems: "start" }}>
+      <div
+        className="sf-brief-grid"
+        style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 24, alignItems: "start" }}
+      >
         {/* left: brief */}
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <div style={{ ...card, padding: 20 }}>
@@ -373,6 +377,28 @@ export default function BriefScreen(p: Props) {
           >
             {p.submitting ? "Starting…" : "Generate deck"}
           </button>
+          {p.mode !== "strict" && (
+            <button
+              onClick={p.onPreviewPlan}
+              disabled={p.submitting}
+              style={{
+                width: "100%",
+                height: 42,
+                marginTop: 10,
+                background: "var(--surface)",
+                color: "var(--ink)",
+                border: "1px solid var(--line-2)",
+                borderRadius: 8,
+                font: "inherit",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: p.submitting ? "default" : "pointer",
+                opacity: p.submitting ? 0.75 : 1,
+              }}
+            >
+              Preview plan
+            </button>
+          )}
           {p.error && (
             <div style={{ textAlign: "center", fontSize: 11, color: "var(--bad)", marginTop: 10 }}>
               {p.error}

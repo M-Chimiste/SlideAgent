@@ -106,12 +106,74 @@ export type QaSummary = {
   count: number;
 };
 
+export type PlanningSummary = {
+  available: boolean;
+  artifacts: string[];
+  story_map_status?: string | null;
+  story_map_fallback_reason?: string | null;
+  source_coverage?: {
+    section_count: number;
+    included_section_count: number;
+    omitted_section_count: number;
+    estimated_tokens: number;
+  };
+  spec_gate?: {
+    status?: string | null;
+    issue_count: number;
+    repaired_count: number;
+    unresolved_count: number;
+  };
+};
+
+export type QaHistoryEntry = {
+  round: number;
+  passed: boolean;
+  summary: QaSummary;
+};
+
 export type JobStatus = {
   job: JobRecord;
   warnings: JobWarning[];
   preview_images?: string[] | null;
   qa_summary?: QaSummary | null;
   qa_issues?: QaIssue[] | null;
+  qa_history?: QaHistoryEntry[] | null;
+  planning_summary?: PlanningSummary | null;
+};
+
+export type JobOutlineSlide = {
+  slide_index: number;
+  mode: string;
+  label: string;
+  action_title: string;
+  subheading: string;
+  narrative_role?: string | null;
+  layout?: string | null;
+  archetype?: string | null;
+  exhibit_type?: string | null;
+  sources: string[];
+  source_refs: string[];
+  speaker_notes?: string | null;
+  qa_status?: string | null;
+  qa_issues?: Record<string, any>[];
+};
+
+export type JobOutlineResponse = {
+  slides: JobOutlineSlide[];
+};
+
+export type OutlineEdit = {
+  slide_index: number;
+  action_title?: string;
+  subheading?: string;
+};
+
+export type PlanningArtifactName = "source-compression" | "story-map" | "spec-gate";
+
+export type TemplateAssets = {
+  template_id: string;
+  thumbnails: string[];
+  logo_available: boolean;
 };
 
 async function apiError(response: Response, fallback: string): Promise<Error> {
@@ -180,10 +242,48 @@ export async function createJob(formData: FormData): Promise<JobRecord> {
   return response.json();
 }
 
+export async function renderPlannedJob(jobId: string): Promise<JobRecord> {
+  const response = await fetch(`/api/jobs/${jobId}/render`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Plan rendering failed.");
+  }
+  return response.json();
+}
+
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
   const response = await fetch(`/api/jobs/${jobId}`);
   if (!response.ok) {
     throw await apiError(response, "Job lookup failed.");
+  }
+  return response.json();
+}
+
+export async function getJobOutline(jobId: string): Promise<JobOutlineResponse> {
+  const response = await fetch(`/api/jobs/${jobId}/outline`);
+  if (!response.ok) {
+    throw await apiError(response, "Job outline lookup failed.");
+  }
+  return response.json();
+}
+
+export async function patchJobOutline(jobId: string, slides: OutlineEdit[]): Promise<JobOutlineResponse> {
+  const response = await fetch(`/api/jobs/${jobId}/outline`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slides }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Job outline update failed.");
+  }
+  return response.json();
+}
+
+export async function getPlanningArtifact(jobId: string, artifact: PlanningArtifactName): Promise<any> {
+  const response = await fetch(`/api/jobs/${jobId}/planning/${artifact}`);
+  if (!response.ok) {
+    throw await apiError(response, "Planning artifact lookup failed.");
   }
   return response.json();
 }
@@ -205,6 +305,22 @@ export async function listJobs(): Promise<JobRecord[]> {
   }
   const payload = await response.json();
   return payload.jobs ?? [];
+}
+
+export async function getTemplateAssets(templateId: string): Promise<TemplateAssets> {
+  const response = await fetch(`/api/templates/${templateId}/assets`);
+  if (!response.ok) {
+    throw await apiError(response, "Template assets lookup failed.");
+  }
+  return response.json();
+}
+
+export function templateThumbnailUrl(templateId: string, image: string): string {
+  return `/api/templates/${templateId}/thumbnail/${image}`;
+}
+
+export function templateLogoUrl(templateId: string): string {
+  return `/api/templates/${templateId}/logo`;
 }
 
 export async function regenerateSlide(jobId: string, slideIndex: number) {

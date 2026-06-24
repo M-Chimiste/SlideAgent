@@ -1,5 +1,5 @@
 import { card, SERIF } from "../ui";
-import { downloadUrl, JobStatus, previewImageUrl } from "../api/client";
+import { downloadUrl, JobOutlineSlide, JobStatus, previewImageUrl } from "../api/client";
 import { Mode, Planner, Quality } from "../types";
 import { allIssues, issueCounts, slidesWithIssues } from "../qa";
 
@@ -12,6 +12,7 @@ type Props = {
   planner: Planner;
   quality: Quality;
   deckTitle: string;
+  outline: JobOutlineSlide[];
   onOpenSlide: (index: number) => void;
 };
 
@@ -22,6 +23,7 @@ export default function ReviewScreen({
   planner,
   quality,
   deckTitle,
+  outline,
   onOpenSlide,
 }: Props) {
   const images = status.preview_images ?? [];
@@ -137,6 +139,7 @@ export default function ReviewScreen({
 
       {/* QA summary */}
       <div
+        className="sf-review-stats"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(4,1fr)",
@@ -179,8 +182,10 @@ export default function ReviewScreen({
         </span>
       </div>
 
+      <DeckIntelligence status={status} outline={outline} />
+
       {/* slide grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 18 }}>
+      <div className="sf-review-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 18 }}>
         {images.map((img, i) => {
           const warn = issueSlides.has(i);
           const qc = warn ? "var(--warn)" : "var(--good)";
@@ -298,6 +303,56 @@ export default function ReviewScreen({
           })}
         </div>
       </div>
+    </div>
+  );
+}
+
+function DeckIntelligence({ status, outline }: { status: JobStatus; outline: JobOutlineSlide[] }) {
+  const coverage = status.planning_summary?.source_coverage;
+  const gate = status.planning_summary?.spec_gate;
+  const history = status.qa_history ?? [];
+  return (
+    <div
+      className="sf-intel-grid"
+      style={{ display: "grid", gridTemplateColumns: "1.15fr .85fr", gap: 12, marginBottom: 28 }}
+    >
+      <div style={{ ...card, padding: 16 }}>
+        <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".1em", color: "var(--ink-3)", marginBottom: 10 }}>
+          TITLE LADDER
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+          {outline.slice(0, 7).map((slide) => (
+            <div key={slide.slide_index} style={{ display: "flex", gap: 9, fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.35 }}>
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--accent)", flex: "none", width: 22 }}>
+                {String(slide.slide_index + 1).padStart(2, "0")}
+              </span>
+              <span>{slide.action_title}</span>
+            </div>
+          ))}
+          {outline.length === 0 && <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>No outline metadata available.</div>}
+        </div>
+      </div>
+      <div style={{ ...card, padding: 16 }}>
+        <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".1em", color: "var(--ink-3)", marginBottom: 10 }}>
+          DECK INTELLIGENCE
+        </div>
+        <InfoRow label="Story map" value={status.planning_summary?.story_map_status || "-"} />
+        <InfoRow
+          label="Source coverage"
+          value={coverage ? `${coverage.included_section_count}/${coverage.section_count} sections` : "-"}
+        />
+        <InfoRow label="Spec gate" value={gate ? `${gate.repaired_count} repaired / ${gate.unresolved_count} unresolved` : "-"} />
+        <InfoRow label="QA history" value={history.length ? `${history.length} rounds` : "-"} />
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "7px 0", borderBottom: "1px solid var(--line)" }}>
+      <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{label}</span>
+      <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--ink)" }}>{value}</span>
     </div>
   );
 }

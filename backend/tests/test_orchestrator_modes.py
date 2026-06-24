@@ -87,6 +87,40 @@ class CleanQAAgent:
         return None
 
 
+class CountingIngester(StaticIngester):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def ingest_documents(self, job_id: str, file_paths: list[Path]) -> tuple[list, DocumentBundle]:
+        self.calls += 1
+        return super().ingest_documents(job_id, file_paths)
+
+
+class CountingPlanner(ContentPlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def plan(
+        self,
+        template: TemplateProfile,
+        bundle: DocumentBundle,
+        instructions: str = "",
+        generation_mode: str | None = None,
+        quality_profile: str = "balanced",
+        length_strategy: str = "auto",
+    ):
+        self.calls += 1
+        return super().plan(
+            template,
+            bundle,
+            instructions=instructions,
+            generation_mode=generation_mode,
+            quality_profile=quality_profile,
+            length_strategy=length_strategy,
+        )
+
+
 class DuplicateOutlinePlanner(ContentPlanner):
     def plan(
         self,
@@ -241,6 +275,88 @@ async def test_orchestrator_runs_freeform_job_without_template(tmp_path: Path) -
     assert (planning_dir / "source-compression.json").exists()
     assert (planning_dir / "story-map.json").exists()
     assert (planning_dir / "spec-gate.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_plan_only_persists_plan_without_rendering(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    job = _job("plan-only-job", FREEFORM_TEMPLATE_ID, "freeform")
+    job.config_json = {"generation_mode": "freeform", "plan_only": True}
+    await store.create_job(job)
+
+    await _orchestrator_with_qa(settings, store, storage, CleanQAAgent()).run_job("plan-only-job")
+
+    planned = await store.get_job("plan-only-job")
+    outlines = await store.list_slide_outlines("plan-only-job")
+    planning_dir = storage.job_dir("plan-only-job") / "planning"
+
+    assert planned is not None
+    assert planned.status == "planned"
+    assert planned.progress == 0.5
+    assert planned.result_file is None
+    assert planned.preview_dir is None
+    assert outlines
+    assert (planning_dir / "document-bundle.json").exists()
+    assert (planning_dir / "source-compression.json").exists()
+    assert not (storage.job_dir("plan-only-job") / "output.pptx").exists()
+    assert not list((storage.job_dir("plan-only-job") / "preview").glob("slide-*.jpg"))
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_renders_from_persisted_plan_without_replanning(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    ingester = CountingIngester()
+    planner = CountingPlanner()
+    await store.init()
+    job = _job("resume-plan-job", FREEFORM_TEMPLATE_ID, "freeform")
+    job.config_json = {"generation_mode": "freeform", "plan_only": True}
+    await store.create_job(job)
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=ingester,
+        planner=planner,
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object()),
+        qa_agent=CleanQAAgent(),
+    )
+
+    await orchestrator.run_job("resume-plan-job")
+    planned = await store.get_job("resume-plan-job")
+    assert planned is not None
+    assert planned.status == "planned"
+    persisted_bundle = storage.load_document_bundle("resume-plan-job")
+    assert persisted_bundle is not None
+
+    config = dict(planned.config_json or {})
+    config["plan_only"] = False
+    config["render_from_plan"] = True
+    await store.update_job(
+        "resume-plan-job",
+        status="queued",
+        progress=0.5,
+        config_json=config,
+        result_file=None,
+        preview_dir=None,
+        completed_at=None,
+    )
+
+    await orchestrator.run_job("resume-plan-job")
+
+    rendered = await store.get_job("resume-plan-job")
+    assert rendered is not None
+    assert rendered.status == "done"
+    assert rendered.result_file
+    assert Path(rendered.result_file).exists()
+    assert ingester.calls == 1
+    assert planner.calls == 1
+    assert storage.load_document_bundle("resume-plan-job") == persisted_bundle
 
 
 @pytest.mark.asyncio

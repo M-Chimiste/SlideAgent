@@ -55,7 +55,7 @@ export default function LibraryRail({
     .slice(0, 8);
 
   return (
-    <aside style={{ ...card, padding: 18, alignSelf: "start", position: "sticky", top: 88 }}>
+    <aside className="sf-library-rail" style={{ ...card, padding: 18, alignSelf: "start", position: "sticky", top: 88 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
           <div style={{ fontFamily: SERIF, fontSize: 18, fontWeight: 600 }}>Library</div>
@@ -104,7 +104,11 @@ export default function LibraryRail({
                   }}
                 >
                   <span style={{ fontSize: 12.5, fontWeight: 700 }}>
-                    {job.status === "done" ? "Review deck" : job.status}
+                    {job.status === "done"
+                      ? "Review deck"
+                      : job.status === "planned"
+                        ? "Review plan"
+                        : job.status}
                   </span>
                   <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--ink-3)" }}>
                     {progress(job)}

@@ -21,6 +21,7 @@ const STATUS_STAGE: Record<string, number> = {
   planning: 1,
   generating: 3,
   qa: 6,
+  planned: 3,
   done: STAGES.length,
   error: -1,
 };
@@ -43,15 +44,18 @@ export default function JobScreen({
   onReview,
 }: Props) {
   const done = jobStatus === "done";
+  const planned = jobStatus === "planned";
   const errored = jobStatus === "error";
   const current = STATUS_STAGE[jobStatus] ?? 0;
-  const pct = done ? 100 : Math.round((progress || 0) * 100);
+  const pct = done ? 100 : planned ? Math.max(50, Math.round((progress || 0) * 100)) : Math.round((progress || 0) * 100);
 
-  const eyebrowText = errored ? "✕ FAILED" : done ? "✓ COMPLETE" : "GENERATING";
+  const eyebrowText = errored ? "✕ FAILED" : done ? "✓ COMPLETE" : planned ? "✓ PLAN READY" : "GENERATING";
   const title = errored
     ? "Generation failed"
     : done
     ? "Your deck is ready"
+    : planned
+    ? "Your ghost deck is ready"
     : STAGES[current]
     ? `${STAGES[current].label}…`
     : "Working…";
@@ -127,6 +131,8 @@ export default function JobScreen({
         <span>
           {errored
             ? errorMessage || "see logs"
+            : planned
+            ? "plan ready for review"
             : done
             ? "all gates cleared"
             : "planning → render → QA"}
@@ -136,8 +142,8 @@ export default function JobScreen({
       {/* stages */}
       <div style={{ display: "flex", flexDirection: "column" }}>
         {STAGES.map((g, i) => {
-          const stageDone = done || (!errored && i < current);
-          const active = !done && !errored && i === current;
+          const stageDone = done || (planned && i <= 4) || (!errored && i < current);
+          const active = !done && !planned && !errored && i === current;
           const ring: CSSProperties["borderColor"] = active
             ? "var(--accent)"
             : stageDone
@@ -229,26 +235,26 @@ export default function JobScreen({
         </button>
         <button
           onClick={onReview}
-          disabled={!done}
+          disabled={!done && !planned}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 9,
             height: 48,
             padding: "0 26px",
-            background: done ? "var(--accent)" : "var(--inset)",
-            color: done ? "var(--accent-ink)" : "var(--ink-3)",
+            background: done || planned ? "var(--accent)" : "var(--inset)",
+            color: done || planned ? "var(--accent-ink)" : "var(--ink-3)",
             border: "none",
             borderRadius: 9,
             font: "inherit",
             fontSize: 14,
             fontWeight: 700,
-            cursor: done ? "pointer" : "default",
+            cursor: done || planned ? "pointer" : "default",
             boxShadow: "var(--shadow)",
-            opacity: done ? 1 : 0.7,
+            opacity: done || planned ? 1 : 0.7,
           }}
         >
-          {done ? "Review deck" : "Working…"} <span style={{ fontSize: 15 }}>→</span>
+          {planned ? "Review plan" : done ? "Review deck" : "Working…"} <span style={{ fontSize: 15 }}>→</span>
         </button>
       </div>
     </div>

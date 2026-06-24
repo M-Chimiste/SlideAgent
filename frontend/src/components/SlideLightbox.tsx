@@ -1,5 +1,5 @@
 import { CSSProperties } from "react";
-import { JobStatus, previewImageUrl } from "../api/client";
+import { JobOutlineSlide, JobStatus, previewImageUrl } from "../api/client";
 import { slideIssues } from "../qa";
 
 const MONO = "'IBM Plex Mono', monospace";
@@ -8,6 +8,7 @@ type Props = {
   jobId: string;
   status: JobStatus;
   index: number;
+  outlineSlide?: JobOutlineSlide;
   regening: boolean;
   regenError: string | null;
   onClose: () => void;
@@ -24,6 +25,7 @@ export default function SlideLightbox({
   jobId,
   status,
   index,
+  outlineSlide,
   regening,
   regenError,
   onClose,
@@ -73,10 +75,11 @@ export default function SlideLightbox({
       }}
     >
       <div
+        className="sf-lightbox-shell"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "100%",
-          maxWidth: 960,
+          maxWidth: 1120,
           background: "var(--surface)",
           border: "1px solid var(--line-2)",
           borderRadius: 14,
@@ -201,6 +204,57 @@ export default function SlideLightbox({
             </div>
           </div>
 
+          {outlineSlide && (
+            <>
+              <div
+                style={{
+                  fontFamily: MONO,
+                  fontSize: 10,
+                  letterSpacing: ".1em",
+                  color: "var(--ink-3)",
+                  marginBottom: 10,
+                }}
+              >
+                OUTLINE
+              </div>
+              <div style={{ marginBottom: 20, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.3 }}>
+                    {outlineSlide.action_title || outlineSlide.label}
+                  </div>
+                  {outlineSlide.subheading && (
+                    <div style={{ marginTop: 5, fontSize: 12, color: "var(--ink-2)", lineHeight: 1.35 }}>
+                      {outlineSlide.subheading}
+                    </div>
+                  )}
+                </div>
+                <MetaRow label="Role" value={outlineSlide.narrative_role || "-"} />
+                <MetaRow label="Layout" value={outlineSlide.layout || outlineSlide.archetype || "-"} />
+                <MetaRow label="Exhibit" value={outlineSlide.exhibit_type || "-"} />
+                <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.4 }}>
+                  {(outlineSlide.source_refs || []).slice(0, 4).join(", ") ||
+                    (outlineSlide.sources || []).slice(0, 2).join("; ") ||
+                    "No source refs"}
+                </div>
+                {outlineSlide.speaker_notes && (
+                  <div
+                    style={{
+                      fontSize: 11.5,
+                      color: "var(--ink-2)",
+                      lineHeight: 1.45,
+                      padding: 10,
+                      border: "1px solid var(--line)",
+                      borderRadius: 8,
+                      background: "var(--surface-2)",
+                    }}
+                  >
+                    {outlineSlide.speaker_notes}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".1em", color: "var(--ink-3)", marginBottom: 10 }}>
             ISSUES
           </div>
@@ -238,6 +292,23 @@ export default function SlideLightbox({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function MetaRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 12,
+        borderBottom: "1px solid var(--line)",
+        paddingBottom: 7,
+      }}
+    >
+      <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{label}</span>
+      <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--ink)" }}>{value}</span>
     </div>
   );
 }

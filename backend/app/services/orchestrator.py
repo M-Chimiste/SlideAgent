@@ -7,6 +7,7 @@ from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
 from app.models.brand import BrandDNA
+from app.models.document import DocumentBundle
 from app.models.job import JobRecord
 from app.models.job import FREEFORM_TEMPLATE_ID
 from app.models.outline import SlideOutline
@@ -57,6 +58,9 @@ class JobOrchestrator:
                 completed_at=self._timestamp(),
             )
             return
+        if self._render_from_plan(job):
+            await self._render_planned_job(job, template)
+            return
         document_paths = self._load_document_paths(job_id)
         await self._run_job(job, template, document_paths)
 
@@ -69,6 +73,7 @@ class JobOrchestrator:
         try:
             await self.store.update_job(job.id, status="analyzing", progress=0.1)
             records, bundle = self.ingester.ingest_documents(job.id, document_paths)
+            self.storage.save_document_bundle(job.id, bundle)
             for record in records:
                 await self.store.add_job_document(record)
                 if record.markdown_content:
@@ -100,77 +105,128 @@ class JobOrchestrator:
                 warnings = self._merge_warnings(warnings, consulting_warnings)
             await self.store.add_slide_outlines(outlines)
 
-            await self.store.update_job(
-                job.id, status="generating", progress=0.55, warnings_json=warnings
-            )
-            working_dir = self.storage.job_dir(job.id)
-            working_dir.mkdir(parents=True, exist_ok=True)
-            output_path = self.storage.output_pptx_path(job.id)
-            strict_warnings = self.builder.build_deck(template, outlines, output_path, working_dir)
-            if strict_warnings:
-                warnings = self._merge_warnings(warnings, strict_warnings)
-                await self.store.update_job(job.id, warnings_json=warnings)
-
-            await self.store.update_job(job.id, status="qa", progress=0.75)
-            qa_round = 0
-            if self._run_visual_qa(job):
-                qa_result, images = self.qa_agent.inspect_deck(
-                    output_path, working_dir / "preview", outlines
+            if self._plan_only(job):
+                await self.store.update_job(
+                    job.id,
+                    status="planned",
+                    progress=0.5,
+                    qa_rounds=0,
+                    warnings_json=warnings,
+                    result_file=None,
+                    preview_dir=None,
+                    error_message=None,
+                    completed_at=self._timestamp(),
                 )
-                self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
-                seen_actionable_signatures: set[tuple[tuple[int | None, str, str], ...]] = set()
-                while qa_round < self.settings.qa_max_rounds:
-                    actionable_signature = self._actionable_qa_signature(qa_result)
-                    if (
-                        not actionable_signature
-                        or actionable_signature in seen_actionable_signatures
-                    ):
-                        break
-                    seen_actionable_signatures.add(actionable_signature)
-                    qa_round += 1
-                    outlines = self._apply_qa_fixes(outlines, qa_result)
-                    outlines, consulting_warnings = self._run_consulting_qa_repairs(
-                        outlines, bundle
-                    )
-                    if consulting_warnings:
-                        warnings = self._merge_warnings(warnings, consulting_warnings)
-                        await self.store.update_job(job.id, warnings_json=warnings)
-                    await self._persist_slide_outlines(outlines, qa_result)
-                    strict_warnings = self.builder.build_deck(
-                        template, outlines, output_path, working_dir
-                    )
-                    if strict_warnings:
-                        warnings = self._merge_warnings(warnings, strict_warnings)
-                        await self.store.update_job(job.id, warnings_json=warnings)
-                    qa_result, images = self.qa_agent.inspect_deck(
-                        output_path, working_dir / "preview", outlines
-                    )
-                    self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
-            else:
-                qa_result, images = self.qa_agent.inspect_deck(
-                    output_path,
-                    working_dir / "preview",
-                    outlines,
-                )
-                self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
-            self.storage.save_preview_images(job.id, images)
-            pdf_path = self.qa_agent.export_pdf(output_path, working_dir)
-            if pdf_path and pdf_path != output_path.with_suffix(".pdf"):
-                output_path.with_suffix(".pdf").write_bytes(pdf_path.read_bytes())
+                return
 
-            await self.store.update_job(
-                job.id,
-                status="done",
-                progress=1.0,
-                qa_rounds=qa_round,
-                result_file=output_path.as_posix(),
-                preview_dir=(working_dir / "preview").as_posix(),
-                completed_at=self._timestamp(),
-            )
+            await self._render_outlines(job, template, outlines, bundle, warnings)
         except Exception as exc:
             await self.store.update_job(
                 job.id, status="error", error_message=str(exc), completed_at=self._timestamp()
             )
+
+    async def _render_planned_job(
+        self,
+        job: JobRecord,
+        template: TemplateProfile,
+    ) -> None:
+        try:
+            bundle = self.storage.load_document_bundle(job.id)
+            if bundle is None:
+                raise RuntimeError("Planned job is missing its persisted source bundle.")
+            outlines = await self.store.list_slide_outlines(job.id)
+            if not outlines:
+                raise RuntimeError("Planned job is missing slide outlines.")
+            await self._render_outlines(
+                job,
+                template,
+                outlines,
+                bundle,
+                job.warnings or [],
+            )
+        except Exception as exc:
+            await self.store.update_job(
+                job.id,
+                status="error",
+                error_message=str(exc),
+                completed_at=self._timestamp(),
+            )
+
+    async def _render_outlines(
+        self,
+        job: JobRecord,
+        template: TemplateProfile,
+        outlines: list[SlideOutline],
+        bundle: DocumentBundle,
+        warnings: list[dict],
+    ) -> None:
+        await self.store.update_job(
+            job.id, status="generating", progress=0.55, warnings_json=warnings
+        )
+        working_dir = self.storage.job_dir(job.id)
+        working_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.storage.output_pptx_path(job.id)
+        strict_warnings = self.builder.build_deck(template, outlines, output_path, working_dir)
+        if strict_warnings:
+            warnings = self._merge_warnings(warnings, strict_warnings)
+            await self.store.update_job(job.id, warnings_json=warnings)
+
+        await self.store.update_job(job.id, status="qa", progress=0.75)
+        qa_round = 0
+        if self._run_visual_qa(job):
+            qa_result, images = self.qa_agent.inspect_deck(
+                output_path, working_dir / "preview", outlines
+            )
+            self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
+            seen_actionable_signatures: set[tuple[tuple[int | None, str, str], ...]] = set()
+            while qa_round < self.settings.qa_max_rounds:
+                actionable_signature = self._actionable_qa_signature(qa_result)
+                if (
+                    not actionable_signature
+                    or actionable_signature in seen_actionable_signatures
+                ):
+                    break
+                seen_actionable_signatures.add(actionable_signature)
+                qa_round += 1
+                outlines = self._apply_qa_fixes(outlines, qa_result)
+                outlines, consulting_warnings = self._run_consulting_qa_repairs(
+                    outlines, bundle
+                )
+                if consulting_warnings:
+                    warnings = self._merge_warnings(warnings, consulting_warnings)
+                    await self.store.update_job(job.id, warnings_json=warnings)
+                await self._persist_slide_outlines(outlines, qa_result)
+                strict_warnings = self.builder.build_deck(
+                    template, outlines, output_path, working_dir
+                )
+                if strict_warnings:
+                    warnings = self._merge_warnings(warnings, strict_warnings)
+                    await self.store.update_job(job.id, warnings_json=warnings)
+                qa_result, images = self.qa_agent.inspect_deck(
+                    output_path, working_dir / "preview", outlines
+                )
+                self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
+        else:
+            qa_result, images = self.qa_agent.inspect_deck(
+                output_path,
+                working_dir / "preview",
+                outlines,
+            )
+            self.storage.save_qa_log(job.id, qa_round, qa_result.model_dump_json())
+        self.storage.save_preview_images(job.id, images)
+        pdf_path = self.qa_agent.export_pdf(output_path, working_dir)
+        if pdf_path and pdf_path != output_path.with_suffix(".pdf"):
+            output_path.with_suffix(".pdf").write_bytes(pdf_path.read_bytes())
+
+        await self.store.update_job(
+            job.id,
+            status="done",
+            progress=1.0,
+            qa_rounds=qa_round,
+            result_file=output_path.as_posix(),
+            preview_dir=(working_dir / "preview").as_posix(),
+            completed_at=self._timestamp(),
+        )
 
     async def regenerate_slide(
         self,
@@ -352,6 +408,12 @@ class JobOrchestrator:
         if job.config_json and "run_visual_qa" in job.config_json:
             return bool(job.config_json["run_visual_qa"])
         return True
+
+    def _plan_only(self, job: JobRecord) -> bool:
+        return bool(job.config_json and job.config_json.get("plan_only"))
+
+    def _render_from_plan(self, job: JobRecord) -> bool:
+        return bool(job.config_json and job.config_json.get("render_from_plan"))
 
     def _build_deep_planner(self) -> ContentPlanner | None:
         if self.settings.llm_provider != "openai_compatible":

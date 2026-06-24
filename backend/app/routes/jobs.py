@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
@@ -17,6 +18,16 @@ from app.services.job_queue import JobQueue
 from app.services.orchestrator import JobOrchestrator
 
 router = APIRouter()
+
+
+class OutlineEdit(BaseModel):
+    slide_index: int
+    action_title: Optional[str] = None
+    subheading: Optional[str] = None
+
+
+class OutlinePatchRequest(BaseModel):
+    slides: list[OutlineEdit]
 
 
 def _get_store(request: Request) -> SQLiteStore:
@@ -43,6 +54,7 @@ async def create_job(
     quality_profile: str = Form("balanced"),
     length_strategy: str = Form("auto"),
     run_visual_qa: bool = Form(True),
+    plan_only: bool = Form(False),
     instructions: str = Form(""),
     documents: Optional[list[UploadFile]] = File(None),
     store: SQLiteStore = Depends(_get_store),
@@ -63,6 +75,7 @@ async def create_job(
     length_strategy = _form_value(length_strategy, "auto").strip().lower() or "auto"
     if length_strategy not in {"auto", "concise", "expanded"}:
         raise HTTPException(status_code=422, detail="Invalid length strategy.")
+    plan_only_value = _form_bool(plan_only, False)
 
     template = None
     if generation_mode == "freeform":
@@ -74,6 +87,8 @@ async def create_job(
         if not template:
             raise HTTPException(status_code=404, detail="Template not found.")
         generation_mode = generation_mode or template.type
+    if plan_only_value and generation_mode == "strict":
+        raise HTTPException(status_code=422, detail="Plan preview is only supported for generated modes.")
 
     job_id = str(uuid.uuid4())
     job = JobRecord(
@@ -86,6 +101,7 @@ async def create_job(
             "quality_profile": quality_profile,
             "length_strategy": length_strategy,
             "run_visual_qa": _form_bool(run_visual_qa, True),
+            "plan_only": plan_only_value,
         },
         status="queued",
         progress=0.0,
@@ -151,8 +167,86 @@ async def get_job_status(
         preview_images=preview_images,
         qa_summary=_qa_summary(qa_payload),
         qa_issues=_qa_issues(qa_payload),
+        qa_history=_qa_history(storage, job_id),
         planning_summary=_planning_summary(storage, job_id),
     )
+
+
+@router.post("/jobs/{job_id}/render", response_model=JobRecord)
+async def render_planned_job(
+    job_id: str,
+    store: SQLiteStore = Depends(_get_store),
+    job_queue: JobQueue = Depends(_get_job_queue),
+) -> JobRecord:
+    job = await store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status != "planned":
+        raise HTTPException(status_code=409, detail="Only planned jobs can be rendered.")
+    config = dict(job.config_json or {})
+    config["plan_only"] = False
+    config["render_from_plan"] = True
+    await store.update_job(
+        job_id,
+        status="queued",
+        progress=0.5,
+        config_json=config,
+        result_file=None,
+        preview_dir=None,
+        error_message=None,
+        completed_at=None,
+    )
+    await job_queue.enqueue(job_id)
+    updated = await store.get_job(job_id)
+    return updated or job
+
+
+@router.get("/jobs/{job_id}/outline")
+async def get_job_outline(
+    job_id: str,
+    store: SQLiteStore = Depends(_get_store),
+) -> dict[str, list[dict]]:
+    job = await store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    outlines = await store.list_slide_outlines(job_id)
+    return {"slides": [_outline_payload(outline) for outline in outlines]}
+
+
+@router.patch("/jobs/{job_id}/outline")
+async def update_job_outline(
+    job_id: str,
+    patch: OutlinePatchRequest,
+    store: SQLiteStore = Depends(_get_store),
+) -> dict[str, list[dict]]:
+    job = await store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status != "planned":
+        raise HTTPException(status_code=409, detail="Only planned job outlines can be edited.")
+    outlines = await store.list_slide_outlines(job_id)
+    by_index = {outline.slide_index: outline for outline in outlines}
+    for edit in patch.slides:
+        outline = by_index.get(edit.slide_index)
+        if outline is None:
+            continue
+        content = dict(outline.content_json)
+        label = outline.label
+        if edit.action_title is not None:
+            title = edit.action_title.strip()
+            if title:
+                label = title
+                content["action_title"] = title
+                content["title"] = title
+        if edit.subheading is not None:
+            content["subheading"] = edit.subheading.strip()
+        await store.update_slide_outline(
+            outline.id,
+            label=label,
+            content_json=content,
+        )
+    outlines = await store.list_slide_outlines(job_id)
+    return {"slides": [_outline_payload(outline) for outline in outlines]}
 
 
 @router.get("/jobs/{job_id}/planning/{artifact_name}")
@@ -187,6 +281,31 @@ def _latest_qa_payload(storage: LocalStorage, job_id: str) -> dict | None:
         return json.loads(logs[-1].read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _qa_history(storage: LocalStorage, job_id: str) -> list[dict]:
+    qa_dir = storage.job_dir(job_id) / "qa"
+    if not qa_dir.exists():
+        return []
+    history = []
+    for log_path in sorted(qa_dir.glob("round-*.json")):
+        try:
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = None
+        round_label = log_path.stem.removeprefix("round-")
+        try:
+            round_number = int(round_label)
+        except ValueError:
+            round_number = len(history)
+        history.append(
+            {
+                "round": round_number,
+                "passed": bool(payload.get("passed")) if isinstance(payload, dict) else False,
+                "summary": _qa_summary(payload if isinstance(payload, dict) else None),
+            }
+        )
+    return history
 
 
 def _planning_summary(storage: LocalStorage, job_id: str) -> dict:
@@ -258,6 +377,33 @@ def _qa_summary(payload: dict | None) -> dict:
         "warning": sum(1 for issue in issues if issue.severity == "WARNING"),
         "info": sum(1 for issue in issues if issue.severity == "INFO"),
         "count": len(issues),
+    }
+
+
+def _outline_payload(outline) -> dict:
+    content = outline.content_json or {}
+    layout = outline.layout_json or {}
+    exhibit = content.get("exhibit_spec")
+    issues = []
+    if isinstance(outline.qa_issues_json, dict):
+        raw_issues = outline.qa_issues_json.get("issues", [])
+        if isinstance(raw_issues, list):
+            issues = raw_issues
+    return {
+        "slide_index": outline.slide_index,
+        "mode": outline.mode,
+        "label": outline.label,
+        "action_title": content.get("action_title") or content.get("title") or outline.label,
+        "subheading": content.get("subheading") or "",
+        "narrative_role": content.get("narrative_role") or layout.get("narrative_role"),
+        "layout": layout.get("layout"),
+        "archetype": content.get("archetype") or layout.get("archetype"),
+        "exhibit_type": exhibit.get("type") if isinstance(exhibit, dict) else None,
+        "sources": content.get("sources") or [],
+        "source_refs": content.get("source_refs") or [],
+        "speaker_notes": content.get("speaker_notes") or "",
+        "qa_status": outline.qa_status,
+        "qa_issues": issues,
     }
 
 
