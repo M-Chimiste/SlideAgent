@@ -32,6 +32,19 @@ class ExhibitCompiler:
                 return self._comparison_from_table(table)
             return self._reference_from_table(table)
         bullets = self._section_bullets(section)
+        if normalized == "callouts":
+            return {"type": "callouts", "points": self._ensure_items(bullets, 3)[:3]}
+        if normalized == "icon_rows":
+            items = bullets[:4] if len(bullets) >= 3 else self._ensure_items(bullets, 3)
+            return {"type": "icon_rows", "items": items}
+        if normalized == "two_column":
+            items = bullets[:4] if len(bullets) >= 3 else self._ensure_items(bullets, 3)
+            return {
+                "type": "two_column",
+                "left": items[:2],
+                "right": items[2:4] or items[:2],
+                "points": items[:4],
+            }
         if normalized == "comparison_table":
             return self._comparison_from_bullets(bullets)
         if normalized == "dependency_map":
@@ -42,17 +55,31 @@ class ExhibitCompiler:
             return {
                 "type": "checklist",
                 "items": [
-                    {"action": bullet, "owner": "Owner", "timing": "Next"}
-                    for bullet in self._ensure_items(bullets, 3)
+                    {
+                        "action": self._action_from_text(bullet),
+                        "owner": self._owner_for_action(bullet, index),
+                        "timing": self._timing_for_action(bullet, index),
+                    }
+                    for index, bullet in enumerate(self._ensure_items(bullets, 3))
                 ],
             }
         if normalized in {"table_reference", "reference"} or role == "reference":
+            triggers = [
+                "Evidence changes",
+                "Review standard changes",
+                "Workflow changes",
+                "Ownership changes",
+            ]
             return {
                 "type": "reference_table",
-                "columns": ["Item", "Implication", "Update trigger"],
+                "columns": ["Artifact", "Purpose", "Update trigger"],
                 "rows": [
-                    [self._short_label(bullet), bullet, "When conditions change"]
-                    for bullet in self._ensure_items(bullets, 3)
+                    [
+                        self._short_label(bullet),
+                        self._complete_fragment(bullet),
+                        triggers[index % len(triggers)],
+                    ]
+                    for index, bullet in enumerate(self._ensure_items(bullets, 3))
                 ],
             }
         if normalized == "anti_patterns":
@@ -90,7 +117,7 @@ class ExhibitCompiler:
                 "type": "recommendation",
                 "recommendation": bullets[0] if bullets else "Commit to the recommended operating change.",
                 "next_steps": self._ensure_items(bullets[1:], 3),
-                "decision_ask": "Confirm owner, timing, and success measure.",
+                "decision_ask": "Approve the recommended pilot with named owners and a review date.",
             }
         return {
             "type": "reference_table",
@@ -165,6 +192,35 @@ class ExhibitCompiler:
                     ],
                 )
             ]
+        if exhibit_type == "callouts":
+            points = exhibit.get("points", [])
+            return [
+                ContentBlock(
+                    type="callout",
+                    body=[str(item) for item in points if str(item).strip()],
+                )
+            ]
+        if exhibit_type == "icon_rows":
+            items = exhibit.get("items", [])
+            return [
+                ContentBlock(
+                    type="bullets",
+                    body=[str(item) for item in items if str(item).strip()],
+                )
+            ]
+        if exhibit_type == "two_column":
+            points = exhibit.get("points", [])
+            if not isinstance(points, list):
+                points = [
+                    *(exhibit.get("left", []) if isinstance(exhibit.get("left"), list) else []),
+                    *(exhibit.get("right", []) if isinstance(exhibit.get("right"), list) else []),
+                ]
+            return [
+                ContentBlock(
+                    type="bullets",
+                    body=[str(item) for item in points if str(item).strip()],
+                )
+            ]
         if exhibit_type == "dependency_map":
             middle = exhibit.get("middle_nodes", [])
             body = [
@@ -203,7 +259,7 @@ class ExhibitCompiler:
             "type": "dependency_map",
             "left_node": left,
             "middle_nodes": middle,
-            "right_outcome": "Reliable output",
+            "right_outcome": f"{title} decision" if title else "Source-backed decision",
             "connector_labels": ["feeds", "constrains", "updates"],
         }
 
@@ -211,25 +267,12 @@ class ExhibitCompiler:
         text = section.content if section else ""
         bullets = []
         for line in re.split(r"\n+|(?<=[.!?])\s+", text):
-            cleaned = " ".join(line.strip(" -\t").split())
+            cleaned = self._clean_source_item(line)
             if cleaned:
-                bullets.append(self._truncate(cleaned, 130))
+                bullets.append(self._complete_fragment(self._truncate(cleaned, 130)))
             if len(bullets) >= 5:
                 break
         if bullets:
-            subject = self._short_label(
-                self._clean_section_title(section.title if section else "Source evidence")
-            ).lower()
-            source_specific = [
-                f"Use {subject} as the operating reference.",
-                f"Connect {subject} to explicit review gates.",
-                f"Refresh {subject} when assumptions change.",
-            ]
-            for item in source_specific:
-                if len(bullets) >= 4:
-                    break
-                if item not in bullets:
-                    bullets.append(item)
             return bullets
         title = section.title if section else "Decision"
         return [f"Clarify the implication of {self._clean_section_title(title)}."]
@@ -321,7 +364,7 @@ class ExhibitCompiler:
     def _reference_from_table(self, table: DocumentTable) -> dict[str, Any]:
         return {
             "type": "reference_table",
-            "columns": table.headers[:4] or ["Item", "Detail"],
+            "columns": table.headers[:4] or ["Artifact", "Detail"],
             "rows": [row[:4] for row in table.rows[:6]],
         }
 
@@ -329,51 +372,179 @@ class ExhibitCompiler:
         items = self._ensure_items(bullets, 3)
         return {
             "type": "comparison_table",
-            "columns": ["Dimension", "Current state", "Target state"],
+            "columns": ["Evidence signal", "Unmanaged pattern", "Harness move"],
             "rows": [
                 {
                     "label": self._short_label(item),
-                    "values": [self._truncate(item, 46), self._behavior_from_text(item)],
+                    "values": [
+                        self._comparison_current_state(item, index),
+                        self._comparison_target_move(item, index),
+                    ],
                 }
-                for item in items[:4]
+                for index, item in enumerate(items[:4])
             ],
         }
 
+    def _comparison_current_state(self, text: str, index: int) -> str:
+        lowered = str(text).lower()
+        if any(token in lowered for token in ("manual", "label", "human")):
+            return "Manual evaluation effort."
+        if any(token in lowered for token in ("synthetic", "generate", "frontier model")):
+            return "Synthetic shortcut."
+        if any(token in lowered for token in ("contract", "specif", "question")):
+            return "Implicit expectations."
+        if any(token in lowered for token in ("harness", "interface", "execution")):
+            return "Unstandardized execution."
+        if any(token in lowered for token in ("data catalog", "schema", "metadata")):
+            return "Manual discovery bottleneck."
+        if any(token in lowered for token in ("ground truth", "evidence", "validated")):
+            return "Unverified benchmark assumption."
+        if any(token in lowered for token in ("scale", "scalable", "production")):
+            return "Ad hoc scaling path."
+        return [
+            "Unverified claim.",
+            "Loose operating implication.",
+            "Unassigned review requirement.",
+            "Unclear scale condition.",
+        ][index % 4]
+
+    def _comparison_target_move(self, text: str, index: int) -> str:
+        lowered = str(text).lower()
+        if any(token in lowered for token in ("manual", "label", "human")):
+            return "Shift judgment to benchmark design."
+        if any(token in lowered for token in ("synthetic", "generate", "frontier model")):
+            return "Ground tests in validated workflows."
+        if any(token in lowered for token in ("contract", "specif", "question")):
+            return "Make expectations explicit before execution."
+        if any(token in lowered for token in ("harness", "interface", "execution")):
+            return "Standardize execution through a harness."
+        if any(token in lowered for token in ("data catalog", "schema", "metadata")):
+            return "Connect enterprise metadata to discovery."
+        if any(token in lowered for token in ("ground truth", "evidence", "validated")):
+            return "Bind the benchmark to inspected evidence."
+        if any(token in lowered for token in ("scale", "scalable", "production")):
+            return "Codify the review gate before scaling."
+        return [
+            "Turn the claim into a review gate.",
+            "Assign evidence ownership before scaling.",
+            "Bind the decision to source-backed checks.",
+            "Refresh the benchmark when evidence changes.",
+        ][index % 4]
+
     def _matrix_from_bullets(self, bullets: list[str]) -> dict[str, Any]:
         items = self._ensure_items(bullets, 4)
-        labels = ["High impact / high readiness", "High impact / low readiness", "Low impact / high readiness", "Low impact / low readiness"]
+        labels = [self._short_label(item) for item in items[:4]]
         return {
             "type": "matrix_2x2",
-            "x_axis": "Readiness",
-            "y_axis": "Impact",
+            "x_axis": "Operational clarity",
+            "y_axis": "Evidence strength",
             "quadrants": [
-                {"label": labels[index], "description": self._truncate(items[index], 78)}
+                {
+                    "label": labels[index],
+                    "description": self._complete_fragment(self._truncate(items[index], 78)),
+                }
                 for index in range(4)
             ],
         }
 
     def _ensure_items(self, items: list[str], count: int) -> list[str]:
-        cleaned = [item for item in items if item]
+        cleaned = [self._clean_source_item(item) for item in items if self._clean_source_item(item)]
         while len(cleaned) < count:
+            subject = cleaned[0] if cleaned else "Source claim"
+            subject = self._short_label(subject)
             cleaned.append(
                 [
-                    "Name the decision owner.",
-                    "Confirm the evidence standard.",
-                    "Set the review cadence.",
-                    "Track changes as conditions shift.",
+                    f"{subject} evidence to inspect.",
+                    f"{subject} condition to validate.",
+                    f"{subject} implication to resolve.",
+                    f"{subject} change to track.",
                 ][len(cleaned) % 4]
             )
         return cleaned[: max(count, len(cleaned))]
+
+    def _clean_source_item(self, text: str) -> str:
+        cleaned = re.sub(
+            r"\(\s*owner\s*/\s*next\s*\)|\bowner\s*/\s*next\b",
+            "",
+            str(text),
+            flags=re.IGNORECASE,
+        )
+        convert_match = re.match(
+            r"\s*convert\s+(.+?)\s+into\s+an?(?:\s+owned)?(?:\s+action)?\.?\s*$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if convert_match:
+            cleaned = convert_match.group(1)
+        if "|" in cleaned:
+            cleaned = self._pipe_row_to_display_text(cleaned)
+        return " ".join(cleaned.strip(" -\t:;").split())
+
+    def _pipe_row_to_display_text(self, text: str) -> str:
+        cells = [
+            " ".join(cell.strip(" -:;").split())
+            for cell in str(text).split("|")
+            if cell.strip(" -:;")
+        ]
+        header_cells = {
+            "artifact",
+            "purpose",
+            "update trigger",
+            "signal",
+            "implication",
+            "action",
+            "owner",
+            "timing",
+        }
+        meaningful = [
+            cell
+            for cell in cells
+            if cell.casefold() not in header_cells
+            and not re.fullmatch(r"-+", cell)
+        ]
+        if not meaningful:
+            return ""
+        return max(meaningful, key=lambda cell: (len(cell.split()), len(cell)))
 
     def _looks_ordered(self, bullets: list[str]) -> bool:
         text = " ".join(bullets).lower()
         return any(token in text for token in ("first", "then", "next", "finally", "step", "phase"))
 
     def _behavior_from_text(self, text: str) -> str:
-        cleaned = self._truncate(text, 62).rstrip(".")
+        cleaned = self._complete_fragment(self._truncate(text, 86)).rstrip(".")
         if re.match(r"^(define|assign|confirm|review|track|build|use|create)\b", cleaned, re.IGNORECASE):
             return cleaned + "."
-        return f"Convert {cleaned[:1].lower() + cleaned[1:]} into an owned action."
+        return cleaned + "."
+
+    def _action_from_text(self, text: str) -> str:
+        cleaned = self._complete_fragment(self._truncate(text, 96)).rstrip(".")
+        if re.match(r"^(define|assign|confirm|review|track|build|use|create|set|document)\b", cleaned, re.IGNORECASE):
+            return cleaned + "."
+        return cleaned + "."
+
+    def _owner_for_action(self, text: str, index: int) -> str:
+        lowered = str(text).lower()
+        if any(token in lowered for token in ("contract", "success", "semantic", "question")):
+            return "Contract owner"
+        if any(token in lowered for token in ("harness", "execute", "workflow", "operational")):
+            return "Harness lead"
+        if any(token in lowered for token in ("data", "catalog", "schema", "metadata", "source")):
+            return "Data owner"
+        if any(token in lowered for token in ("review", "quality", "evidence", "validation")):
+            return "Review lead"
+        return ["Sponsor", "Product lead", "Evaluation lead", "Ops lead"][index % 4]
+
+    def _timing_for_action(self, text: str, index: int) -> str:
+        lowered = str(text).lower()
+        if any(token in lowered for token in ("define", "contract", "question", "what goes in")):
+            return "Define"
+        if any(token in lowered for token in ("execute", "harness", "pilot", "workflow")):
+            return "Pilot"
+        if any(token in lowered for token in ("review", "validation", "evidence", "quality")):
+            return "Review"
+        if any(token in lowered for token in ("scale", "deployment", "production", "catalog")):
+            return "Scale"
+        return ["Now", "Next", "Pilot", "Scale"][index % 4]
 
     def _short_label(self, text: str) -> str:
         words = re.sub(r"[^A-Za-z0-9\s%-]", "", str(text)).split()
@@ -386,6 +557,59 @@ class ExhibitCompiler:
 
     def _truncate(self, text: str, limit: int) -> str:
         cleaned = " ".join(str(text).split())
+        if cleaned.count('"') % 2 == 1:
+            return ""
         if len(cleaned) <= limit:
-            return cleaned
-        return cleaned[:limit].rsplit(" ", 1)[0].rstrip(".,;:")
+            return self._complete_fragment(cleaned)
+        truncated = cleaned[:limit].rsplit(" ", 1)[0].rstrip(".,;:")
+        if truncated.count('"') % 2 == 1:
+            return ""
+        return self._complete_fragment(truncated)
+
+    def _complete_fragment(self, text: str) -> str:
+        cleaned = " ".join(str(text).split()).strip(" ,;:")
+        trailing = {
+            "a",
+            "an",
+            "and",
+            "as",
+            "by",
+            "for",
+            "from",
+            "in",
+            "into",
+            "of",
+            "or",
+            "the",
+            "their",
+            "through",
+            "to",
+            "with",
+            "contain",
+            "contains",
+            "consist",
+            "consists",
+            "create",
+            "determine",
+            "generate",
+            "has",
+            "have",
+            "include",
+            "includes",
+            "need",
+            "needs",
+            "provide",
+            "provides",
+            "requires",
+            "specified",
+            "test",
+            "treat",
+        }
+        words = cleaned.split()
+        while words and words[-1].lower().strip(".") in trailing:
+            words.pop()
+        cleaned = " ".join(words).strip(" ,;:")
+        cleaned = re.sub(r"\s+\((?:e\.g|i\.e)\.?$", "", cleaned, flags=re.IGNORECASE)
+        if not cleaned:
+            return "Clarify the source evidence."
+        return cleaned if cleaned.endswith((".", "?", "!")) else f"{cleaned}."

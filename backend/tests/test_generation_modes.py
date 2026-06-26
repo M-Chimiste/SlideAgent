@@ -5,6 +5,7 @@ from io import BytesIO
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from lxml import etree
 from openpyxl import load_workbook
 from pptx import Presentation
@@ -19,10 +20,17 @@ from app.models.document import DocumentBundle, DocumentMetadata, DocumentMetric
 from app.models.generation import ContentBlock, DeckBlueprint, DeckSpec, GeneratedSlideSpec
 from app.models.outline import SlideOutline
 from app.models.planning import StoryMap
+from app.models.qa import QAIssue
 from app.models.template import SlideField, SlideSchema, SlideSpec, TemplateProfile
-from app.services.content_planner import ContentPlanner
+from app.services.content_planner import ContentPlanner, PlanningFailedError
+from app.services.design_agent import DesignAgent
 from app.services.document_ingester import DocumentIngester
+from app.services.authored_pptx_renderer import AuthoredPptxRenderer
+from app.services.generation_editing_contract import GenerationEditingContract
+from app.services.planning.exhibits import ExhibitCompiler
 from app.services.pptx_builder import PptxBuilder
+from app.services.pptx_renderer import DeterministicPptxRenderer
+from app.services.rendered_slide_audit import RenderedSlideAudit
 from app.services.strict_injector import StrictSlideInjector
 from app.services.template_analyzer import TemplateAnalyzer
 
@@ -74,6 +82,1290 @@ def _bundle(job_id: str = "job-1") -> DocumentBundle:
     )
 
 
+def test_visual_qa_repair_rewrites_bad_rendered_fragments_from_source() -> None:
+    source_id = "doc-1:section:why-not-synthetic"
+    bundle = DocumentBundle(
+        job_id="job-visual-repair",
+        sections=[
+            DocumentSection(
+                title="Why Not Simply Generate Synthetic Benchmarks?",
+                level=1,
+                content=(
+                    "Synthetic benchmark generation creates circular validation loops "
+                    "without grounding in operational reality. Source-grounded harnesses "
+                    "evaluate models against evidence that already matters to the organization."
+                ),
+                source_doc_id="doc-1",
+                source_id=source_id,
+            )
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            source_id: {
+                "label": "Bootstrapping Benchmarks > Why Not Simply Generate Synthetic Benchmarks?",
+                "type": "section",
+            }
+        },
+    )
+    outline = SlideOutline(
+        id="slide-1",
+        job_id=bundle.job_id,
+        slide_index=0,
+        mode="flexible",
+        label="Harness-centric design turns existing workflows into evaluation evidence",
+        content_json={
+            "action_title": "Harness-centric design turns existing workflows into evaluation evidence",
+            "subheading": "Source-backed repair case",
+            "archetype": "table_reference",
+            "source_refs": [source_id],
+            "sources": ["Uploaded source"],
+            "bullets": [
+                "Instead of looking",
+                "Connect the harness-centric",
+                "Make the harness-centric",
+            ],
+            "content_blocks": [
+                {
+                    "type": "table",
+                    "body": [
+                        ["Artifact", "Purpose", "Update trigger"],
+                        ["Instead of looking", "Instead of looking at using models", "When conditions change"],
+                    ],
+                }
+            ],
+            "exhibit_spec": {
+                "type": "reference_table",
+                "columns": ["Artifact", "Purpose", "Update trigger"],
+                "rows": [
+                    ["Instead of looking", "Instead of looking at using models", "When conditions change"],
+                ],
+            },
+        },
+        layout_json={"layout": "table_reference", "archetype": "table_reference"},
+        created_at=_timestamp(),
+    )
+    issues = [
+        QAIssue(
+            severity="CRITICAL",
+            category="nonsensical copy",
+            message="The table content is nonsensical and incomplete.",
+            slide_index=0,
+        ),
+        QAIssue(
+            severity="CRITICAL",
+            category="cut-off text",
+            message="Text is cut off in multiple columns.",
+            slide_index=0,
+        ),
+    ]
+
+    repaired = ContentPlanner().repair_outlines_for_visual_qa([outline], issues, bundle)
+
+    content = json.dumps(repaired[0].content_json).lower()
+    assert repaired[0].layout_json["layout"] == "callouts"
+    assert "synthetic benchmarks can create circular validation loops" in content
+    assert "source-grounded harnesses evaluate models" in content
+    assert "instead of looking" not in content
+    assert "when conditions change" not in content
+    assert "review evidence for" not in content
+    assert "diagram_spec" not in repaired[0].content_json
+
+
+def test_visual_qa_repair_ignores_visual_only_warnings() -> None:
+    source_id = "doc-1:section:visual-only"
+    bundle = DocumentBundle(
+        job_id="job-visual-only",
+        sections=[
+            DocumentSection(
+                title="Harness Interface",
+                level=1,
+                content=(
+                    "The harness interface standardizes execution, records evidence, "
+                    "and keeps benchmark runs comparable across domains."
+                ),
+                source_doc_id="doc-1",
+                source_id=source_id,
+            )
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            source_id: {
+                "label": "Bootstrapping Benchmarks > Harness Interface",
+                "type": "section",
+            }
+        },
+    )
+    outline = SlideOutline(
+        id="slide-visual-only",
+        job_id=bundle.job_id,
+        slide_index=0,
+        mode="flexible",
+        label="Harness interfaces standardize benchmark execution across domains",
+        content_json={
+            "action_title": "Harness interfaces standardize benchmark execution across domains",
+            "subheading": "Operational execution",
+            "narrative_role": "evidence",
+            "archetype": "checklist",
+            "source_refs": [source_id],
+            "sources": ["Uploaded source"],
+            "bullets": [
+                "Standardize execution across domains.",
+                "Record evidence beside benchmark runs.",
+                "Keep repeated runs comparable.",
+            ],
+            "exhibit_spec": {
+                "type": "checklist",
+                "items": [
+                    {"action": "Standardize execution across domains."},
+                    {"action": "Record evidence beside benchmark runs."},
+                    {"action": "Keep repeated runs comparable."},
+                ],
+            },
+        },
+        layout_json={"layout": "checklist", "archetype": "checklist"},
+        created_at=_timestamp(),
+    )
+    issues = [
+        QAIssue(
+            severity="WARNING",
+            category="spacing",
+            message="The slide has generous spacing and could use stronger visual balance.",
+            slide_index=0,
+        ),
+        QAIssue(
+            severity="INFO",
+            category="nonsensical_copy",
+            message="The phrase is a little vague but still readable.",
+            slide_index=0,
+        ),
+    ]
+
+    repaired = ContentPlanner().repair_outlines_for_visual_qa([outline], issues, bundle)
+
+    assert repaired[0].content_json["bullets"] == outline.content_json["bullets"]
+    assert repaired[0].layout_json["layout"] == "checklist"
+    assert "visual_qa_source_repair" not in repaired[0].content_json
+
+
+def test_visual_qa_repair_prefers_real_evidence_over_overview_section() -> None:
+    overview_ref = "doc-1:section:overview"
+    summary_ref = "doc-1:section:executive-summary"
+    bundle = DocumentBundle(
+        job_id="job-overview-repair",
+        sections=[
+            DocumentSection(
+                title="Overview",
+                level=1,
+                content="Bootstrapping the Creation of Testing Benchmarks",
+                source_doc_id="doc-1",
+                source_id=overview_ref,
+            ),
+            DocumentSection(
+                title="Executive Summary",
+                level=1,
+                content=(
+                    "Current benchmarking is constrained by saturation, high labeling cost, "
+                    "and weak fit to enterprise use cases. Agent-assisted discovery can find "
+                    "implicit ground truth inside already validated organizational workflows."
+                ),
+                source_doc_id="doc-1",
+                source_id=summary_ref,
+            ),
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            overview_ref: {"label": "Bootstrapping Benchmarks > Overview", "type": "section"},
+            summary_ref: {"label": "Bootstrapping Benchmarks > Executive Summary", "type": "section"},
+        },
+    )
+    outline = SlideOutline(
+        id="slide-overview",
+        job_id=bundle.job_id,
+        slide_index=4,
+        mode="flexible",
+        label="Use real use-case benchmarks instead of generic public evaluations",
+        content_json={
+            "action_title": "Use real use-case benchmarks instead of generic public evaluations",
+            "subheading": "Evidence repair case",
+            "narrative_role": "evidence",
+            "archetype": "callouts",
+            "source_refs": [overview_ref, summary_ref],
+            "sources": ["Uploaded source"],
+            "bullets": ["Bootstrapping the Creation"],
+            "exhibit_spec": {"type": "callouts", "points": ["Bootstrapping the Creation"]},
+        },
+        layout_json={"layout": "callouts", "archetype": "callouts"},
+        created_at=_timestamp(),
+    )
+    issues = [
+        QAIssue(
+            severity="CRITICAL",
+            category="content_quality",
+            message="Rendered slide contains source-fragment text instead of authored copy.",
+            slide_index=4,
+        )
+    ]
+
+    repaired = ContentPlanner().repair_outlines_for_visual_qa([outline], issues, bundle)
+
+    content = json.dumps(repaired[0].content_json).lower()
+    assert repaired[0].content_json["source_refs"] == [summary_ref]
+    assert "current benchmarking is constrained" in content
+    assert "bootstrapping the creation" not in content
+
+
+def test_authored_renderer_keeps_source_repair_slides_out_of_fake_anti_patterns(tmp_path) -> None:
+    outline = SlideOutline(
+        id="slide-source-repair",
+        job_id="job-render-repair",
+        slide_index=2,
+        mode="flexible",
+        label="Use source-grounded harnesses instead of synthetic benchmark shortcuts",
+        content_json={
+            "action_title": "Use source-grounded harnesses instead of synthetic benchmark shortcuts",
+            "subheading": "Source-backed repair case",
+            "narrative_role": "problem",
+            "archetype": "callouts",
+            "visual_qa_source_repair": True,
+            "bullets": [
+                "Synthetic benchmarks can create circular validation loops without operational grounding.",
+                "Source-grounded harnesses evaluate models against evidence that already matters.",
+                "Benchmark quality improves when test cases come from real workflows.",
+            ],
+            "exhibit_spec": {
+                "type": "callouts",
+                "points": [
+                    "Synthetic benchmarks can create circular validation loops without operational grounding.",
+                    "Source-grounded harnesses evaluate models against evidence that already matters.",
+                    "Benchmark quality improves when test cases come from real workflows.",
+                ],
+            },
+            "source_refs": ["doc-1:section:synthetic"],
+            "sources": ["Bootstrapping Benchmarks > Synthetic Benchmarks"],
+        },
+        layout_json={"layout": "callouts", "archetype": "callouts"},
+        created_at=_timestamp(),
+    )
+    pptx_path = tmp_path / "source-repair.pptx"
+
+    authored = AuthoredPptxRenderer().author_outlines([outline])
+    AuthoredPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, authored)
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"]).lower()
+    assert authored[0].layout_json["composition_family"] != "source_repair_cards"
+    assert "better move" not in visible
+    assert "symptom:" not in visible
+    assert "synthetic benchmarks can create circular validation loops" in visible
+    assert not issues
+
+
+def test_anti_pattern_renderer_rejects_truncated_benchmark_fragments(tmp_path) -> None:
+    outline = SlideOutline(
+        id="anti-pattern-fragments",
+        job_id="job-render-fragments",
+        slide_index=0,
+        mode="flexible",
+        label="Synthetic benchmarks cannot substitute for validated operating evidence",
+        content_json={
+            "action_title": "Synthetic benchmarks cannot substitute for validated operating evidence",
+            "subheading": "Show the failure modes that put benchmark quality at risk.",
+            "narrative_role": "problem",
+            "archetype": "anti_patterns",
+            "bullets": [
+                "Synthetic benchmarks can create circular validation loops without operational grounding.",
+                "Source-grounded harnesses evaluate models against evidence that already matters.",
+                "Benchmark quality improves when test cases come from real workflows.",
+            ],
+            "exhibit_spec": {
+                "type": "anti_patterns",
+                "patterns": [
+                    {
+                        "name": "Synthetic benchmarks can",
+                        "symptom": "Synthetic benchmarks can create circular validation loops without",
+                        "better_behavior": "Add a durable rule.",
+                    },
+                    {
+                        "name": "Source-grounded harnesses",
+                        "symptom": "Source-grounded harnesses evaluate models against evidence that already",
+                        "better_behavior": "Add a durable rule.",
+                    },
+                    {
+                        "name": "Benchmark quality improves",
+                        "symptom": "Benchmark quality improves when test cases come from real workflows rather",
+                        "better_behavior": "Add a durable rule.",
+                    },
+                ],
+            },
+            "source_refs": ["doc-1:section:synthetic"],
+            "sources": ["Bootstrapping Benchmarks > Synthetic Benchmarks"],
+        },
+        layout_json={"layout": "anti_patterns", "archetype": "anti_patterns"},
+        created_at=_timestamp(),
+    )
+    pptx_path = tmp_path / "anti-pattern-fragments.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert "without Better move" not in visible
+    assert "already Better move" not in visible
+    assert "rather Better move" not in visible
+    assert "Synthetic benchmarks can\n" not in visible
+    assert not [issue for issue in issues if issue.category == "incomplete_content"]
+
+
+def test_evidence_wall_renderer_removes_short_duplicate_cards(tmp_path) -> None:
+    outline = _authored_card_outline(0, layout="icon_rows")
+    outline.content_json.update(
+        {
+            "action_title": "Implicit ground truth discovery makes benchmark creation scalable",
+            "subheading": "Use evidence that already exists in real workflows.",
+            "narrative_role": "evidence",
+            "bullets": [
+                "Implicit ground truth already exists in operational data, approved documents, replicated experiments, and decisions.",
+                "Agents can discover benchmark cases by finding evidence that real processes have already validated.",
+                "The discovery approach scales because it reuses enterprise evidence instead of relying on manual labeling.",
+                "Implicit ground truth",
+                "Agents",
+            ],
+            "exhibit_spec": {
+                "type": "icon_rows",
+                "items": [
+                    "Implicit ground truth already exists in operational data, approved documents, replicated experiments, and decisions.",
+                    "Agents can discover benchmark cases by finding evidence that real processes have already validated.",
+                    "The discovery approach scales because it reuses enterprise evidence instead of relying on manual labeling.",
+                    "Implicit ground truth",
+                    "Agents",
+                ],
+            },
+            "sources": ["Bootstrapping Benchmarks > The Case for Implicit Ground Truth Discovery"],
+        }
+    )
+    outline.layout_json["composition_family"] = "evidence_wall"
+    outline.layout_json["composition_signature"] = "evidence_wall|0|evidence|icon_rows"
+    pptx_path = tmp_path / "evidence-wall-clean.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert visible.count("Implicit ground truth") <= 2
+    assert visible.count("Agents") <= 2
+    assert "Can discover benchmark cases by finding evidence that real processes have already validated." in visible
+    assert not [issue for issue in issues if issue.category in {"cut-off-text", "incomplete_content"}]
+
+
+def test_closing_renderer_uses_action_steps_instead_of_source_excerpts(tmp_path) -> None:
+    outline = _authored_card_outline(0, layout="closing_recommendation")
+    outline.content_json.update(
+        {
+            "action_title": "Commit to models are only as trustworthy as our ability to evaluate them, necessitating benchmarks",
+            "subheading": "Move from benchmark theory to a governed operating pilot.",
+            "narrative_role": "closing",
+            "bullets": [
+                "Benchmarks have been a core foundation of data science and model development to help determine",
+                "histopathology segmentation) and the benchmarks themselves consisted of a training set",
+                "With the proliferation of large language models (LLMs) there has been a desire to test these",
+            ],
+            "exhibit_spec": {
+                "type": "recommendation",
+                "recommendation": "Benchmarks have been a core foundation of data science and model development to help determine",
+                "decision_ask": "Approve the first governed benchmark pilot.",
+                "next_steps": [
+                    "Historically, model development worked on specialized tasks in a single domain.",
+                    "histopathology segmentation) and the benchmarks themselves consisted of a training set",
+                    "With the proliferation of large language models (LLMs) there has been a desire to test these",
+                ],
+            },
+            "sources": ["Bootstrapping Benchmarks > Closing Remarks"],
+        }
+    )
+    outline.layout_json["layout"] = "closing_recommendation"
+    outline.layout_json["archetype"] = "closing_recommendation"
+    pptx_path = tmp_path / "closing-clean.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert "help determine" not in visible
+    assert "histopathology segmentation" not in visible
+    assert "desire to test these" not in visible
+    assert "Commit to a governed benchmark pilot" in visible
+    assert "Launch a governed benchmark pilot tied to validated source evidence." in visible
+    assert "Select one consequential internal benchmark pilot." in visible
+    assert "Bind test cases to validated source evidence." in visible
+    assert "Review failures before expanding coverage." in visible
+    assert not [issue for issue in issues if issue.category == "incomplete_content"]
+
+
+def test_reframe_comparison_renderer_avoids_generic_filler_copy(tmp_path) -> None:
+    outline = _authored_card_outline(0, layout="comparison_table")
+    outline.content_json.update(
+        {
+            "action_title": "Benchmark governance needs source-specific decision rules",
+            "subheading": "Compare evidence signals against the workflow change they require.",
+            "narrative_role": "implementation",
+            "bullets": [
+                "Evaluation claims need evidence tests before scaling.",
+                "Owners need documented evidence before rollout.",
+                "Benchmarks should refresh when source evidence changes.",
+            ],
+            "exhibit_spec": {
+                "type": "comparison_table",
+                "columns": ["Dimension", "Current state", "Target state"],
+                "rows": [
+                    ["Evidence", "Current readout", "Target move"],
+                    ["Ownership", "Source claim", "Managed behavior"],
+                    ["Refresh", "Operating implication", "Managed behavior"],
+                ],
+            },
+            "sources": ["Bootstrapping Benchmarks > The Questions the Model Contract Must Answer"],
+        }
+    )
+    outline.layout_json["composition_family"] = "reframe_comparison"
+    outline.layout_json["composition_signature"] = "reframe_comparison|0|implementation|comparison_table"
+    pptx_path = tmp_path / "reframe-no-filler.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert "operating move" not in visible.lower()
+    assert "Managed behavior" not in visible
+    assert "Show how each source signal changes the benchmark workflow." in visible
+    assert not [issue for issue in issues if issue.category == "renderer_filler_copy"]
+
+
+def test_authored_renderer_preserves_variety_for_source_rewritten_slides() -> None:
+    renderer = AuthoredPptxRenderer()
+    outlines = []
+    for index, layout in enumerate(
+        ["callouts", "checklist", "icon_rows", "quote_sidebar", "comparison_table", "process"],
+        start=1,
+    ):
+        outline = _authored_card_outline(index, layout=layout)
+        outline.content_json["visual_qa_source_repair"] = True
+        outlines.append(outline)
+
+    authored = renderer.author_outlines(outlines)
+    families = [outline.layout_json["composition_family"] for outline in authored]
+
+    assert "source_repair_cards" not in families
+    assert len(set(families)) >= 4
+
+
+def _authored_card_outline(index: int, layout: str = "icon_rows") -> SlideOutline:
+    return SlideOutline(
+        id=f"authored-card-{index}",
+        job_id="job-authored-cards",
+        slide_index=index,
+        mode="flexible",
+        label=f"Operating discipline slide {index}",
+        content_json={
+            "action_title": f"Operating discipline slide {index}",
+            "subheading": "Use source evidence, review gates, and ownership to make AI work reliable.",
+            "narrative_role": "evidence",
+            "archetype": layout,
+            "bullets": [
+                "Persist source context before starting a new generation session.",
+                "Define acceptance criteria before asking the model to produce changes.",
+                "Review output against evidence before updating project memory.",
+                "Name the owner who will keep the workflow current.",
+            ],
+            "exhibit_spec": {
+                "type": "callouts",
+                "points": [
+                    "Persist source context before starting a new generation session.",
+                    "Define acceptance criteria before asking the model to produce changes.",
+                    "Review output against evidence before updating project memory.",
+                    "Name the owner who will keep the workflow current.",
+                ],
+            },
+        },
+        layout_json={"layout": layout, "archetype": layout},
+        created_at=_timestamp(),
+    )
+
+
+def test_authored_renderer_assigns_distinct_card_composition_families() -> None:
+    renderer = AuthoredPptxRenderer()
+
+    authored = renderer.author_outlines(
+        [_authored_card_outline(index) for index in range(1, 5)]
+    )
+    families = [outline.layout_json["composition_family"] for outline in authored]
+
+    assert "why_it_matters_cards" in families
+    assert "challenge_cards" in families
+    assert "evidence_wall" in families
+    assert "toolkit_grid" in families
+    assert len(set(families)) == 4
+    assert len({outline.layout_json["composition_signature"] for outline in authored}) == 4
+
+
+def test_authored_renderer_repairs_repeated_challenge_rhythm() -> None:
+    outlines = []
+    for index in range(8):
+        outline = _authored_card_outline(index, layout="callouts")
+        outline.content_json["narrative_role"] = "problem"
+        outlines.append(outline)
+
+    authored = AuthoredPptxRenderer().author_outlines(outlines)
+    families = [outline.layout_json["composition_family"] for outline in authored]
+    card_count = sum(
+        1
+        for family in families
+        if family in AuthoredPptxRenderer().card_like_families
+    )
+    contract = GenerationEditingContract().build(_template("freeform"), authored)
+    requirement_status = {
+        item["id"]: item["status"] for item in contract["requirements"]
+    }
+
+    assert not any(left == right for left, right in zip(families, families[1:]))
+    assert card_count / len(families) <= 0.46
+    assert any(outline.layout_json.get("rhythm_repair", {}).get("applied") for outline in authored)
+    assert requirement_status["avoid_adjacent_repetition"] == "pass"
+    assert requirement_status["avoid_card_composition_default"] == "pass"
+
+
+def test_pptx_builder_prepares_authored_outline_metadata_for_ui() -> None:
+    builder = PptxBuilder(node_runner=object(), renderer_engine="authored")
+    outlines = [_authored_card_outline(index) for index in range(1, 5)]
+
+    prepared = builder.prepare_outlines(_template("freeform"), outlines)
+
+    assert all(outline.layout_json.get("render_engine") == "authored" for outline in prepared)
+    assert all(outline.layout_json.get("composition_family") for outline in prepared)
+    assert all(outline.content_json.get("visual_intent") for outline in prepared)
+    assert not any(outline.layout_json.get("composition_family") for outline in outlines)
+
+
+def test_authored_renderer_uses_composition_specific_native_routes(tmp_path) -> None:
+    outlines = [_authored_card_outline(index) for index in range(6)]
+    pptx_path = tmp_path / "authored-compositions.pptx"
+
+    AuthoredPptxRenderer().render(outlines, BrandDNA(), pptx_path)
+
+    prs = Presentation(pptx_path.as_posix())
+    visible = "\n".join(
+        shape.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+    assert "PROOF" not in visible
+    route_markers = {
+        marker
+        for marker in (
+            "OPERATING KIT",
+            "TENSION",
+            "EVIDENCE WALL",
+            "DECISION POINT",
+            "OPERATING SHIFT",
+            "STATEMENT",
+            "CALLOUT",
+            "NUMBER SIGNAL",
+        )
+        if marker in visible
+    }
+    assert {"EVIDENCE WALL", "TENSION", "DECISION POINT", "OPERATING SHIFT"}.issubset(
+        route_markers
+    )
+    assert len(route_markers) >= 4
+
+
+def test_authored_renderer_routes_metric_slides_to_number_signal(tmp_path) -> None:
+    outline = _authored_card_outline(1, layout="chart")
+    outline.content_json["metrics"] = [
+        {"label": "Agent handoffs with explicit criteria", "value": 82, "unit": "%"},
+        {"label": "Manual review cycles removed", "value": 14, "unit": "hours"},
+        {"label": "Context window budget", "value": 128000, "unit": "tokens"},
+    ]
+    outline.content_json["exhibit_spec"] = {
+        "type": "metric_chart",
+        "metrics": outline.content_json["metrics"],
+    }
+    authored = AuthoredPptxRenderer().author_outlines([outline])
+    pptx_path = tmp_path / "metric-signal.pptx"
+
+    AuthoredPptxRenderer().render([outline], BrandDNA(), pptx_path)
+
+    visible = "\n".join(
+        shape.text
+        for slide in Presentation(pptx_path.as_posix()).slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+    assert authored[0].layout_json["composition_family"] == "metric_signal"
+    assert "NUMBER SIGNAL" in visible
+    assert "82%" in visible
+    assert "SUPPORTING SIGNALS" in visible
+
+
+def test_authored_renderer_does_not_promote_incidental_callout_metrics() -> None:
+    outline = _authored_card_outline(1, layout="callouts")
+    outline.content_json["narrative_role"] = "evidence"
+    outline.content_json["exhibit_spec"] = {
+        "type": "callouts",
+        "points": ["Connect the harness-centric view to an explicit review gate."],
+        "metrics": [{"label": "Predictions", "value": 1.0, "unit": "%"}],
+    }
+
+    authored = AuthoredPptxRenderer().author_outlines([outline])
+
+    assert authored[0].layout_json["composition_family"] != "metric_signal"
+    assert authored[0].layout_json["layout"] != "chart"
+
+    metric_outline = _authored_card_outline(2, layout="chart")
+    metric_outline.content_json["exhibit_spec"] = {
+        "type": "metric_chart",
+        "metrics": [{"label": "Predictions", "value": 1.0, "unit": "%"}],
+    }
+    metric_outline.content_json["chart_spec"] = {
+        "type": "bar",
+        "metrics": [{"label": "Predictions", "value": 1.0, "unit": "%"}],
+    }
+    metric_outline.content_json["metrics"] = [
+        {"label": "Predictions", "value": 1.0, "unit": "%"}
+    ]
+    metric_outline.layout_json["layout"] = "chart"
+    metric_outline.layout_json["archetype"] = "metric_chart"
+
+    authored_metric = AuthoredPptxRenderer().author_outlines([metric_outline])
+
+    assert authored_metric[0].layout_json["composition_family"] != "metric_signal"
+    assert authored_metric[0].layout_json["layout"] != "chart"
+
+
+def test_authored_renderer_routes_decision_slides_to_spotlight_callout(tmp_path) -> None:
+    outline = _authored_card_outline(1, layout="quote_sidebar")
+    outline.content_json["narrative_role"] = "decision"
+    outline.content_json["action_title"] = "Make the benchmark contract the review gate"
+    authored = AuthoredPptxRenderer().author_outlines([outline])
+    pptx_path = tmp_path / "spotlight-callout.pptx"
+
+    AuthoredPptxRenderer().render([outline], BrandDNA(), pptx_path)
+
+    visible = "\n".join(
+        shape.text
+        for slide in Presentation(pptx_path.as_posix()).slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+    assert authored[0].layout_json["composition_family"] == "spotlight_quote"
+    assert "CALLOUT" in visible
+    assert "WHAT CHANGES" in visible
+    assert "Make the benchmark contract" in visible
+
+
+def test_authored_renderer_varies_structured_composition_families() -> None:
+    outlines: list[SlideOutline] = [_authored_card_outline(0, layout="cover")]
+    for index in range(1, 7):
+        outline = _authored_card_outline(index, layout="comparison_table")
+        outline.content_json["archetype"] = "comparison_table"
+        outline.content_json["exhibit_spec"] = {
+            "type": "comparison_table",
+            "columns": ["Signal", "Current readout", "Target move"],
+            "rows": [
+                ["Grounding", "Generic public checks", "Use source-backed harnesses"],
+                ["Execution", "Ad hoc prompting", "Run a managed benchmark workflow"],
+            ],
+        }
+        outline.layout_json["archetype"] = "comparison_table"
+        outlines.append(outline)
+    for index, layout in enumerate(
+        ["checklist", "checklist", "table_reference", "table_reference"], start=7
+    ):
+        outline = _authored_card_outline(index, layout=layout)
+        outline.content_json["archetype"] = layout
+        outline.content_json["exhibit_spec"] = {
+            "type": "reference_table" if layout == "table_reference" else "checklist",
+            "items": [
+                {"label": "Contract", "text": "Make success explicit"},
+                {"label": "Harness", "text": "Run the workflow repeatedly"},
+            ],
+            "rows": [
+                ["Contract", "Defines what counts as success"],
+                ["Harness", "Executes benchmark evidence"],
+            ],
+        }
+        outline.layout_json["archetype"] = layout
+        outlines.append(outline)
+    outlines.append(_authored_card_outline(10, layout="closing_recommendation"))
+
+    authored = AuthoredPptxRenderer().author_outlines(outlines)
+    families = [outline.layout_json["composition_family"] for outline in authored]
+
+    assert "reframe_comparison" in families
+    assert "evidence_wall" in families
+    assert "statement_canvas" in families
+    assert "operating_map" in families or "decision_ladder" in families
+    assert families.count("lifecycle_timeline") <= 1
+    assert "architecture_layers" in families
+    assert len({outline.layout_json["composition_signature"] for outline in authored}) >= 6
+
+
+def test_authored_renderer_uses_full_canvas_structured_routes(tmp_path) -> None:
+    outlines: list[SlideOutline] = [_authored_card_outline(0, layout="cover")]
+    comparison = _authored_card_outline(1, layout="comparison_table")
+    comparison.content_json["exhibit_spec"] = {
+        "type": "comparison_table",
+        "columns": ["Signal", "Current readout", "Target move"],
+        "rows": [
+            ["Grounding", "Synthetic examples drift", "Anchor to real workflow evidence"],
+            ["Review", "Manual inspection comes late", "Gate each run with acceptance tests"],
+        ],
+    }
+    outlines.append(comparison)
+    second_comparison = _authored_card_outline(2, layout="comparison_table")
+    second_comparison.content_json["exhibit_spec"] = comparison.content_json["exhibit_spec"]
+    outlines.append(second_comparison)
+    checklist = _authored_card_outline(2, layout="checklist")
+    checklist.content_json["exhibit_spec"] = {
+        "type": "checklist",
+        "items": [
+            {"text": "Name the decision and success criteria"},
+            {"text": "Run the harness against source-backed cases"},
+            {"text": "Record the review result before scaling"},
+        ],
+    }
+    outlines.append(checklist)
+    reference = _authored_card_outline(4, layout="table_reference")
+    reference.content_json["exhibit_spec"] = {
+        "type": "reference_table",
+        "rows": [
+            ["Contract", "Declares the evaluation target"],
+            ["Harness", "Executes the benchmark workflow"],
+            ["Evidence", "Keeps cases grounded in reality"],
+        ],
+    }
+    outlines.append(reference)
+    outlines.append(_authored_card_outline(5, layout="closing_recommendation"))
+    pptx_path = tmp_path / "authored-structured-routes.pptx"
+
+    AuthoredPptxRenderer().render(outlines, BrandDNA(), pptx_path)
+
+    prs = Presentation(pptx_path.as_posix())
+    visible = "\n".join(
+        shape.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+    assert "EVIDENCE WALL" in visible
+    assert "REFRAME" in visible
+    assert "OPERATING MAP" in visible
+    assert "ARCHITECTURE" in visible
+    assert "COMPARISON LENS" not in visible
+
+
+def test_rendered_slide_audit_flags_repetitive_card_visual_rhythm(tmp_path) -> None:
+    outlines = [_authored_card_outline(index) for index in range(10)]
+    for outline in outlines:
+        outline.layout_json["composition_family"] = "proof_strip"
+        outline.layout_json["composition_signature"] = (
+            f"proof_strip|{outline.slide_index}|evidence|callouts"
+        )
+    pptx_path = tmp_path / "repetitive-proof-strip.pptx"
+
+    DeterministicPptxRenderer().render(outlines, BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, outlines, tmp_path)
+
+    assert payload["visual_rhythm"]["card_like_ratio"] == 1
+    assert any(issue.category == "visual_rhythm" for issue in issues)
+
+
+def test_rendered_slide_audit_counts_evidence_wall_as_card_like(tmp_path) -> None:
+    outlines = [_authored_card_outline(index) for index in range(8)]
+    for outline in outlines:
+        outline.layout_json["composition_family"] = "evidence_wall"
+        outline.layout_json["composition_signature"] = (
+            f"evidence_wall|{outline.slide_index}|evidence|callouts"
+        )
+    pptx_path = tmp_path / "repetitive-evidence-wall.pptx"
+
+    DeterministicPptxRenderer().render(outlines, BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, outlines, tmp_path)
+
+    assert payload["visual_rhythm"]["card_like_ratio"] == 1
+    assert any(issue.category == "visual_rhythm" for issue in issues)
+
+
+def test_rendered_slide_audit_flags_repeated_process_visual_rhythm(tmp_path) -> None:
+    families = [
+        "editorial_spread",
+        "challenge_cards",
+        "lifecycle_timeline",
+        "why_it_matters_cards",
+        "lifecycle_timeline",
+        "decision_ladder",
+        "reframe_split",
+        "evidence_wall",
+        "lifecycle_timeline",
+        "proof_strip",
+        "architecture_layers",
+        "reframe_comparison",
+        "decision_ladder",
+        "decision_ladder",
+        "lifecycle_timeline",
+        "challenge_cards",
+    ]
+    outlines = [_authored_card_outline(index) for index, _family in enumerate(families)]
+    for outline, family in zip(outlines, families):
+        outline.layout_json["composition_family"] = family
+        outline.layout_json["composition_signature"] = (
+            f"{family}|{outline.slide_index}|evidence|callouts"
+        )
+    pptx_path = tmp_path / "repetitive-process-rhythm.pptx"
+
+    DeterministicPptxRenderer().render(outlines, BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, outlines, tmp_path)
+
+    assert payload["visual_rhythm"]["family_counts"]["lifecycle_timeline"] == 4
+    assert any(
+        issue.category == "visual_rhythm" and "process-like" in issue.message
+        for issue in issues
+    )
+
+
+def test_renderer_uses_native_bullet_paragraphs_without_literal_bullet_text(
+    tmp_path,
+) -> None:
+    outline = _authored_card_outline(1, layout="two_column")
+    pptx_path = tmp_path / "native-bullets.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+
+    prs = Presentation(pptx_path.as_posix())
+    visible_text = "\n".join(
+        shape.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+    with zipfile.ZipFile(pptx_path) as package:
+        slide_xml = package.read("ppt/slides/slide1.xml").decode("utf-8")
+    text_nodes = re.findall(r"<a:t>(.*?)</a:t>", slide_xml)
+
+    assert "\u2022" not in visible_text
+    assert "buChar" in slide_xml
+    assert not any(text.startswith("\u2022") for text in text_nodes)
+
+
+def test_renderer_splits_concatenated_step_text_into_separate_paragraphs(
+    tmp_path,
+) -> None:
+    outline = _authored_card_outline(1, layout="two_column")
+    outline.content_json["bullets"] = [
+        "Step 1: Frame the request with evidence. Step 2: Review the output before memory updates. Step 3: Record the decision owner."
+    ]
+    outline.content_json["content_blocks"] = [
+        {"type": "bullets", "body": outline.content_json["bullets"]}
+    ]
+    pptx_path = tmp_path / "split-steps.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+
+    prs = Presentation(pptx_path.as_posix())
+    paragraphs = [
+        paragraph.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+        for paragraph in shape.text_frame.paragraphs
+        if paragraph.text.strip()
+    ]
+    step_paragraphs = [text for text in paragraphs if text.startswith("Step ")]
+    _payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    assert len(step_paragraphs) == 3
+    assert not any("Step 1" in text and "Step 2" in text for text in step_paragraphs)
+    assert not any(issue.category == "multi_item_concatenation" for issue in issues)
+
+
+def test_rendered_slide_audit_flags_concatenated_numbered_paragraph(
+    tmp_path,
+) -> None:
+    pptx_path = tmp_path / "bad-multi-item.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(10), Inches(2))
+    box.text = "Step 1: Do the first thing. Step 2: Do the second thing."
+    prs.save(pptx_path.as_posix())
+
+    _payload, issues = RenderedSlideAudit().inspect(pptx_path, [])
+
+    assert any(issue.category == "multi_item_concatenation" for issue in issues)
+
+
+def test_authored_renderer_degrades_weak_matrix_before_rendering(tmp_path) -> None:
+    outline = _authored_card_outline(1, layout="matrix_2x2")
+    outline.content_json["archetype"] = "matrix_2x2"
+    outline.content_json["exhibit_spec"] = {
+        "type": "matrix_2x2",
+        "quadrants": [
+            {"label": "High impact / high readiness", "description": "Generic fallback"},
+            {"label": "High impact / low readiness", "description": "Generic fallback"},
+            {"label": "Low impact / high readiness", "description": "Generic fallback"},
+            {"label": "Low impact / low readiness", "description": "Generic fallback"},
+        ],
+    }
+    outline.layout_json["layout"] = "matrix_2x2"
+    outline.layout_json["archetype"] = "matrix_2x2"
+    cover = _authored_card_outline(0, layout="cover")
+    cover.content_json["narrative_role"] = "cover"
+    cover.layout_json["layout"] = "cover"
+    close = _authored_card_outline(2, layout="closing_recommendation")
+    close.content_json["narrative_role"] = "closing"
+    close.layout_json["layout"] = "closing_recommendation"
+    pptx_path = tmp_path / "degraded-matrix.pptx"
+
+    authored_outlines = AuthoredPptxRenderer().author_outlines([cover, outline, close])
+    authored = authored_outlines[1]
+    AuthoredPptxRenderer().render([cover, outline, close], BrandDNA(), pptx_path)
+    audit_payload, audit_issues = RenderedSlideAudit().inspect(pptx_path, authored_outlines)
+    prs = Presentation(pptx_path.as_posix())
+    visible = "\n".join(
+        shape.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+
+    assert authored.layout_json["layout"] == "callouts"
+    assert authored.layout_json["composition_family"] in {
+        "evidence_wall",
+        "proof_strip",
+        "statement_canvas",
+        "spotlight_quote",
+        "reframe_split",
+        "why_it_matters_cards",
+        "architecture_layers",
+    }
+    assert authored.content_json["visual_degradation"]["from"] == "decision_matrix"
+    assert authored.content_json["visual_degradation"]["original_exhibit_type"] == "matrix_2x2"
+    assert authored.content_json["exhibit_spec"]["type"] == "callouts"
+    assert audit_payload["slides"][1]["visual_degradation"]["from"] == "decision_matrix"
+    assert not audit_issues
+    assert "PROOF" not in visible
+    assert "High impact / high readiness" not in visible
+    assert "Low impact / low readiness" not in visible
+
+
+def test_authored_renderer_degrades_bad_code_panel_before_rendering(tmp_path) -> None:
+    outline = _authored_card_outline(1, layout="code_panel")
+    outline.content_json["archetype"] = "code_panel"
+    outline.content_json["exhibit_spec"] = {
+        "type": "code_panel",
+        "title": "operating-rules.md",
+        "lines": [
+            "Artifact | Purpose | Update trigger",
+            "Convert the framework consists of five layers into an owned action",
+            "Make the harness-centric view visible before execution",
+        ],
+    }
+    outline.content_json["content_blocks"] = [
+        {
+            "type": "bullets",
+            "body": [
+                "Artifact | Purpose | Update trigger",
+                "Convert the framework consists of five layers into an owned action",
+            ],
+        }
+    ]
+    outline.layout_json["layout"] = "code_panel"
+    outline.layout_json["archetype"] = "code_panel"
+    cover = _authored_card_outline(0, layout="cover")
+    cover.content_json["narrative_role"] = "cover"
+    cover.layout_json["layout"] = "cover"
+    close = _authored_card_outline(2, layout="closing_recommendation")
+    close.content_json["narrative_role"] = "closing"
+    close.layout_json["layout"] = "closing_recommendation"
+    pptx_path = tmp_path / "degraded-code-panel.pptx"
+
+    authored_outlines = AuthoredPptxRenderer().author_outlines([cover, outline, close])
+    authored = authored_outlines[1]
+    AuthoredPptxRenderer().render([cover, outline, close], BrandDNA(), pptx_path)
+    prs = Presentation(pptx_path.as_posix())
+    visible = "\n".join(
+        shape.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+
+    assert authored.layout_json["layout"] == "callouts"
+    assert authored.layout_json["composition_family"] in {
+        "evidence_wall",
+        "proof_strip",
+        "statement_canvas",
+        "spotlight_quote",
+        "reframe_split",
+        "why_it_matters_cards",
+        "architecture_layers",
+    }
+    assert authored.content_json["visual_degradation"]["from"] == "code_panel"
+    assert "Artifact | Purpose" not in visible
+    assert "Convert " not in visible
+
+
+def test_authored_architecture_layers_do_not_occlude_title(tmp_path) -> None:
+    outline = _authored_card_outline(1, layout="callouts")
+    outline.content_json["action_title"] = (
+        "Govern agent-assisted benchmark discovery before deployment"
+    )
+    outline.content_json["subheading"] = (
+        "Layer each source control so benchmark evidence remains inspectable."
+    )
+    outline.content_json["exhibit_spec"] = {
+        "type": "reference_table",
+        "rows": [
+            ["Data catalog", "Scale benchmark discovery across enterprise sources"],
+            ["Schema metadata", "Show where usable evaluation evidence lives"],
+            ["Confidence score", "Separate reviewed facts from uncertain signals"],
+            ["Review gate", "Block deployment until evidence quality is accepted"],
+        ],
+    }
+    outline.layout_json["layout"] = "callouts"
+    outline.layout_json["composition_family"] = "architecture_layers"
+    outline.layout_json["composition_variant"] = "architecture_layers-0"
+    outline.layout_json["composition_signature"] = "architecture_layers|test"
+    pptx_path = tmp_path / "architecture-layers.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    _payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+    categories = {issue.category for issue in issues}
+
+    assert "occluded_text" not in categories
+    assert "overlap" not in categories
+    assert "cut-off-text" not in categories
+    assert "renderer_filler_copy" not in categories
+
+
+def test_authored_architecture_layers_preserve_complete_contract_clauses(tmp_path) -> None:
+    outline = _authored_card_outline(8, layout="comparison_table")
+    outline.content_json["action_title"] = (
+        "Model contracts bind expectations to executable benchmark rules"
+    )
+    outline.content_json["subheading"] = "The Model Contract is our central abstraction."
+    outline.content_json["exhibit_spec"] = {
+        "type": "comparison_table",
+        "rows": [
+            [
+                "Model contracts",
+                "Make inputs, outputs, success criteria, and evaluation rules explicit.",
+            ],
+            [
+                "A contract",
+                "Gives humans, agents, and harnesses a shared definition of what must be tested.",
+            ],
+            [
+                "The contract",
+                "Should answer the operational questions required to build valid benchmark cases.",
+            ],
+        ],
+    }
+    outline.layout_json["layout"] = "comparison_table"
+    outline.layout_json["composition_family"] = "architecture_layers"
+    outline.layout_json["composition_variant"] = "architecture_layers-0"
+    outline.layout_json["composition_signature"] = "architecture_layers|contract"
+    pptx_path = tmp_path / "architecture-contract-clauses.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert "what must be tested" in visible
+    assert "build valid benchmark cases" in visible
+    assert "what must " not in visible.replace("what must be tested", "")
+    assert "build valid" not in visible.replace("build valid benchmark cases", "")
+    categories = {issue.category for issue in issues}
+    assert "incomplete_content" not in categories
+    assert "renderer_filler_copy" not in categories
+    assert "cut-off-text" not in categories
+
+
+def test_authored_architecture_layers_rewrites_generic_risk_labels(tmp_path) -> None:
+    outline = _authored_card_outline(3, layout="table_reference")
+    outline.content_json["action_title"] = (
+        "Reframe benchmarking from data generation to harness-centric discovery"
+    )
+    outline.content_json["subheading"] = (
+        "Compare synthetic generation with harness-centric discovery."
+    )
+    outline.content_json["sources"] = ["Bootstrapping Benchmarks > The Harness-Centric View"]
+    outline.content_json["exhibit_spec"] = {
+        "type": "reference_table",
+        "rows": [
+            ["Synthetic Generation LLM", "Creates cases without operational validation."],
+            ["Circular Validation Risk", "Benchmark evidence validates itself."],
+            ["Distribution Coverage Narrow", "Cases miss enterprise workflow coverage."],
+        ],
+    }
+    outline.layout_json["layout"] = "table_reference"
+    outline.layout_json["composition_family"] = "architecture_layers"
+    outline.layout_json["composition_variant"] = "architecture_layers-0"
+    outline.layout_json["composition_signature"] = "architecture_layers|harness"
+    pptx_path = tmp_path / "architecture-risk-labels.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert "Validation Risk" not in visible
+    assert "Harness reasoning shift" in visible
+    assert not [issue for issue in issues if issue.category == "renderer_filler_copy"]
+
+
+def test_spotlight_callout_expands_sparse_executive_summary_points(tmp_path) -> None:
+    outline = _authored_card_outline(13, layout="two_column")
+    outline.content_json["action_title"] = (
+        "Harness-centric discovery turns enterprise evidence into benchmark cases"
+    )
+    outline.content_json["subheading"] = "Executive summary"
+    outline.content_json["sources"] = ["Bootstrapping Benchmarks > Executive Summary"]
+    outline.content_json["source_labels"] = [
+        "Bootstrapping Benchmarks > Executive Summary"
+    ]
+    outline.content_json["bullets"] = [
+        "Current benchmarking is constrained by saturation, high labeling cost, and weak fit to enterprise use cases."
+    ]
+    outline.content_json["exhibit_spec"] = {
+        "type": "callouts",
+        "points": [
+            "Current benchmarking is constrained by saturation and weak fit to enterprise use cases."
+        ],
+    }
+    outline.layout_json["layout"] = "two_column"
+    outline.layout_json["composition_family"] = "spotlight_quote"
+    outline.layout_json["composition_variant"] = "spotlight_quote-0"
+    outline.layout_json["composition_signature"] = "spotlight_quote|executive-summary"
+    outline = DesignAgent().apply_design([outline])[0]
+    pptx_path = tmp_path / "spotlight-executive-summary.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"])
+    assert "next operating choice" not in visible.lower()
+    assert len(outline.content_json["exhibit_spec"]["points"]) >= 3
+    assert "enterprise workflows" in visible
+    assert "Harness-centric discovery" in visible
+    assert "Current benchmarking" in visible
+    assert not [issue for issue in issues if issue.category == "renderer_filler_copy"]
+
+
+def test_authored_decision_ladder_uses_readable_source_specific_sequence(tmp_path) -> None:
+    outline = _authored_card_outline(1, layout="checklist")
+    outline.content_json["action_title"] = (
+        "Harness interfaces standardize benchmark execution across domains"
+    )
+    outline.content_json["subheading"] = (
+        "Use interface boundaries to make every benchmark run repeatable."
+    )
+    outline.content_json["exhibit_spec"] = {
+        "type": "checklist",
+        "items": [
+            {
+                "action": "Declare the model contract before running the harness.",
+                "owner": "Contract owner",
+                "timing": "Define",
+            },
+            {
+                "action": "Bind each test case to traceable proprietary evidence.",
+                "owner": "Evidence lead",
+                "timing": "Build",
+            },
+            {
+                "action": "Run the same harness protocol across each model family.",
+                "owner": "Harness lead",
+                "timing": "Execute",
+            },
+            {
+                "action": "Record review findings before approving deployment.",
+                "owner": "Review lead",
+                "timing": "Review",
+            },
+        ],
+    }
+    outline.layout_json["layout"] = "checklist"
+    outline.layout_json["composition_family"] = "decision_ladder"
+    outline.layout_json["composition_variant"] = "decision_ladder-0"
+    outline.layout_json["composition_signature"] = "decision_ladder|test"
+    pptx_path = tmp_path / "decision-ladder.pptx"
+
+    DeterministicPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [outline])
+    visible = "\n".join(
+        text
+        for slide in payload["slides"]
+        for text in slide["text"]
+    )
+    categories = {issue.category for issue in issues}
+
+    assert "small_text" not in categories
+    assert "renderer_filler_copy" not in categories
+    assert "Tie the claim" not in visible
+    assert "source-backed evaluation artifact" not in visible
+    assert "Declare the model contract" in visible
+
+
+def test_renderer_degrades_weak_visual_exhibits_without_generic_labels(tmp_path) -> None:
+    matrix = _authored_card_outline(1, layout="matrix_2x2")
+    matrix.content_json["exhibit_spec"] = {"type": "matrix_2x2", "quadrants": []}
+    matrix.layout_json["layout"] = "matrix_2x2"
+    dependency = _authored_card_outline(2, layout="dependency_map")
+    dependency.content_json["exhibit_spec"] = {
+        "type": "dependency_map",
+        "left_node": "Source context",
+        "middle_nodes": ["Rules"],
+        "right_outcome": "Reliable next session",
+    }
+    dependency.layout_json["layout"] = "dependency_map"
+    cycle = _authored_card_outline(3, layout="framework_cycle")
+    cycle.content_json["exhibit_spec"] = {
+        "type": "cycle",
+        "center_label": "Operating loop",
+        "steps": [
+            {"label": "Frame"},
+            {"label": "Prime"},
+            {"label": "Review"},
+        ],
+    }
+    cycle.layout_json["layout"] = "framework_cycle"
+    pptx_path = tmp_path / "weak-exhibits.pptx"
+
+    DeterministicPptxRenderer().render([matrix, dependency, cycle], BrandDNA(), pptx_path)
+
+    prs = Presentation(pptx_path.as_posix())
+    visible = "\n".join(
+        shape.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if getattr(shape, "has_text_frame", False)
+    )
+    assert visible.count("PROOF") == 0
+    assert "High impact / high readiness" not in visible
+    assert "Source context" not in visible
+    assert "Reliable next session" not in visible
+    assert "Operating loop" not in visible
+    assert "Frame" not in visible
+    assert "Prime" not in visible
+
+
 def _rich_bundle(job_id: str = "job-rich") -> DocumentBundle:
     sections = [
         DocumentSection(
@@ -88,7 +1380,7 @@ def _rich_bundle(job_id: str = "job-rich") -> DocumentBundle:
             ),
             source_doc_id="beyond-vibe",
         )
-        for idx in range(1, 10)
+        for idx in range(1, 16)
     ]
     return DocumentBundle(
         job_id=job_id,
@@ -105,6 +1397,363 @@ def _rich_bundle(job_id: str = "job-rich") -> DocumentBundle:
     )
 
 
+def test_exhibit_fallbacks_do_not_generate_placeholder_or_convert_copy() -> None:
+    section = DocumentSection(
+        title="Architecture Overview",
+        level=1,
+        content=(
+            "The framework consists of five primary layers that work together to enable benchmark creation and execution. "
+            "Orchestration Layer: Top-level agent that reasons about which models need evaluation. "
+            "Model Contract Registry: A repository of model contracts that describe known model types."
+        ),
+        source_doc_id="doc-1",
+    )
+    compiler = ExhibitCompiler()
+
+    comparison = compiler.compile("comparison_table", "framework", section, [], [])
+    checklist = compiler.compile("checklist", "implementation", section, [], [])
+    matrix = compiler.compile("matrix_2x2", "decision", section, [], [])
+    rendered = json.dumps([comparison, checklist, matrix])
+
+    assert "Convert " not in rendered
+    assert "Owner" not in rendered
+    assert "Owner / Next" not in rendered
+    assert "High impact / high readiness" not in rendered
+    assert "development of" not in rendered
+
+
+def test_exhibit_compiler_cleans_table_and_owner_artifacts() -> None:
+    section = DocumentSection(
+        title="Harness-Centric View",
+        level=1,
+        content=(
+            "Artifact | Purpose | Update trigger\n"
+            "Convert the framework consists of five layers into an owned action (Owner / Next)\n"
+            "Harness interfaces standardize benchmark execution across domains."
+        ),
+        source_doc_id="doc-1",
+    )
+
+    compiler = ExhibitCompiler()
+    reference = compiler.compile("table_reference", "reference", section, [], [])
+    checklist = compiler.compile("checklist", "implementation", section, [], [])
+    rendered = json.dumps([reference, checklist])
+
+    assert "Artifact | Purpose" not in rendered
+    assert "Convert " not in rendered
+    assert "Owner / Next" not in rendered
+    assert "the framework consists of five layers" in rendered
+    assert "Harness interfaces standardize benchmark execution" in rendered
+
+
+def test_exhibit_compiler_varies_checklist_owner_and_timing() -> None:
+    section = DocumentSection(
+        title="Model Contract Questions",
+        level=1,
+        content=(
+            "A model contract defines what goes in and how success is measured. "
+            "The harness executes benchmark workflows against source-backed evidence. "
+            "Review findings should be validated before production deployment."
+        ),
+        source_doc_id="doc-1",
+    )
+
+    checklist = ExhibitCompiler().compile("checklist", "implementation", section, [], [])
+    pairs = {
+        (item["owner"], item["timing"])
+        for item in checklist["items"]
+        if isinstance(item, dict)
+    }
+
+    assert len(pairs) >= 3
+    assert ("Lead", "Review gate") not in pairs
+
+
+def test_exhibit_compiler_avoids_prefix_duplicate_comparison_cells() -> None:
+    section = DocumentSection(
+        title="Closing Remarks",
+        level=1,
+        content=(
+            "The proliferation of AI models across enterprise applications has outpaced the development of evaluation. "
+            "Organizations deploying models for consequential decisions need benchmarks that reflect actual use. "
+            "By shifting from manual benchmark creation to systematic discovery of implicit ground truth, teams can scale evaluation."
+        ),
+        source_doc_id="doc-1",
+    )
+
+    comparison = ExhibitCompiler().compile("comparison_table", "evidence", section, [], [])
+
+    assert comparison["columns"] == [
+        "Evidence signal",
+        "Unmanaged pattern",
+        "Harness move",
+    ]
+    for row in comparison["rows"]:
+        label = row["label"].lower()
+        values = [str(value).lower() for value in row["values"]]
+        assert not any(value.startswith(label) for value in values)
+
+
+def test_authored_items_do_not_pad_sparse_slides_with_fragments() -> None:
+    outline = _authored_card_outline(1, layout="callouts")
+    outline.content_json["bullets"] = ["Model contracts make expectations explicit."]
+    outline.content_json["exhibit_spec"] = {
+        "type": "callouts",
+        "points": ["Model contracts make expectations explicit."],
+    }
+
+    items = DeterministicPptxRenderer()._authored_items(outline, limit=4)
+
+    assert len(items) == 1
+    assert len(set(items)) == len(items)
+    assert items[0] == "Model contracts make expectations explicit."
+    visible = " ".join(items).lower()
+    assert "tie the claim" not in visible
+    assert "make the operating implication explicit" not in visible
+    assert "model contracts make is" not in visible
+
+
+def test_authored_renderer_routes_sparse_slides_to_sparse_compositions() -> None:
+    one_item = _authored_card_outline(1, layout="callouts")
+    one_item.content_json["bullets"] = ["Model contracts make expectations explicit."]
+    one_item.content_json["exhibit_spec"] = {
+        "type": "callouts",
+        "points": ["Model contracts make expectations explicit."],
+    }
+    two_item = _authored_card_outline(2, layout="checklist")
+    two_item.content_json["bullets"] = [
+        "Harnesses standardize benchmark execution.",
+        "Source evidence keeps test cases auditable.",
+    ]
+    two_item.content_json["exhibit_spec"] = {
+        "type": "checklist",
+        "items": [
+            {"action": "Harnesses standardize benchmark execution."},
+            {"action": "Source evidence keeps test cases auditable."},
+        ],
+    }
+
+    authored = AuthoredPptxRenderer().author_outlines([one_item, two_item])
+    families = [outline.layout_json["composition_family"] for outline in authored]
+
+    assert families[0] in {"statement_canvas", "spotlight_quote", "reframe_split"}
+    assert families[1] in {"statement_canvas", "spotlight_quote", "reframe_split"}
+    assert "challenge_cards" not in families
+    assert "toolkit_grid" not in families
+    assert "decision_ladder" not in families
+
+
+def test_authored_renderer_routes_long_checklists_to_readable_compositions() -> None:
+    outline = _authored_card_outline(3, layout="checklist")
+    long_items = [
+        "Implicit ground truth already exists in operational data, approved documents, replicated experiments, and decisions.",
+        "Agents can discover benchmark cases by finding evidence that real processes have already validated.",
+        "The discovery approach scales because it reuses enterprise evidence instead of relying on manual labeling.",
+    ]
+    outline.content_json["bullets"] = long_items
+    outline.content_json["exhibit_spec"] = {
+        "type": "checklist",
+        "items": [{"action": item} for item in long_items],
+    }
+
+    authored = AuthoredPptxRenderer().author_outlines([outline])
+    family = authored[0].layout_json["composition_family"]
+
+    assert family in {
+        "proof_strip",
+        "evidence_wall",
+        "statement_canvas",
+        "reframe_split",
+        "why_it_matters_cards",
+    }
+    assert family not in {"operating_map", "toolkit_grid", "decision_ladder"}
+
+
+def test_authored_renderer_degrades_question_prompt_diagrams() -> None:
+    outline = _authored_card_outline(10, layout="framework_cycle")
+    outline.content_json["diagram_spec"] = {
+        "kind": "cycle",
+        "steps": [
+            {"label": "What goes in"},
+            {"label": "The Questions"},
+            {"label": "What comes out"},
+            {"label": "Beyond output format"},
+        ],
+    }
+    outline.content_json["exhibit_spec"] = {
+        "type": "cycle",
+        "steps": [
+            {"label": "What goes in"},
+            {"label": "The Questions"},
+            {"label": "What comes out"},
+            {"label": "Beyond output format"},
+        ],
+    }
+
+    authored = AuthoredPptxRenderer().author_outlines([outline])
+
+    assert authored[0].layout_json["composition_family"] != "source_backed_diagram"
+    assert authored[0].content_json["visual_degradation"]["from"] == "framework_cycle"
+    assert authored[0].content_json["exhibit_spec"]["type"] == "callouts"
+
+
+def test_authored_display_items_reject_dangling_source_fragments() -> None:
+    renderer = DeterministicPptxRenderer()
+
+    assert renderer._complete_display_item("Organizations deploying models for") == ""
+    assert (
+        renderer._complete_display_item(
+            "The urgency of adopting robust benchmarking frameworks for"
+        )
+        == ""
+    )
+    assert (
+        renderer._complete_display_item(
+            "The proliferation of AI models across enterprise applications has outpaced the development of evaluation"
+        )
+        == ""
+    )
+    assert (
+        renderer._complete_display_item(
+            "Organizations deploying models for consequential decisions need benchmarks that reflect their actual use"
+        )
+        == ""
+    )
+    assert (
+        renderer._complete_display_item(
+            "Organizations deploy models for consequential decisions."
+        )
+        == "Organizations deploy models for consequential decisions."
+    )
+
+
+def test_authored_split_lead_uses_subject_not_modal_fragment() -> None:
+    renderer = DeterministicPptxRenderer()
+
+    assert renderer._split_lead(
+        "Synthetic benchmarks can create circular validation loops without operational grounding."
+    ) == (
+        "Synthetic benchmarks",
+        "Can create circular validation loops without operational grounding.",
+    )
+    assert renderer._split_lead(
+        "Model contracts make inputs, outputs, success criteria, and evaluation rules explicit."
+    ) == (
+        "Model contracts",
+        "Make inputs, outputs, success criteria, and evaluation rules explicit.",
+    )
+    assert renderer._split_lead(
+        "Bootstrapping strategies: map proprietary data into reusable evidence."
+    ) == (
+        "Bootstrapping strategies",
+        "Map proprietary data into reusable evidence.",
+    )
+    assert renderer._split_lead(
+        "The recommended shift is from manual benchmark creation to governed evidence discovery."
+    ) == (
+        "Recommended shift",
+        "Moves from manual benchmark creation to governed evidence discovery.",
+    )
+    assert renderer._split_lead(
+        "Implicit ground truth already exists in operational data, approved documents, replicated experiments, and decisions."
+    ) == (
+        "Implicit ground truth",
+        "Already exists in operational data, approved documents, replicated experiments, and decisions.",
+    )
+    assert renderer._split_lead(
+        "Executives need evaluation systems that reflect real use cases rather than generic leaderboard tasks."
+    ) == (
+        "Executives",
+        "Need evaluation systems that reflect real use cases rather than generic leaderboard tasks.",
+    )
+    assert renderer._split_lead(
+        "Agents can discover benchmark cases by finding evidence that real processes have already validated."
+    ) == (
+        "Agents",
+        "Can discover benchmark cases by finding evidence that real processes have already validated.",
+    )
+    assert renderer._split_lead(
+        "A lifecycle for harness execution helps teams reproduce, update, and compare benchmark runs."
+    ) == (
+        "A lifecycle for harness execution",
+        "Helps teams reproduce, update, and compare benchmark runs.",
+    )
+
+
+def test_authored_text_truncation_removes_dangling_endings() -> None:
+    renderer = DeterministicPptxRenderer()
+
+    assert renderer._truncate_at_word(
+        "Executives need evaluation systems that reflect real use cases.",
+        41,
+    ) == "Executives need evaluation systems"
+    assert renderer._truncate_at_word(
+        "Confidence calibration matters because source evidence varies in certainty and review quality.",
+        76,
+    ) == "Confidence calibration matters because source evidence varies in certainty"
+    assert renderer._truncate_at_word(
+        "A lifecycle for harness execution helps teams reproduce, update, and compare benchmark runs.",
+        70,
+    ) == "A lifecycle for harness execution helps teams reproduce, update"
+
+
+def test_authored_renderer_does_not_emit_generic_renderer_filler(tmp_path) -> None:
+    outline = _authored_card_outline(2, layout="callouts")
+    outline.content_json["action_title"] = (
+        "Model contracts make evaluation expectations explicit"
+    )
+    outline.content_json["bullets"] = [
+        "Model contracts make expectations explicit."
+    ]
+    outline.content_json["exhibit_spec"] = {
+        "type": "callouts",
+        "points": ["Model contracts make expectations explicit."],
+    }
+    pptx_path = tmp_path / "no-renderer-filler.pptx"
+
+    AuthoredPptxRenderer().render([outline], BrandDNA(), pptx_path)
+    payload, issues = RenderedSlideAudit().inspect(
+        pptx_path,
+        AuthoredPptxRenderer().author_outlines([outline]),
+    )
+    visible = " ".join(" ".join(slide["text"]) for slide in payload["slides"]).lower()
+
+    assert "tie the claim" not in visible
+    assert "connect the source evidence to the decision" not in visible
+    assert "make the next move visible" not in visible
+    assert "evidence tension" not in visible
+    assert not any(issue.category == "renderer_filler_copy" for issue in issues)
+
+
+def test_checklist_body_preserves_owner_timing_suffix() -> None:
+    renderer = DeterministicPptxRenderer()
+    body = renderer._checklist_body_text(
+        "Orchestration Layer: Top-level agent that reasons about which models need evaluation, what data is needed, and which execution path should run.",
+        "Data owner / Next",
+    )
+
+    assert body.endswith("(Data owner / Next)")
+    assert "(Data )" not in body
+    assert len(body) <= 121
+
+
+def test_source_rich_fallback_does_not_force_fragile_code_or_matrix() -> None:
+    outlines, _warnings = ContentPlanner().plan(
+        _template("freeform"),
+        _rich_bundle(),
+        instructions="Create a consulting deck about moving beyond vibe coding.",
+        generation_mode="freeform",
+        quality_profile="showcase",
+        length_strategy="auto",
+    )
+
+    archetypes = [outline.content_json["archetype"] for outline in outlines]
+
+    assert "code_panel" not in archetypes
+    assert "reference" not in archetypes
+    assert "matrix_2x2" not in archetypes
+
+
 def test_openai_compatible_client_extracts_json_from_fenced_response() -> None:
     response = """Here is the plan:
 ```json
@@ -112,6 +1761,34 @@ def test_openai_compatible_client_extracts_json_from_fenced_response() -> None:
 ```"""
     payload = OpenAICompatibleClient.extract_json(response)
     assert payload == {"deck_title": "Test", "slides": []}
+
+
+def test_openai_compatible_client_extracts_nested_fenced_json() -> None:
+    # The old non-greedy regex stopped at the first '}', breaking nested objects.
+    response = '```json\n{"a":{"b":2},"c":3}\n```'
+    assert OpenAICompatibleClient.extract_json(response) == {"a": {"b": 2}, "c": 3}
+
+
+def test_openai_compatible_client_salvages_truncated_json() -> None:
+    # A local model that hits its token budget mid-deck returns an unbalanced
+    # object; salvage closes open structures so planning can still proceed.
+    truncated = '{"deck_title":"D","slides":[{"n":1,"title":"Some incomplete tit'
+    payload = OpenAICompatibleClient.extract_json(truncated)
+    assert payload is not None
+    assert payload["deck_title"] == "D"
+    assert payload["slides"][0]["n"] == 1
+
+    after_comma = '{"slides":[{"n":1},{"n":2},'
+    assert OpenAICompatibleClient.extract_json(after_comma) == {"slides": [{"n": 1}, {"n": 2}]}
+
+    dangling_colon = '{"a":1,"b":2,"c":'
+    assert OpenAICompatibleClient.extract_json(dangling_colon) == {"a": 1, "b": 2}
+
+
+def test_openai_compatible_client_extract_json_rejects_non_objects() -> None:
+    assert OpenAICompatibleClient.extract_json("") is None
+    assert OpenAICompatibleClient.extract_json("no json here") is None
+    assert OpenAICompatibleClient.extract_json("[1, 2, 3]") is None
 
 
 def test_planner_repairs_dangling_sentence_fragments() -> None:
@@ -300,17 +1977,17 @@ def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
     archetypes = [outline.content_json["archetype"] for outline in outlines]
     titles = [outline.content_json["action_title"] for outline in outlines]
 
-    assert 12 <= len(outlines) <= 16
+    assert 10 <= len(outlines) <= 14
     assert len(set(archetypes)) >= 7
     assert len(set(titles)) == len(titles)
     assert outlines[0].content_json["narrative_role"] == "cover"
     assert outlines[0].layout_json["layout"] == "cover"
     assert all(outline.content_json.get("exhibit_spec") for outline in outlines)
     assert any(archetype == "comparison_table" for archetype in archetypes)
-    assert any(archetype == "code_panel" for archetype in archetypes)
-    assert any(archetype == "matrix_2x2" for archetype in archetypes)
     assert any(archetype == "callouts" for archetype in archetypes)
     assert any(archetype == "icon_rows" for archetype in archetypes)
+    assert "code_panel" not in archetypes
+    assert "matrix_2x2" not in archetypes
     assert sum(
         archetype in {"dependency_map", "framework_cycle", "code_panel", "table_reference"}
         for archetype in archetypes
@@ -322,19 +1999,120 @@ def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
     )
 
 
-def test_source_rich_expanded_blueprint_matches_reference_deck_length() -> None:
+def _many_section_bundle(n: int = 24) -> DocumentBundle:
+    return DocumentBundle(
+        job_id="rich",
+        sections=[
+            DocumentSection(
+                title=f"Topic {i + 1}",
+                level=1,
+                content="Detailed evidence and analysis for this topic. " * 18,
+                source_doc_id="doc-1",
+            )
+            for i in range(n)
+        ],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Rich"),
+        content_inventory=[],
+    )
+
+
+def test_source_rich_expanded_blueprint_extends_to_long_deck() -> None:
     planner = ContentPlanner()
+    # A genuinely large source (24 sections) so Expanded reaches the ceiling
+    # rather than being held back by the source-aware cap.
     blueprint = planner._build_blueprint(
-        _rich_bundle(),
-        "Create a consulting deck about moving beyond vibe coding.",
+        _many_section_bundle(24),
+        "Create a consulting deck about many topics.",
         "freeform",
         quality_profile="fast",
         length_strategy="expanded",
     )
 
-    assert blueprint.target_slide_count == 18
-    assert len(blueprint.archetype_sequence) == 18
-    assert len(set(blueprint.archetype_sequence)) >= 14
+    assert blueprint.target_slide_count == 22
+    assert len(blueprint.archetype_sequence) == 22
+    assert len(set(blueprint.archetype_sequence)) >= 10
+    assert not {
+        "code_panel",
+        "reference",
+        "matrix_2x2",
+        "dependency_map",
+        "framework_cycle",
+    }.intersection(blueprint.archetype_sequence)
+
+
+def test_expanded_is_capped_by_thin_source_but_explicit_count_is_honored() -> None:
+    planner = ContentPlanner()
+    thin = _many_section_bundle(6)  # only ~6 topics of distinct material
+    expanded = planner._build_blueprint(
+        thin, "deck", "freeform", quality_profile="fast", length_strategy="expanded"
+    ).target_slide_count
+    assert expanded <= 10  # capped near what 6 sections support, not padded to 16/22
+    # An explicit brief count is still honored literally despite the thin source.
+    explicit = planner._build_blueprint(
+        thin, "make an 18 slide deck", "freeform", quality_profile="fast", length_strategy="expanded"
+    ).target_slide_count
+    assert explicit == 18
+
+
+def test_spec_gate_does_not_demote_source_rich_cover_to_content_layout() -> None:
+    sections = [
+        DocumentSection(
+            title="Overview",
+            level=1,
+            content="Overview needs source-backed review before scaling.",
+            source_doc_id="doc-1",
+            source_id="doc-1:overview",
+        ),
+        DocumentSection(
+            title="Executive Summary",
+            level=1,
+            content=(
+                "Current benchmarking is constrained by saturation, high labeling cost, "
+                "and weak fit to enterprise use cases."
+            ),
+            source_doc_id="doc-1",
+            source_id="doc-1:summary",
+        ),
+        DocumentSection(
+            title="The Harness-Centric View",
+            level=1,
+            content=(
+                "The harness-centric view treats benchmark generation as a validity "
+                "problem, not a data-generation task."
+            ),
+            source_doc_id="doc-1",
+            source_id="doc-1:harness",
+        ),
+    ]
+    bundle = DocumentBundle(
+        job_id="cover-regression",
+        sections=sections,
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            section.source_id: {"label": f"Bootstrapping Benchmarks > {section.title}"}
+            for section in sections
+            if section.source_id
+        },
+    )
+
+    outlines, _warnings = ContentPlanner().plan(
+        _template("freeform"),
+        bundle,
+        instructions="Create a consulting deck about bootstrapping benchmarks.",
+        generation_mode="freeform",
+        quality_profile="showcase",
+        length_strategy="expanded",
+    )
+
+    assert outlines[0].layout_json["layout"] == "cover"
+    assert outlines[0].layout_json["archetype"] == "cover"
+    assert outlines[0].content_json["narrative_role"] == "cover"
+    assert outlines[0].label == "Bootstrapping Benchmarks"
 
 
 def test_fallback_executive_summary_includes_metric_proof_points() -> None:
@@ -655,6 +2433,72 @@ def test_themed_title_frames_prioritize_specific_cues_before_memory() -> None:
     ) == "Codify markdown-driven development into rules the team can reuse"
 
 
+def test_benchmark_section_titles_use_domain_specific_action_frames() -> None:
+    planner = ContentPlanner()
+
+    assert planner._action_title(
+        "Why Not Simply Generate Synthetic Benchmarks?",
+        "Static synthetic benchmarks fail to reflect validated operating evidence.",
+    ) == "Synthetic benchmarks cannot substitute for validated operating evidence"
+    assert planner._action_title(
+        "The Model Contract",
+        "The model contract specifies the expected behavior and success criteria.",
+    ) == "Model contracts make evaluation expectations explicit"
+    assert planner._action_title(
+        "The Harness Interface",
+        "The harness interface defines how evaluation happens in production.",
+    ) == "Harness interfaces turn contracts into repeatable tests"
+    assert planner._action_title(
+        "Conclusion and Future Directions",
+        "Agent-assisted benchmark discovery requires governed deployment.",
+    ) == "Govern agent-assisted benchmark discovery before deployment"
+
+
+def test_benchmark_title_repair_removes_qwen_fragment_frames() -> None:
+    planner = ContentPlanner()
+    slide = GeneratedSlideSpec(
+        slide_number=1,
+        slide_type="content",
+        action_title=(
+            "Prioritize leaders must shift mental models from manual labeling "
+            "tasks to systematic discovery of implicit ground truth"
+        ),
+        subheading="Manual labeling should give way to systematic discovery.",
+        content_blocks=[],
+        sources=["Uploaded source"],
+        archetype="quote_sidebar",
+        narrative_role="decision",
+    )
+
+    assert (
+        planner._repair_weak_action_title(slide, slide.action_title)
+        == "Shift leaders from manual labeling to systematic discovery"
+    )
+    assert (
+        planner._benchmark_title_repair("make the case for implicit ground truth discovery")
+        == "Implicit ground truth discovery turns existing evidence into benchmarks"
+    )
+    assert (
+        planner._benchmark_title_repair("the harness interface defines execution")
+        == "Harness interfaces standardize benchmark execution across domains"
+    )
+
+    closing = GeneratedSlideSpec(
+        slide_number=2,
+        slide_type="closing",
+        action_title="Commit to the recommendation with named ownership",
+        subheading="Benchmark governance requires real operating evidence.",
+        content_blocks=[],
+        sources=["Uploaded source"],
+        archetype="closing_recommendation",
+        narrative_role="closing",
+    )
+    assert (
+        planner._repair_weak_action_title(closing, closing.action_title)
+        == "Build evaluation systems around real use cases"
+    )
+
+
 def test_fallback_section_selection_uses_blueprint_source_map() -> None:
     sections = [
         DocumentSection(title="Overview", level=1, content="Intro", source_doc_id="doc"),
@@ -901,7 +2745,7 @@ def test_source_compression_represents_multiple_documents() -> None:
     }
 
 
-def test_story_map_uses_llm_and_fallback_when_deck_planning_fails() -> None:
+def test_story_map_uses_llm_and_fails_when_deck_planning_fails() -> None:
     class StoryMapLLM:
         def __init__(self) -> None:
             self.prompts = []
@@ -936,21 +2780,20 @@ def test_story_map_uses_llm_and_fallback_when_deck_planning_fails() -> None:
 
     llm = StoryMapLLM()
     planner = ContentPlanner(llm_client=llm)
-    outlines, warnings = planner.plan(
-        _template("freeform"),
-        _bundle(),
-        instructions="Create a deck on moving beyond vibe coding.",
-        generation_mode="freeform",
-        quality_profile="fast",
-    )
+    with pytest.raises(PlanningFailedError, match="deterministic planning fallback is disabled"):
+        planner.plan(
+            _template("freeform"),
+            _bundle(),
+            instructions="Create a deck on moving beyond vibe coding.",
+            generation_mode="freeform",
+            quality_profile="fast",
+        )
 
-    assert outlines
     assert planner.last_planning_artifacts["story-map"]["status"] == "llm"
     assert any("Story map:" in prompt for prompt in llm.prompts)
-    assert any(warning["field"] == "llm_planning" for warning in warnings)
 
 
-def test_story_map_falls_back_on_malformed_llm_response() -> None:
+def test_story_map_marks_malformed_llm_response_unavailable() -> None:
     class MalformedStoryMapLLM:
         def complete_json(self, **kwargs):
             if "Create a consulting story map" in kwargs["user_prompt"]:
@@ -958,21 +2801,22 @@ def test_story_map_falls_back_on_malformed_llm_response() -> None:
             return None
 
     planner = ContentPlanner(llm_client=MalformedStoryMapLLM())
-    outlines, _warnings = planner.plan(
-        _template("freeform"),
-        _bundle(),
-        instructions="Create a deck on moving beyond vibe coding.",
-        generation_mode="freeform",
-        quality_profile="fast",
-    )
+    with pytest.raises(PlanningFailedError, match="deterministic planning fallback is disabled"):
+        planner.plan(
+            _template("freeform"),
+            _bundle(),
+            instructions="Create a deck on moving beyond vibe coding.",
+            generation_mode="freeform",
+            quality_profile="fast",
+        )
 
-    assert outlines
     story_map = planner.last_planning_artifacts["story-map"]
-    assert story_map["status"] == "fallback"
+    assert story_map["status"] == "unavailable"
+    assert story_map["beats"] == []
     assert "contained no beats" in story_map["fallback_reason"]
 
 
-def test_qwen_planner_uses_deterministic_story_map_to_avoid_extra_llm_call() -> None:
+def test_qwen_planner_uses_llm_story_map() -> None:
     class QwenDeckLLM:
         model = "qwen3.6-35b-a3b-mtp"
 
@@ -981,7 +2825,30 @@ def test_qwen_planner_uses_deterministic_story_map_to_avoid_extra_llm_call() -> 
 
         def complete_json(self, **kwargs):
             self.prompts.append(kwargs["user_prompt"])
-            assert "Create a consulting story map" not in kwargs["user_prompt"]
+            if "Create a consulting story map" in kwargs["user_prompt"]:
+                return {
+                    "thesis": "Persistent context improves delivery.",
+                    "narrative_arc": "Situation -> Complication -> Resolution",
+                    "recommendation": "Adopt source-backed review.",
+                    "beats": [
+                        {
+                            "beat_number": 1,
+                            "role": "cover",
+                            "claim": "Translate AI delivery into an executive operating decision",
+                            "source_refs": ["doc-1:Developer Productivity"],
+                            "preferred_exhibit": "cover",
+                            "rationale": "Set the thesis.",
+                        },
+                        {
+                            "beat_number": 2,
+                            "role": "evidence",
+                            "claim": "Use source-backed review to reduce quality risk",
+                            "source_refs": ["doc-1:Quality Risk"],
+                            "preferred_exhibit": "callouts",
+                            "rationale": "Prove the operating need.",
+                        },
+                    ],
+                }
             target = int(re.search(r"Create a (\d+)-slide", kwargs["user_prompt"]).group(1))
             slides = [
                 {
@@ -1065,7 +2932,9 @@ def test_qwen_planner_uses_deterministic_story_map_to_avoid_extra_llm_call() -> 
             }
 
     llm = QwenDeckLLM()
-    planner = ContentPlanner(llm_client=llm)
+    # This test pins the monolithic single-call path it was written for; the
+    # decomposed (batched/per-slide) path is covered by test_planning_decomposition.
+    planner = ContentPlanner(llm_client=llm, decompose=False)
     outlines, warnings = planner.plan(
         _template("freeform"),
         _bundle(),
@@ -1075,10 +2944,103 @@ def test_qwen_planner_uses_deterministic_story_map_to_avoid_extra_llm_call() -> 
     )
 
     assert outlines
-    assert len(llm.prompts) == 1
+    assert any("Create a consulting story map" in prompt for prompt in llm.prompts)
+    # Exactly one monolithic deck call (no schema-repair retry).
+    assert len([p for p in llm.prompts if "consulting deck plan" in p]) == 1
     story_map = planner.last_planning_artifacts["story-map"]
-    assert story_map["status"] == "fallback"
-    assert "local Qwen planner" in story_map["fallback_reason"]
+    assert story_map["status"] == "llm"
+    assert story_map["fallback_reason"] is None
+    assert not any(warning["field"] == "llm_planning" for warning in warnings)
+
+
+def test_qwen_partial_deck_is_completed_from_blueprint_without_schema_retry() -> None:
+    class PartialQwenLLM:
+        model = "qwen3.6-35b-a3b-mtp"
+
+        def __init__(self) -> None:
+            self.prompts = []
+
+        def complete_json(self, **kwargs):
+            self.prompts.append(kwargs["user_prompt"])
+            if "Create a consulting story map" in kwargs["user_prompt"]:
+                return {
+                    "thesis": "Benchmark harnesses make model quality observable.",
+                    "narrative_arc": "Situation -> Complication -> Resolution",
+                    "recommendation": "Adopt contract-driven benchmark loops.",
+                    "beats": [
+                        {
+                            "beat_number": 1,
+                            "role": "cover",
+                            "claim": "Make benchmark quality visible before scaling agents",
+                            "source_refs": ["doc-1:Developer Productivity"],
+                            "preferred_exhibit": "cover",
+                            "rationale": "Set the decision.",
+                        }
+                    ],
+                }
+            if "Your previous response did not satisfy" in kwargs["user_prompt"]:
+                raise AssertionError("Qwen harness should not run giant schema repair retry")
+            return {
+                "deck_title": "Bootstrapping Benchmarks",
+                "audience": "AI product leaders",
+                "goal": "Define the harness decision.",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "slides": [
+                    {
+                        "slide_number": 1,
+                        "slide_type": "cover",
+                        "action_title": "Make benchmark quality visible before scaling agents",
+                        "subheading": "Harness design turns model behavior into operating evidence.",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Benchmark harnesses expose quality before rollout."],
+                            }
+                        ],
+                        "sources": ["Uploaded source"],
+                        "archetype": "cover",
+                        "narrative_role": "cover",
+                        "exhibit_spec": {"type": "cover"},
+                        "source_refs": ["doc-1:Developer Productivity"],
+                    },
+                    {
+                        "slide_number": 2,
+                        "slide_type": "content",
+                        "action_title": "Use model contracts to constrain benchmark interpretation",
+                        "subheading": "Contracts separate expected behavior from anecdotal demos.",
+                        "content_blocks": [
+                            {
+                                "type": "bullets",
+                                "body": ["Contracts define what the model must prove."],
+                            }
+                        ],
+                        "sources": ["Uploaded source"],
+                        "archetype": "callouts",
+                        "narrative_role": "evidence",
+                        "exhibit_spec": {"type": "callouts", "points": ["Contracts define proof."]},
+                        "source_refs": ["doc-1:Quality Risk"],
+                    },
+                ],
+            }
+
+    llm = PartialQwenLLM()
+    # Pins the monolithic single-call completion path this test validates.
+    outlines, warnings = ContentPlanner(llm_client=llm, decompose=False).plan(
+        _template("freeform"),
+        _bundle(),
+        instructions="Create a concise executive deck about bootstrapping benchmarks.",
+        generation_mode="freeform",
+        quality_profile="fast",
+    )
+
+    # The minimal 2-section fixture floors at 6 slides; the partial deck is
+    # completed from the blueprint up to that target.
+    assert len(outlines) == 6
+    # Partial deck completed from the blueprint with no schema-repair retry:
+    # exactly one monolithic deck-generation call.
+    assert len([p for p in llm.prompts if "consulting deck plan" in p]) == 1
+    assert outlines[1].content_json["action_title"].startswith("Use model contracts")
+    assert outlines[2].content_json["action_title"]
     assert not any(warning["field"] == "llm_planning" for warning in warnings)
 
 
@@ -1120,6 +3082,57 @@ def test_llm_deck_payload_must_match_blueprint_slide_count() -> None:
 
     assert deck is None
     assert "exactly 4 slides" in (planner._last_planning_error or "")
+
+
+def test_llm_payload_normalizes_structured_callouts_before_validation() -> None:
+    planner = ContentPlanner()
+    blueprint = DeckBlueprint(
+        deck_title="Bootstrapping Benchmarks",
+        audience="AI leaders",
+        core_thesis="Harnesses make model quality observable.",
+        target_slide_count=1,
+        archetype_sequence=["callouts"],
+    )
+    deck = planner._validate_deck_payload(
+        {
+            "deck_title": "Bootstrapping Benchmarks",
+            "audience": "AI leaders",
+            "goal": "Improve benchmark quality.",
+            "narrative_arc": "Situation -> Complication -> Resolution",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "slide_type": "content",
+                    "action_title": "Use benchmark contracts to focus model evaluation",
+                    "subheading": "Structured callouts should validate.",
+                    "content_blocks": [
+                        {
+                            "type": "callout",
+                            "body": ["Benchmark contracts reduce ambiguity."],
+                            "callouts": [
+                                {
+                                    "title": "Benchmark saturation",
+                                    "description": "Static suites hide real-world failures.",
+                                }
+                            ],
+                        }
+                    ],
+                    "sources": ["Uploaded source"],
+                    "archetype": "callouts",
+                    "narrative_role": "evidence",
+                    "exhibit_spec": {"type": "callouts"},
+                    "source_refs": ["doc-1:Benchmarks"],
+                }
+            ],
+        },
+        blueprint,
+    )
+
+    assert deck is not None
+    assert (
+        deck.slides[0].content_blocks[0].callouts
+        == ["Benchmark saturation: Static suites hide real-world failures."]
+    )
 
 
 def test_exhibit_selector_promotes_metric_claim_to_chart() -> None:
@@ -1325,23 +3338,82 @@ def test_spec_gate_removes_nonnumeric_source_placeholder_when_slide_is_grounded(
     assert report.unresolved_count == 0
 
 
-def test_planner_reports_llm_fallback_when_configured_client_fails() -> None:
+def test_spec_gate_rebuilds_malformed_llm_source_fragments() -> None:
+    planner = ContentPlanner()
+    bundle = _bundle()
+    blueprint = planner._build_blueprint(
+        bundle,
+        "Create a deck.",
+        "freeform",
+        quality_profile="fast",
+        length_strategy="concise",
+    )
+    compression = planner._build_source_compression(bundle, "fast")
+    story_map = StoryMap(
+        status="fallback",
+        thesis="Improve delivery quality.",
+        recommendation="Adopt source-backed review.",
+        beats=[],
+    )
+    deck = DeckSpec(
+        deck_title="Gate",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="content",
+                action_title="Rather than asking how do we",
+                content_blocks=[
+                    ContentBlock(
+                        type="bullets",
+                        body=[
+                            "Test generated work against harness-centric design turns existing.",
+                            "Instead of looking at using models to create direct synthetic data.",
+                        ],
+                    )
+                ],
+                sources=["Uploaded source"],
+                source_refs=["doc-1:Developer Productivity"],
+                archetype="comparison_table",
+                exhibit_spec={
+                    "type": "comparison_table",
+                    "columns": ["Signal", "Current readout", "Target move"],
+                    "rows": [
+                        [
+                            "Current readout",
+                            "Rather than asking how do we",
+                            "Test generated work against harness-centric design turns existing.",
+                        ]
+                    ],
+                },
+            )
+        ],
+        blueprint=blueprint,
+    )
+
+    report = planner._run_spec_gate(deck, bundle, compression, story_map)
+    rendered = json.dumps(deck.slides[0].model_dump()).lower()
+
+    assert any(repair.action == "rebuild_bad_copy" for repair in report.repairs)
+    assert "rather than asking how do we" not in rendered
+    assert "turns existing" not in rendered
+    assert "instead of looking at using models" not in rendered
+    assert deck.slides[0].archetype in {"callouts", "icon_rows"}
+    assert report.unresolved_count == 0
+
+
+def test_planner_raises_when_configured_client_fails() -> None:
     class FailingLLM:
         def complete_json(self, **kwargs):
             raise TimeoutError("model timed out")
 
     planner = ContentPlanner(llm_client=FailingLLM())
-    _, warnings = planner.plan(
-        _template("freeform"),
-        _bundle(),
-        instructions="Create a deck on moving beyond vibe coding.",
-        generation_mode="freeform",
-    )
-
-    assert any(
-        warning["field"] == "llm_planning" and "TimeoutError" in warning["message"]
-        for warning in warnings
-    )
+    with pytest.raises(PlanningFailedError, match="TimeoutError: model timed out"):
+        planner.plan(
+            _template("freeform"),
+            _bundle(),
+            instructions="Create a deck on moving beyond vibe coding.",
+            generation_mode="freeform",
+        )
 
 
 def test_planner_ignores_malformed_llm_blueprint_metadata() -> None:
@@ -1608,7 +3680,7 @@ def test_planner_repairs_repeated_action_titles_without_slide_suffix() -> None:
     titles = [outline.label for outline in outlines]
     assert len(titles) == len(set(titles))
     assert all("for slide" not in title.lower() for title in titles)
-    assert titles[1] == "Convert acceptance criteria into pre-execution review gates"
+    assert titles[1] == "Use acceptance criteria as pre-execution review gates"
     assert not warnings
 
 
@@ -2276,9 +4348,7 @@ def test_planner_rewrites_soft_beat_titles_before_consulting_qa() -> None:
     assert "Implement next steps through a short operating checklist" in titles
     assert "Standardize core operating artifacts as a reusable reference" in titles
     assert "Commit to the recommendation with named ownership" in titles
-    cycle_spec = outlines[0].content_json["diagram_spec"]
-    assert cycle_spec["kind"] == "cycle"
-    assert len(cycle_spec["steps"]) >= 4
+    assert outlines[0].content_json["diagram_spec"] is None
     assert not any(warning["field"] == "consulting_qa" for warning in warnings)
 
 
@@ -2540,12 +4610,12 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
 
     assert layouts == [
         "anti_patterns",
-        "framework_cycle",
+        "callouts",
         "dependency_map",
-        "code_panel",
+        "comparison_table",
         "checklist",
         "quote_sidebar",
-        "callouts",
+        "table_reference",
     ]
     assert not warnings
 
@@ -2654,6 +4724,17 @@ def test_planner_marks_unsupported_numeric_claims_source_needed() -> None:
         "[source needed]"
     )
     assert any(warning["field"] == "source_coverage" for warning in warnings)
+
+
+def test_planner_ignores_bare_single_digit_ordinals_for_numeric_grounding() -> None:
+    planner = ContentPlanner()
+
+    tokens = planner._numeric_tokens(
+        "Layer 2 connects to step 3 and stage 4, while the top 1% and 42% remain claims."
+    )
+
+    assert {"2", "3", "4"}.isdisjoint(tokens)
+    assert {"1%", "42%"}.issubset(tokens)
 
 
 def test_planner_allows_numeric_claims_present_in_source() -> None:
@@ -2858,12 +4939,13 @@ def test_planner_prompt_includes_allowed_numeric_tokens() -> None:
     bundle = _bundle()
     bundle.sections[0].content += " Teams reported 42% fewer escaped defects."
     llm = CapturingLLM()
-    ContentPlanner(llm_client=llm).plan(
-        _template("freeform"),
-        bundle,
-        instructions="Create a deck on moving beyond vibe coding.",
-        generation_mode="freeform",
-    )
+    with pytest.raises(PlanningFailedError, match="deterministic planning fallback is disabled"):
+        ContentPlanner(llm_client=llm).plan(
+            _template("freeform"),
+            bundle,
+            instructions="Create a deck on moving beyond vibe coding.",
+            generation_mode="freeform",
+        )
 
     assert "Allowed numeric tokens" in llm.prompt
     assert "42%" in llm.prompt
@@ -2896,14 +4978,15 @@ def test_showcase_planner_uses_richer_source_packet_and_output_budget() -> None:
     bundle.sections = sections
     llm = CapturingLLM()
 
-    ContentPlanner(llm_client=llm).plan(
-        _template("freeform"),
-        bundle,
-        instructions="Create a deck on moving beyond vibe coding.",
-        generation_mode="freeform",
-        quality_profile="showcase",
-        length_strategy="expanded",
-    )
+    with pytest.raises(PlanningFailedError, match="deterministic planning fallback is disabled"):
+        ContentPlanner(llm_client=llm).plan(
+            _template("freeform"),
+            bundle,
+            instructions="Create a deck on moving beyond vibe coding.",
+            generation_mode="freeform",
+            quality_profile="showcase",
+            length_strategy="expanded",
+        )
 
     assert llm.kwargs["max_tokens"] == 40000
     prompt = llm.kwargs["user_prompt"]

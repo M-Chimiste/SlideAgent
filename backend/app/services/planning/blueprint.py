@@ -14,6 +14,7 @@ from app.services.planning.constants import (
     SOURCE_NEEDED_LABEL,
     UPLOADED_SOURCE_LABEL,
 )
+from app.services.presentation_styles import get_style
 
 
 class BlueprintPlanningMixin:
@@ -51,29 +52,31 @@ class BlueprintPlanningMixin:
             for index, archetype in enumerate(archetype_sequence)
         ]
         thirds = max(target_slide_count // 3, 1)
+        style = get_style(getattr(self, "_presentation_style", "consulting"))
+        (label1, purpose1), (label2, purpose2), (label3, purpose3) = style.section_plan_labels
         section_plan = [
             {
-                "label": "Frame the decision",
+                "label": label1,
                 "start_slide": 1,
                 "end_slide": min(thirds, target_slide_count),
-                "purpose": "Establish thesis, stakes, and leadership question.",
+                "purpose": purpose1,
             },
             {
-                "label": "Prove the shift",
+                "label": label2,
                 "start_slide": min(thirds + 1, target_slide_count),
                 "end_slide": min(thirds * 2, target_slide_count),
-                "purpose": "Use evidence and exhibits to show why the old model breaks.",
+                "purpose": purpose2,
             },
             {
-                "label": "Commit to execution",
+                "label": label3,
                 "start_slide": min(thirds * 2 + 1, target_slide_count),
                 "end_slide": target_slide_count,
-                "purpose": "Translate the answer into operating choices and next steps.",
+                "purpose": purpose3,
             },
         ]
         return DeckBlueprint(
             deck_title=title,
-            audience="Engineering and product leaders",
+            audience=style.audience,
             core_thesis=self._core_thesis(title, instructions, bundle),
             target_slide_count=target_slide_count,
             story_beats=story_beats,
@@ -94,25 +97,37 @@ class BlueprintPlanningMixin:
         word_count = sum(len(section.content.split()) for section in bundle.sections)
         has_source = self._has_uploaded_source_material(bundle)
         source_rich = section_count >= 8 or evidence_count >= 4 or word_count >= 2500
+        # Length tiers give the UI control real range: concise=low, expanded=high.
+        # Thinner sources cap lower so Expanded does not pad an empty deck.
         if not has_source:
-            low, high = 5, 8
+            low, high = 5, 11
         elif source_rich:
-            low, high = 12, 18
+            low, high = 7, 22
         else:
-            low, high = 8, 12
+            low, high = 6, 16
 
         if length_strategy == "concise":
             target = low
         elif length_strategy == "expanded":
             target = high
-        else:
-            target = min(high, max(low, 14 if source_rich else 9 if has_source else 6))
+        else:  # auto: a balanced middle of the range
+            target = min(high, max(low, 12 if source_rich else 10 if has_source else 7))
 
         if quality_profile == "showcase" and has_source:
             target = min(high, target + 2)
-        if re.search(r"\b(\d{2,})\s+slides?\b", instructions.lower()):
-            requested = int(re.search(r"\b(\d{2,})\s+slides?\b", instructions.lower()).group(1))
-            return max(1, requested)
+        # Cap the toggle by how much distinct material the source actually has,
+        # so Expanded does not pad a thin source with filler: roughly one slide
+        # per section plus a structural slide and a bounded exhibit contribution.
+        # Prompt-only decks are generative (uncapped); an explicit brief count
+        # below is honored as-is — the user asked for an exact size.
+        if has_source:
+            supportable = section_count + 1 + min(len(bundle.tables) + len(bundle.metrics), 4)
+            target = min(target, max(low, supportable))
+        # An explicit count in the brief ("make a 6-slide deck", "20 slides")
+        # overrides the toggle; clamped to a sane 3-30.
+        match = re.search(r"\b(\d{1,2})\s+slides?\b", instructions.lower())
+        if match:
+            return max(3, min(30, int(match.group(1))))
         return min(target, high)
 
     def _archetype_sequence(
@@ -144,20 +159,20 @@ class BlueprintPlanningMixin:
             if has_tables:
                 candidates.extend(["comparison_table", "table_reference"])
             elif has_inventory:
-                candidates.extend(["table_reference", "reference"])
-            candidates.extend(["dependency_map", "framework_cycle"])
+                candidates.extend(["table_reference", "callouts"])
             if has_metrics:
                 candidates.append("metric_chart")
             candidates.extend(
                 [
                     "checklist",
                     "quote_sidebar",
-                    "matrix_2x2",
-                    "code_panel",
                     "callouts",
                     "icon_rows",
-                    "comparison_table" if not has_tables else "reference",
+                    "comparison_table" if not has_tables else "table_reference",
                     "two_column",
+                    "checklist",
+                    "callouts",
+                    "icon_rows",
                 ]
             )
         for archetype in candidates:

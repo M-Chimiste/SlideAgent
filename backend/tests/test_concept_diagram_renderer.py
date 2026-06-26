@@ -68,12 +68,26 @@ def test_generated_slide_spec_accepts_diagram_spec() -> None:
     assert slide.diagram_spec["kind"] == "cycle"
 
 
-def test_dependency_exhibit_derives_diagram_spec() -> None:
+def test_dependency_diagram_requires_explicit_source_backed_spec() -> None:
     renderer = ConceptDiagramRenderer()
+    with pytest.raises(DiagramRenderError, match="Missing explicit"):
+        renderer.diagram_spec(
+            _outline(
+                exhibit_spec={
+                    "type": "dependency_map",
+                    "left_node": "Source packet",
+                    "middle_nodes": ["Memory bank", "Rules files", "Review gate"],
+                    "right_outcome": "Reliable output",
+                    "connector_labels": ["grounds", "checks"],
+                }
+            )
+        )
+
     spec = renderer.diagram_spec(
         _outline(
-            exhibit_spec={
-                "type": "dependency_map",
+            diagram_spec={
+                "kind": "dependency_flow",
+                "title": "Make context dependencies explicit before scaling",
                 "left_node": "Source packet",
                 "middle_nodes": ["Memory bank", "Rules files", "Review gate"],
                 "right_outcome": "Reliable output",
@@ -88,19 +102,36 @@ def test_dependency_exhibit_derives_diagram_spec() -> None:
     assert spec["right_outcome"] == "Reliable output"
 
 
-def test_cycle_exhibit_derives_diagram_spec() -> None:
+def test_cycle_diagram_requires_explicit_source_backed_spec() -> None:
     renderer = ConceptDiagramRenderer()
+    with pytest.raises(DiagramRenderError, match="Missing explicit"):
+        renderer.diagram_spec(
+            _outline(
+                layout="framework_cycle",
+                exhibit_spec={
+                    "type": "cycle",
+                    "center_label": "Agent loop",
+                    "steps": [
+                        {"label": "Frame"},
+                        {"label": "Prime"},
+                        {"label": "Generate"},
+                        {"label": "Review"},
+                    ],
+                },
+            )
+        )
+
     spec = renderer.diagram_spec(
         _outline(
             layout="framework_cycle",
-            exhibit_spec={
-                "type": "cycle",
+            diagram_spec={
+                "kind": "cycle",
                 "center_label": "Agent loop",
                 "steps": [
-                    {"label": "Frame"},
-                    {"label": "Prime"},
-                    {"label": "Generate"},
-                    {"label": "Review"},
+                    {"label": "Set success criteria"},
+                    {"label": "Load source evidence"},
+                    {"label": "Generate test cases"},
+                    {"label": "Validate against harness"},
                 ],
             },
         )
@@ -109,10 +140,10 @@ def test_cycle_exhibit_derives_diagram_spec() -> None:
     assert spec["kind"] == "cycle"
     assert spec["center_label"] == "Agent loop"
     assert [step["label"] for step in spec["steps"]] == [
-        "Frame",
-        "Prime",
-        "Generate",
-        "Review",
+        "Set success criteria",
+        "Load source evidence",
+        "Generate test cases",
+        "Validate against harness",
     ]
 
 
@@ -188,8 +219,9 @@ def test_node_worker_rasterizes_sample_svg(tmp_path: Path) -> None:
 @pytest.mark.skipif(not _has_node_sharp(), reason="Node/sharp worker is not installed")
 def test_renderer_inserts_diagram_png_and_writes_debug_artifacts(tmp_path: Path) -> None:
     outline = _outline(
-        exhibit_spec={
-            "type": "dependency_map",
+        diagram_spec={
+            "kind": "dependency_flow",
+            "title": "Make context dependencies explicit before scaling",
             "left_node": "Source packet",
             "middle_nodes": ["Memory bank", "Rules files", "Review gate"],
             "right_outcome": "Reliable output",

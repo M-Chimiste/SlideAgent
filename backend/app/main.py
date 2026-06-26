@@ -38,10 +38,18 @@ def create_app() -> FastAPI:
 
     template_analyzer = TemplateAnalyzer(bedrock=bedrock)
     ingester = DocumentIngester()
-    planner = ContentPlanner(llm_client=llm_client)
+    planner = ContentPlanner(
+        llm_client=llm_client,
+        slide_generation_strategy="batched",
+        decompose=settings.planner_decompose,
+    )
     designer = DesignAgent()
     node_runner = NodePptxGenRunner(settings)
-    builder = PptxBuilder(node_runner)
+    builder = PptxBuilder(
+        node_runner,
+        renderer_engine=settings.renderer_engine,
+        brand_layout_instantiation=settings.brand_layout_instantiation,
+    )
     vision_client = None
     if settings.llm_provider == "openai_compatible":
         vision_client = OpenAICompatibleClient(
@@ -58,6 +66,7 @@ def create_app() -> FastAPI:
         bedrock=bedrock,
         openai_client=vision_client,
         model_id=settings.sonnet_model_id,
+        vision_max_slides=settings.vision_max_slides,
     )
     orchestrator = JobOrchestrator(
         settings=settings,

@@ -8,6 +8,7 @@ type PlanningArtifacts = {
   source?: any;
   story?: any;
   gate?: any;
+  editing?: any;
 };
 
 type Props = {
@@ -65,7 +66,10 @@ export default function PlanReviewScreen({
 
   const coverage = status.planning_summary?.source_coverage;
   const gate = status.planning_summary?.spec_gate;
+  const editing = status.planning_summary?.editing_contract;
+  const editingSlides = Array.isArray(artifacts.editing?.slides) ? artifacts.editing.slides : [];
   const beats = Array.isArray(artifacts.story?.beats) ? artifacts.story.beats : [];
+  const visualReview = status.visual_review;
 
   const updateEdit = (slideIndex: number, field: "action_title" | "subheading", value: string) => {
     setEdits((current) => ({
@@ -174,6 +178,38 @@ export default function PlanReviewScreen({
                   <div style={{ marginTop: 9, fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.4 }}>
                     {(slide.sources || []).slice(0, 2).join("; ") || "No source label"}
                   </div>
+                  {(slide.composition_family || slide.visual_degradation?.reason) && (
+                    <div style={{ marginTop: 6, fontSize: 11, color: "var(--ink-3)", lineHeight: 1.4 }}>
+                      {slide.composition_family || "composition pending"}
+                      {slide.visual_degradation?.reason ? ` · ${slide.visual_degradation.reason}` : ""}
+                    </div>
+                  )}
+                  {slide.template_frame && (
+                    <div style={{ marginTop: 6, fontSize: 11, color: "var(--ink-3)", lineHeight: 1.4 }}>
+                      source frame {slide.template_frame.source_slide ?? Number(slide.template_frame.index ?? 0) + 1}:{" "}
+                      {slide.template_frame.label || slide.template_frame.layout_name || "template slide"}
+                      {slide.template_frame.method ? ` · ${slide.template_frame.method}` : ""}
+                      {slide.template_frame.match_confidence
+                        ? ` · ${slide.template_frame.match_confidence}${
+                            slide.template_frame.match_score != null ? `:${slide.template_frame.match_score}` : ""
+                          }`
+                        : ""}
+                      {slide.template_frame.closest_candidates?.length ? (
+                        <div style={{ marginTop: 3 }}>
+                          alternatives:{" "}
+                          {slide.template_frame.closest_candidates
+                            .slice(0, 2)
+                            .map((candidate) => {
+                              const frameNo = candidate.source_slide ?? Number(candidate.index ?? 0) + 1;
+                              return `${frameNo} ${candidate.label || candidate.layout_name || "frame"}${
+                                candidate.match_score != null ? `:${candidate.match_score}` : ""
+                              }`;
+                            })
+                            .join(" / ")}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -194,8 +230,73 @@ export default function PlanReviewScreen({
           <div style={{ ...card, padding: 16 }}>
             <div style={{ ...microLabel, marginBottom: 10 }}>PLANNING HEALTH</div>
             <Metric label="Story map" value={status.planning_summary?.story_map_status || "ready"} />
+            <Metric label="Style" value={String(status.job.config_json?.presentation_style || "auto")} />
+            <Metric label="Design language" value={String(status.job.config_json?.design_language || "auto")} />
             <Metric label="Sections used" value={coverage ? `${coverage.included_section_count}/${coverage.section_count}` : "-"} />
             <Metric label="Spec gate" value={gate ? `${gate.repaired_count} repaired` : "-"} />
+            <Metric
+              label="Editing contract"
+              value={
+                editing
+                  ? `${editing.status || "ready"} / ${
+                      editing.unique_composition_family_count || editing.unique_layout_count
+                    } families`
+                  : "-"
+              }
+            />
+            <Metric
+              label="Card composition"
+              value={
+                editing
+                  ? `${Math.round(((editing.composition_card_ratio ?? editing.bullet_card_ratio) || 0) * 100)}%`
+                  : "-"
+              }
+            />
+            <Metric label="Diagrams" value={editing ? String(editing.diagram_count || 0) : "-"} />
+            <Metric label="Slot fit risks" value={editing ? String(editing.slot_risk_count || 0) : "-"} />
+            <Metric
+              label="Structural ops"
+              value={editing ? `${editing.structural_operation_count || 0} / ${editing.structural_warning_count || 0} warnings` : "-"}
+            />
+            <Metric
+              label="Formatting fixes"
+              value={editing ? `${editing.formatting_fix_count || 0} / ${editing.formatting_warning_count || 0} warnings` : "-"}
+            />
+            <Metric
+              label="Full-res QA"
+              value={visualReview ? visualReview.status : "after render"}
+            />
+          </div>
+          <div style={{ ...card, padding: 16 }}>
+            <div style={{ ...microLabel, marginBottom: 10 }}>CLAUDE-STYLE LAYOUT MAP</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {editingSlides.slice(0, 7).map((slide: any) => (
+                <div key={slide.slide_index} style={{ fontSize: 12, color: "var(--ink-2)", lineHeight: 1.35 }}>
+                  <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--accent)" }}>
+                    {String(Number(slide.slide_index) + 1).padStart(2, "0")}
+                  </span>{" "}
+                  {slide.layout || "layout"} · {slide.content_type || "content"}
+                  {slide.structural_operation?.operation && (
+                    <div style={{ marginLeft: 28, marginTop: 2, color: "var(--ink-3)" }}>
+                      structure: {slide.structural_operation.operation}
+                    </div>
+                  )}
+                  {slide.formatting_plan?.status && slide.formatting_plan.status !== "pass" && (
+                    <div style={{ marginLeft: 28, marginTop: 2, color: slide.formatting_plan.status === "fixed" ? "var(--good)" : "var(--warn)" }}>
+                      format: {slide.formatting_plan.action || slide.formatting_plan.status}
+                    </div>
+                  )}
+                  {slide.slot_plan?.status && slide.slot_plan.status !== "native" && (
+                    <div style={{ marginLeft: 28, marginTop: 2, color: slide.slot_plan.status === "fit" ? "var(--good)" : "var(--warn)" }}>
+                      slot: {slide.slot_plan.action || slide.slot_plan.status}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {editingSlides.length === 0 && (
+                <div style={{ fontSize: 12, color: "var(--ink-3)" }}>No editing-contract artifact found yet.</div>
+              )}
+            </div>
           </div>
           <div style={{ ...card, padding: 16 }}>
             <div style={{ ...microLabel, marginBottom: 10 }}>STORY BEATS</div>

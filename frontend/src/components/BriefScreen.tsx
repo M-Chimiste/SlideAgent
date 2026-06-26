@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { card, eyebrow, microLabel, segActive, segGroup, segIdle, SERIF } from "../ui";
-import { Length, Mode, Planner, Quality } from "../types";
+import { DesignLanguage, Length, Mode, Planner, PresentationStyle, Quality } from "../types";
 
 const MONO = "'IBM Plex Mono', monospace";
 
@@ -18,10 +18,14 @@ type Props = {
   planner: Planner;
   quality: Quality;
   length: Length;
+  presentationStyle: PresentationStyle;
+  designLanguage: DesignLanguage;
   visualQa: boolean;
   onPlanner: (v: Planner) => void;
   onQuality: (v: Quality) => void;
   onLength: (v: Length) => void;
+  onPresentationStyle: (v: PresentationStyle) => void;
+  onDesignLanguage: (v: DesignLanguage) => void;
   onToggleVisualQa: () => void;
   submitting: boolean;
   error: string | null;
@@ -50,6 +54,39 @@ function Segmented<T extends string>({
         </button>
       ))}
     </div>
+  );
+}
+
+function Dropdown<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { v: T; label: string }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as T)}
+      style={{
+        ...segGroup,
+        width: "100%",
+        marginBottom: 18,
+        padding: "10px 12px",
+        fontSize: 13,
+        color: "var(--ink-1)",
+        background: "var(--surface-1)",
+        cursor: "pointer",
+      }}
+    >
+      {options.map((o) => (
+        <option key={o.v} value={o.v}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -288,6 +325,11 @@ export default function BriefScreen(p: Props) {
               { v: "deep", label: "Deep" },
             ]}
           />
+          <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6, marginBottom: 4, lineHeight: 1.4 }}>
+            {p.planner === "deep"
+              ? "Authors one focused pass per slide — sharper, slower on local models."
+              : "Authors slides in batches — quicker; both rewrite the title ladder into a story."}
+          </div>
 
           <div style={{ ...microLabel, marginBottom: 8 }}>QUALITY</div>
           <Segmented
@@ -308,6 +350,37 @@ export default function BriefScreen(p: Props) {
               { v: "auto", label: "Auto" },
               { v: "concise", label: "Concise" },
               { v: "expanded", label: "Expanded" },
+            ]}
+          />
+
+          <div style={{ ...microLabel, marginBottom: 8 }}>PRESENTATION STYLE</div>
+          <Dropdown
+            value={p.presentationStyle}
+            onChange={p.onPresentationStyle}
+            options={[
+              { v: "auto", label: "Auto (infer from brief)" },
+              { v: "consulting", label: "Consulting / strategy" },
+              { v: "investor_pitch", label: "Investor pitch" },
+              { v: "sales", label: "Sales deck" },
+              { v: "academic_lecture", label: "Academic lecture" },
+              { v: "technical_deep_dive", label: "Technical deep-dive" },
+              { v: "keynote_narrative", label: "Keynote / narrative" },
+              { v: "status_report_qbr", label: "Status report / QBR" },
+            ]}
+          />
+
+          <div style={{ ...microLabel, marginBottom: 8 }}>DESIGN LANGUAGE</div>
+          <Dropdown
+            value={p.designLanguage}
+            onChange={p.onDesignLanguage}
+            options={[
+              { v: "auto", label: "Auto (match topic & style)" },
+              { v: "editorial_serif", label: "Editorial serif" },
+              { v: "modern_geometric", label: "Modern geometric" },
+              { v: "bold_minimal", label: "Bold minimal" },
+              { v: "warm_magazine", label: "Warm magazine" },
+              { v: "technical_mono", label: "Technical mono" },
+              { v: "data_forward", label: "Data forward" },
             ]}
           />
 

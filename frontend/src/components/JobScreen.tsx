@@ -17,12 +17,15 @@ const STAGES: { label: string; desc: string }[] = [
 // backend status → index of the stage currently running
 const STATUS_STAGE: Record<string, number> = {
   queued: 0,
+  running: 0,
   analyzing: 0,
   planning: 1,
   generating: 3,
   qa: 6,
+  repairing: 7,
   planned: 3,
   done: STAGES.length,
+  review_failed: STAGES.length,
   error: -1,
 };
 
@@ -45,13 +48,17 @@ export default function JobScreen({
 }: Props) {
   const done = jobStatus === "done";
   const planned = jobStatus === "planned";
+  const reviewFailed = jobStatus === "review_failed";
   const errored = jobStatus === "error";
   const current = STATUS_STAGE[jobStatus] ?? 0;
-  const pct = done ? 100 : planned ? Math.max(50, Math.round((progress || 0) * 100)) : Math.round((progress || 0) * 100);
+  const terminalReview = done || reviewFailed;
+  const pct = terminalReview ? 100 : planned ? Math.max(50, Math.round((progress || 0) * 100)) : Math.round((progress || 0) * 100);
 
-  const eyebrowText = errored ? "✕ FAILED" : done ? "✓ COMPLETE" : planned ? "✓ PLAN READY" : "GENERATING";
+  const eyebrowText = errored ? "✕ FAILED" : reviewFailed ? "REVIEW FAILED" : done ? "✓ COMPLETE" : planned ? "✓ PLAN READY" : "GENERATING";
   const title = errored
     ? "Generation failed"
+    : reviewFailed
+    ? "Deck needs review fixes"
     : done
     ? "Your deck is ready"
     : planned
@@ -75,7 +82,7 @@ export default function JobScreen({
             fontFamily: MONO,
             fontSize: 11,
             letterSpacing: ".18em",
-            color: errored ? "var(--bad)" : "var(--accent)",
+            color: errored || reviewFailed ? "var(--bad)" : "var(--accent)",
           }}
         >
           {eyebrowText}
@@ -110,7 +117,7 @@ export default function JobScreen({
         <div
           style={{
             height: "100%",
-            background: errored ? "var(--bad)" : "var(--accent)",
+            background: errored || reviewFailed ? "var(--bad)" : "var(--accent)",
             borderRadius: 3,
             width: `${pct}%`,
             transition: "width .5s cubic-bezier(.3,.7,.3,1)",
@@ -131,10 +138,16 @@ export default function JobScreen({
         <span>
           {errored
             ? errorMessage || "see logs"
+            : reviewFailed
+            ? errorMessage || "final QA found unresolved issues"
             : planned
             ? "plan ready for review"
             : done
             ? "all gates cleared"
+            : jobStatus === "repairing"
+            ? "repairing flagged slides"
+            : jobStatus === "qa"
+            ? "visual QA and repair check"
             : "planning → render → QA"}
         </span>
       </div>
@@ -142,8 +155,8 @@ export default function JobScreen({
       {/* stages */}
       <div style={{ display: "flex", flexDirection: "column" }}>
         {STAGES.map((g, i) => {
-          const stageDone = done || (planned && i <= 4) || (!errored && i < current);
-          const active = !done && !planned && !errored && i === current;
+          const stageDone = terminalReview || (planned && i <= 4) || (!errored && !reviewFailed && i < current);
+          const active = !terminalReview && !planned && !errored && i === current;
           const ring: CSSProperties["borderColor"] = active
             ? "var(--accent)"
             : stageDone
@@ -231,30 +244,30 @@ export default function JobScreen({
             cursor: "pointer",
           }}
         >
-          {done || errored ? "Back" : "Cancel"}
+          {terminalReview || errored ? "Back" : "Cancel"}
         </button>
         <button
           onClick={onReview}
-          disabled={!done && !planned}
+          disabled={!terminalReview && !planned}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 9,
             height: 48,
             padding: "0 26px",
-            background: done || planned ? "var(--accent)" : "var(--inset)",
-            color: done || planned ? "var(--accent-ink)" : "var(--ink-3)",
+            background: terminalReview || planned ? "var(--accent)" : "var(--inset)",
+            color: terminalReview || planned ? "var(--accent-ink)" : "var(--ink-3)",
             border: "none",
             borderRadius: 9,
             font: "inherit",
             fontSize: 14,
             fontWeight: 700,
-            cursor: done || planned ? "pointer" : "default",
+            cursor: terminalReview || planned ? "pointer" : "default",
             boxShadow: "var(--shadow)",
-            opacity: done || planned ? 1 : 0.7,
+            opacity: terminalReview || planned ? 1 : 0.7,
           }}
         >
-          {planned ? "Review plan" : done ? "Review deck" : "Working…"} <span style={{ fontSize: 15 }}>→</span>
+          {planned ? "Review plan" : terminalReview ? "Review deck" : "Working…"} <span style={{ fontSize: 15 }}>→</span>
         </button>
       </div>
     </div>

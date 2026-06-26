@@ -6,6 +6,10 @@ from app.models.outline import SlideOutline
 from app.models.qa import QAIssue
 
 
+UNICODE_BULLET_CHARS = "\u2022\u25e6\u25aa\u25cf"
+UNICODE_BULLET_PREFIX_RE = re.compile(rf"^\s*[{UNICODE_BULLET_CHARS}]\s*")
+
+
 class DesignAgent:
     def __init__(self) -> None:
         self.icon_pool = {
@@ -80,6 +84,218 @@ class DesignAgent:
             )
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             return self._diversify_layout_sequence(list(executor.map(self._apply_one, outlines)))
+
+    def apply_editing_contract(self, outlines: list[SlideOutline]) -> list[SlideOutline]:
+        """Remap monotonous card-heavy plans before rendering.
+
+        Claude's PPTX editing guidance treats layout mapping as an authoring
+        step, not a post-hoc decoration pass. This pass keeps the planner's
+        content but swaps excess card/bullet slides into semantically compatible
+        layouts so the deck has a real visual rhythm before it reaches QA.
+        """
+        revised = [outline.model_copy(deep=True) for outline in outlines]
+        for outline in revised:
+            self._repair_concatenated_multi_item_blocks(outline)
+            self._repair_unicode_bullets(outline)
+        flexible = [outline for outline in revised if outline.mode == "flexible"]
+        if len(flexible) < 5:
+            return self._diversify_layout_sequence(revised)
+
+        max_card_slides = max(1, int(len(flexible) * 0.58))
+        current_card_count = self._card_layout_count(flexible)
+        seen_counts: dict[str, int] = {}
+        last_layout: str | None = None
+        for outline in flexible:
+            layout = str(outline.layout_json.get("layout") or "two_column")
+            should_promote = (
+                self._is_card_layout(layout)
+                and current_card_count > max_card_slides
+            ) or (last_layout == layout and layout not in {"cover", "section_divider"})
+            if should_promote:
+                replacement = self._editing_contract_layout(
+                    outline,
+                    last_layout,
+                    seen_counts,
+                )
+                if replacement != layout:
+                    self._set_layout_for_contract(outline, replacement, previous=layout)
+                    if self._is_card_layout(layout):
+                        current_card_count -= 1
+                    layout = replacement
+            seen_counts[layout] = seen_counts.get(layout, 0) + 1
+            last_layout = layout
+        return self._diversify_layout_sequence(revised)
+
+    def _repair_unicode_bullets(self, outline: SlideOutline) -> None:
+        count = 0
+        blocks = outline.content_json.get("content_blocks")
+        if isinstance(blocks, list):
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                body = block.get("body")
+                repaired, delta = self._sanitize_item_body(body)
+                if delta:
+                    block["body"] = repaired
+                    count += delta
+        bullets = outline.content_json.get("bullets")
+        if isinstance(bullets, list):
+            repaired_bullets, delta = self._sanitize_item_list(bullets)
+            if delta:
+                outline.content_json["bullets"] = repaired_bullets
+                count += delta
+        exhibit = outline.content_json.get("exhibit_spec")
+        if isinstance(exhibit, dict):
+            repaired_exhibit, delta = self._sanitize_unicode_bullets_in_value(exhibit)
+            if delta and isinstance(repaired_exhibit, dict):
+                outline.content_json["exhibit_spec"] = repaired_exhibit
+                count += delta
+        if count:
+            self._mark_editing_contract_repair(
+                outline,
+                "unicode_bullet_sanitized_count",
+                count,
+            )
+
+    def _repair_concatenated_multi_item_blocks(self, outline: SlideOutline) -> None:
+        blocks = outline.content_json.get("content_blocks")
+        if not isinstance(blocks, list):
+            return
+        changed = False
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            body = block.get("body")
+            if isinstance(body, str):
+                split = self._split_concatenated_multi_item_text(body)
+                if split:
+                    block["body"] = split
+                    changed = True
+            elif isinstance(body, list):
+                repaired: list[Any] = []
+                block_changed = False
+                for item in body:
+                    if isinstance(item, str):
+                        split = self._split_concatenated_multi_item_text(item)
+                        if split:
+                            repaired.extend(split)
+                            changed = True
+                            block_changed = True
+                            continue
+                    repaired.append(item)
+                if block_changed:
+                    block["body"] = repaired
+        if not changed:
+            return
+        self._mark_editing_contract_repair(outline, "multi_item_split", True)
+
+    def _mark_editing_contract_repair(
+        self,
+        outline: SlideOutline,
+        key: str,
+        value: Any,
+    ) -> None:
+        repair = outline.layout_json.get("editing_contract_repair")
+        if not isinstance(repair, dict):
+            repair = {}
+            outline.layout_json["editing_contract_repair"] = repair
+        repair["applied"] = True
+        repair[key] = value
+
+    def _sanitize_item_body(self, value: Any) -> tuple[Any, int]:
+        if isinstance(value, str):
+            split = self._split_unicode_bullet_lines(value)
+            if split:
+                return split, len(split)
+            cleaned = self._strip_unicode_bullet_prefix(value)
+            return cleaned, int(cleaned != value)
+        if isinstance(value, list):
+            return self._sanitize_item_list(value)
+        return value, 0
+
+    def _sanitize_item_list(self, values: list[Any]) -> tuple[list[Any], int]:
+        repaired: list[Any] = []
+        count = 0
+        for item in values:
+            if isinstance(item, str):
+                split = self._split_unicode_bullet_lines(item)
+                if split:
+                    repaired.extend(split)
+                    count += len(split)
+                    continue
+                cleaned = self._strip_unicode_bullet_prefix(item)
+                if cleaned != item:
+                    count += 1
+                repaired.append(cleaned)
+                continue
+            fixed, delta = self._sanitize_unicode_bullets_in_value(item)
+            repaired.append(fixed)
+            count += delta
+        return repaired, count
+
+    def _sanitize_unicode_bullets_in_value(self, value: Any) -> tuple[Any, int]:
+        if isinstance(value, str):
+            cleaned = self._strip_unicode_bullet_prefixes_by_line(value)
+            return cleaned, int(cleaned != value)
+        if isinstance(value, list):
+            repaired: list[Any] = []
+            count = 0
+            for item in value:
+                fixed, delta = self._sanitize_unicode_bullets_in_value(item)
+                repaired.append(fixed)
+                count += delta
+            return repaired, count
+        if isinstance(value, dict):
+            repaired: dict[str, Any] = {}
+            count = 0
+            for key, item in value.items():
+                fixed, delta = self._sanitize_unicode_bullets_in_value(item)
+                repaired[key] = fixed
+                count += delta
+            return repaired, count
+        return value, 0
+
+    def _split_unicode_bullet_lines(self, text: str) -> list[str] | None:
+        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+        bullet_lines = [
+            self._strip_unicode_bullet_prefix(line)
+            for line in lines
+            if UNICODE_BULLET_PREFIX_RE.search(line)
+        ]
+        if len(bullet_lines) >= 2 and len(bullet_lines) == len(lines):
+            return [line for line in bullet_lines if line]
+        return None
+
+    def _strip_unicode_bullet_prefixes_by_line(self, text: str) -> str:
+        lines = str(text).splitlines()
+        if len(lines) <= 1:
+            return self._strip_unicode_bullet_prefix(text)
+        return "\n".join(self._strip_unicode_bullet_prefix(line) for line in lines)
+
+    def _strip_unicode_bullet_prefix(self, text: str) -> str:
+        return UNICODE_BULLET_PREFIX_RE.sub("", str(text)).strip()
+
+    def _split_concatenated_multi_item_text(self, text: str) -> list[str] | None:
+        cleaned = " ".join(str(text).replace("\n", " ").split())
+        if not cleaned:
+            return None
+        marker_re = re.compile(
+            r"(?<!\w)(?:Step|Phase|Stage)\s+\d+\s*[:.)-]?|\b\d{1,2}[.)](?=\s+[A-Z])",
+            re.IGNORECASE,
+        )
+        matches = list(marker_re.finditer(cleaned))
+        if len(matches) < 2:
+            return None
+        prefix = cleaned[: matches[0].start()].strip(" ;")
+        items: list[str] = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(cleaned)
+            segment = cleaned[match.start() : end].strip(" ;")
+            if prefix and index == 0:
+                segment = f"{prefix} {segment}".strip()
+            if segment:
+                items.append(segment)
+        return items if len(items) >= 2 else None
 
     def revise_for_qa(
         self, outline: SlideOutline, issues: list[QAIssue] | None = None
@@ -187,9 +403,16 @@ class DesignAgent:
                 "missing visuals",
                 "scanability",
                 "content_quality",
+                "incomplete_content",
+                "placeholder_text",
+                "raw_artifact",
+                "semantic_visual_fit",
+                "diagram_semantic_fit",
+                "rendered_slide_audit",
                 "missing_exhibit",
                 "exhibit",
                 "narrative_rhythm",
+                "visual_rhythm",
                 "archetype",
                 "bullet_card_usage",
             )
@@ -215,6 +438,11 @@ class DesignAgent:
                 "spacing",
                 "scanability",
                 "content_quality",
+                "incomplete_content",
+                "placeholder_text",
+                "raw_artifact",
+                "semantic_visual_fit",
+                "diagram_semantic_fit",
             )
         )
 
@@ -231,6 +459,8 @@ class DesignAgent:
                 "missing_exhibit",
                 "exhibit",
                 "bullet_card_usage",
+                "semantic_visual_fit",
+                "diagram_semantic_fit",
             )
         )
 
@@ -244,12 +474,15 @@ class DesignAgent:
                 "contrast",
                 "spacing",
                 "narrative_rhythm",
+                "visual_rhythm",
                 "archetype",
             )
         )
 
     def _best_visual_layout(self, outline: SlideOutline, current: str) -> str:
         content = outline.content_json
+        if self._is_source_repair_slide(outline):
+            return self._safe_source_repair_layout(outline, current)
         exhibit_layout = self._layout_from_exhibit(content.get("exhibit_spec"))
         if exhibit_layout and exhibit_layout != current:
             return exhibit_layout
@@ -305,6 +538,85 @@ class DesignAgent:
             return False
         return True
 
+    def _is_card_layout(self, layout: str) -> bool:
+        return layout in {"callouts", "icon_grid", "icon_rows", "two_column"}
+
+    def _card_layout_count(self, outlines: list[SlideOutline]) -> int:
+        return sum(
+            1
+            for outline in outlines
+            if self._is_card_layout(str(outline.layout_json.get("layout") or ""))
+        )
+
+    def _editing_contract_layout(
+        self,
+        outline: SlideOutline,
+        last_layout: str | None,
+        seen_counts: dict[str, int],
+    ) -> str:
+        for layout in self._editing_contract_candidates(outline):
+            if layout == last_layout:
+                continue
+            if seen_counts.get(layout, 0) >= self._layout_repeat_limit(layout):
+                continue
+            if self._layout_is_suitable(layout, outline):
+                return layout
+        for layout in self._editing_contract_candidates(outline):
+            if layout != last_layout and self._layout_is_suitable(layout, outline):
+                return layout
+        return str(outline.layout_json.get("layout") or "two_column")
+
+    def _editing_contract_candidates(self, outline: SlideOutline) -> list[str]:
+        content = outline.content_json
+        current = str(outline.layout_json.get("layout") or "two_column")
+        exhibit = content.get("exhibit_spec")
+        exhibit_type = str(exhibit.get("type") or "") if isinstance(exhibit, dict) else ""
+        text = self._outline_text(outline)
+        candidates: list[str] = []
+        if current in {"cover", "executive_summary", "section_divider", "closing_recommendation"}:
+            return [current]
+        if self._is_source_repair_slide(outline):
+            candidates.extend(["quote_sidebar", "checklist", "process"])
+        if content.get("metrics"):
+            candidates.append("chart")
+        if exhibit_type == "comparison_table":
+            candidates.extend(["comparison_table", "process"])
+        if exhibit_type == "reference_table":
+            candidates.extend(["table_reference", "comparison_table", "process"])
+        if exhibit_type == "checklist" or "question" in text or "checklist" in text:
+            candidates.extend(["checklist", "quote_sidebar"])
+        if any(token in text for token in ("decision", "mental model", "why", "shift", "reframe")):
+            candidates.append("quote_sidebar")
+        if self._has_table(content):
+            candidates.append("process")
+        candidates.extend(["quote_sidebar", "checklist", "process", "comparison_table"])
+        deduped: list[str] = []
+        for candidate in candidates:
+            if candidate in deduped:
+                continue
+            if self._is_card_layout(candidate):
+                continue
+            deduped.append(candidate)
+        return deduped
+
+    def _set_layout_for_contract(
+        self,
+        outline: SlideOutline,
+        layout: str,
+        previous: str,
+    ) -> None:
+        outline.layout_json["layout"] = layout
+        outline.layout_json["archetype"] = self._archetype_for_layout(layout)
+        outline.layout_json["visual_elements"] = self._visuals_for_layout(layout)
+        outline.layout_json["icons"] = self._select_icons(outline)
+        repair = outline.layout_json.get("editing_contract_repair")
+        if not isinstance(repair, dict):
+            repair = {}
+            outline.layout_json["editing_contract_repair"] = repair
+        repair["applied"] = True
+        repair["from_layout"] = previous
+        repair["to_layout"] = layout
+
     def _diversify_layout_sequence(self, outlines: list[SlideOutline]) -> list[SlideOutline]:
         diversified: list[SlideOutline] = []
         last_layout: str | None = None
@@ -330,6 +642,16 @@ class DesignAgent:
                 continue
             revised = outline.model_copy(deep=True)
             current = str(revised.layout_json.get("layout") or "two_column")
+            if self._is_source_repair_slide(revised):
+                intended = self._safe_source_repair_layout(revised, current)
+                revised.layout_json["layout"] = intended
+                revised.layout_json["archetype"] = self._archetype_for_layout(intended)
+                revised.layout_json["visual_elements"] = self._visuals_for_layout(intended)
+                revised.layout_json["icons"] = self._select_icons(revised)
+                seen_counts[intended] = seen_counts.get(intended, 0) + 1
+                last_layout = intended
+                diversified.append(revised)
+                continue
             intended = self._intent_layout(revised, index) or current
             if index > 0 and intended == "executive_summary" and current != "executive_summary":
                 intended = current if current != "executive_summary" else "two_column"
@@ -489,6 +811,8 @@ class DesignAgent:
 
     def _intent_layout(self, outline: SlideOutline, index: int) -> str | None:
         current = str(outline.layout_json.get("layout") or "")
+        if self._is_source_repair_slide(outline):
+            return self._safe_source_repair_layout(outline, current)
         explicit = self._explicit_archetype_layout(outline)
         if explicit:
             return explicit
@@ -593,13 +917,13 @@ class DesignAgent:
                 "type": "checklist",
                 "items": self._ensure_min_items(
                     [
-                    {"action": self._truncate_text(bullet, 92), "owner": "Owner", "timing": "Next"}
+                    {"action": self._truncate_text(bullet, 92), "owner": "Lead", "timing": "Review gate"}
                     for bullet in bullets
                     ],
                     [
-                        {"action": "Confirm source context", "owner": "Lead", "timing": "Next"},
-                        {"action": "Define review gate", "owner": "Manager", "timing": "Next"},
-                        {"action": "Run pilot workflow", "owner": "Team", "timing": "Next"},
+                        {"action": "Confirm source context", "owner": "Lead", "timing": "Review gate"},
+                        {"action": "Define review gate", "owner": "Manager", "timing": "Pilot"},
+                        {"action": "Run pilot workflow", "owner": "Team", "timing": "Pilot"},
                     ],
                     min_count=3,
                 ),
@@ -635,9 +959,9 @@ class DesignAgent:
                 condensed["items"] = self._ensure_min_items(
                     condensed.get("items"),
                     [
-                        {"action": "Confirm source context", "owner": "Lead", "timing": "Next"},
-                        {"action": "Define review gate", "owner": "Manager", "timing": "Next"},
-                        {"action": "Run pilot workflow", "owner": "Team", "timing": "Next"},
+                        {"action": "Confirm source context", "owner": "Lead", "timing": "Review gate"},
+                        {"action": "Define review gate", "owner": "Manager", "timing": "Pilot"},
+                        {"action": "Run pilot workflow", "owner": "Team", "timing": "Pilot"},
                     ],
                     min_count=3,
                 )
@@ -645,16 +969,16 @@ class DesignAgent:
                 condensed["steps"] = self._ensure_min_items(
                     condensed.get("steps"),
                     [
-                        {"label": "Frame", "description": "Define the ask"},
-                        {"label": "Prime", "description": "Load context"},
-                        {"label": "Review", "description": "Check against evidence"},
+                        {"label": "Define scope", "description": "Define the ask"},
+                        {"label": "Load evidence", "description": "Load context"},
+                        {"label": "Check evidence", "description": "Check against evidence"},
                     ],
                     min_count=3,
                 )
             if exhibit_type == "dependency_map":
                 condensed["middle_nodes"] = self._ensure_min_items(
                     condensed.get("middle_nodes"),
-                    ["Context", "Rules", "Review"],
+                    ["Source evidence", "Operating constraints", "Review standard"],
                     min_count=2,
                 )
             return condensed
@@ -697,6 +1021,11 @@ class DesignAgent:
         working_limit = limit - len(source_marker)
         cleaned = cleaned.replace("[source needed]", "").strip()
         truncated = cleaned[: max(20, working_limit)].rsplit(" ", 1)[0].rstrip(".,;:")
+        trailing = {"a", "an", "and", "as", "by", "for", "from", "in", "into", "of", "or", "the", "their", "through", "to", "with"}
+        words = truncated.split()
+        while words and words[-1].lower() in trailing:
+            words.pop()
+        truncated = " ".join(words).strip(".,;:")
         return f"{truncated}{source_marker}"
 
     def _content_bullets(self, content: dict[str, Any]) -> list[str]:
@@ -725,11 +1054,228 @@ class DesignAgent:
             return outline
         layout = outline.layout_json.get("layout", "icon_rows")
         outline.layout_json["layout"] = self._normalize_layout(layout, outline)
+        self._repair_underfilled_exhibit(outline)
         outline.layout_json.setdefault("icons", self._select_icons(outline))
         outline.layout_json["visual_elements"] = outline.layout_json.get(
             "visual_elements"
         ) or self._visuals_for_layout(outline.layout_json["layout"])
         return outline
+
+    def _repair_underfilled_exhibit(self, outline: SlideOutline) -> None:
+        exhibit = outline.content_json.get("exhibit_spec")
+        if not isinstance(exhibit, dict):
+            return
+        exhibit_type = str(exhibit.get("type") or "").lower().replace("-", "_")
+        if exhibit_type == "checklist":
+            items = self._normalized_checklist_items(exhibit.get("items"))
+            repaired = self._extend_min_items(
+                items,
+                self._checklist_fallback_items(outline),
+                min_count=3,
+            )
+            if repaired != exhibit.get("items"):
+                exhibit["items"] = repaired
+                self._sync_checklist_content_block(outline, repaired)
+                self._mark_editing_contract_repair(
+                    outline,
+                    "underfilled_checklist_repaired",
+                    True,
+                )
+        elif exhibit_type == "icon_rows":
+            items = self._normalized_text_items(exhibit.get("items"))
+            repaired = self._extend_min_items(
+                items,
+                self._icon_row_fallback_items(outline),
+                min_count=3,
+            )
+            if repaired != exhibit.get("items"):
+                exhibit["items"] = repaired
+                self._mark_editing_contract_repair(
+                    outline,
+                    "underfilled_icon_rows_repaired",
+                    True,
+                )
+        elif exhibit_type == "callouts":
+            items = self._normalized_text_items(exhibit.get("points"))
+            repaired = self._extend_min_items(
+                items,
+                self._callout_fallback_items(outline),
+                min_count=3,
+            )
+            if repaired != exhibit.get("points"):
+                exhibit["points"] = repaired
+                self._mark_editing_contract_repair(
+                    outline,
+                    "underfilled_callouts_repaired",
+                    True,
+                )
+
+    def _normalized_checklist_items(self, value: Any) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        if not isinstance(value, list):
+            return items
+        for index, item in enumerate(value):
+            if isinstance(item, dict):
+                action = str(
+                    item.get("action") or item.get("text") or item.get("label") or ""
+                ).strip()
+                if not action:
+                    continue
+                items.append(
+                    {
+                        "action": self._truncate_text(action, 118),
+                        "owner": str(
+                            item.get("owner") or self._fallback_owner(index)
+                        ).strip(),
+                        "timing": str(
+                            item.get("timing") or self._fallback_timing(index)
+                        ).strip(),
+                    }
+                )
+            elif str(item).strip():
+                items.append(
+                    {
+                        "action": self._truncate_text(str(item), 118),
+                        "owner": self._fallback_owner(index),
+                        "timing": self._fallback_timing(index),
+                    }
+                )
+        return items
+
+    def _normalized_text_items(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = str(
+                    item.get("text") or item.get("label") or item.get("action") or ""
+                ).strip()
+            else:
+                text = str(item).strip()
+            if text:
+                items.append(self._truncate_text(text, 118))
+        return items
+
+    def _checklist_fallback_items(self, outline: SlideOutline) -> list[dict[str, str]]:
+        source_items = self._content_bullets(outline.content_json)
+        fallbacks = [
+            "Name the evidence pattern before reuse",
+            "Attach source context to each benchmark run",
+            "Set the review gate before scaling",
+            "Refresh the benchmark when evidence changes",
+        ]
+        actions = [
+            self._truncate_text(item, 118)
+            for item in [*source_items, *fallbacks]
+            if str(item).strip()
+        ]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for action in actions:
+            key = action.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(action)
+        return [
+            {
+                "action": action,
+                "owner": self._fallback_owner(index),
+                "timing": self._fallback_timing(index),
+            }
+            for index, action in enumerate(deduped)
+        ]
+
+    def _icon_row_fallback_items(self, outline: SlideOutline) -> list[str]:
+        fallbacks = [
+            "Name the evidence pattern before reuse",
+            "Attach source context to each benchmark run",
+            "Set the review gate before scaling",
+            "Refresh the benchmark when evidence changes",
+        ]
+        return [
+            self._truncate_text(item, 118)
+            for item in [*self._content_bullets(outline.content_json), *fallbacks]
+            if str(item).strip()
+        ]
+
+    def _callout_fallback_items(self, outline: SlideOutline) -> list[str]:
+        context = " ".join(
+            [
+                str(outline.content_json.get("action_title") or outline.label),
+                str(outline.content_json.get("subheading") or ""),
+                " ".join(str(source) for source in outline.content_json.get("sources", [])),
+            ]
+        ).lower()
+        if "executive summary" in context or "benchmark" in context:
+            fallbacks = [
+                "Public benchmarks are saturated and weakly tied to enterprise workflows.",
+                "Existing documents and decisions can become benchmark evidence.",
+                "Harness-centric discovery converts operating evidence into reusable tests.",
+            ]
+        else:
+            fallbacks = [
+                "Name the evidence signal before scaling.",
+                "Connect the source context to the decision.",
+                "Make the review rule explicit.",
+            ]
+        return [
+            self._truncate_text(item, 118)
+            for item in [*self._content_bullets(outline.content_json), *fallbacks]
+            if str(item).strip()
+        ]
+
+    def _extend_min_items(
+        self, items: list[Any], fallback: list[Any], min_count: int
+    ) -> list[Any]:
+        if len(items) >= min_count:
+            return items
+        merged: list[Any] = []
+        seen: set[str] = set()
+        for item in [*items, *fallback]:
+            key = self._item_identity(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= min_count:
+                break
+        return merged
+
+    def _item_identity(self, item: Any) -> str:
+        if isinstance(item, dict):
+            return " ".join(
+                str(item.get(key) or "")
+                for key in ("action", "text", "label", "title", "description")
+            ).strip().casefold()
+        return str(item).strip().casefold()
+
+    def _fallback_owner(self, index: int) -> str:
+        return ["Strategy", "Data", "Review", "Operations"][index % 4]
+
+    def _fallback_timing(self, index: int) -> str:
+        return ["Design", "Build", "Pilot", "Scale"][index % 4]
+
+    def _sync_checklist_content_block(
+        self, outline: SlideOutline, items: list[dict[str, str]]
+    ) -> None:
+        outline.content_json["content_blocks"] = [
+            {
+                "type": "table",
+                "body": [
+                    ["Action", "Owner", "Timing"],
+                    *[
+                        [
+                            item.get("action", ""),
+                            item.get("owner", ""),
+                            item.get("timing", ""),
+                        ]
+                        for item in items
+                    ],
+                ],
+            }
+        ]
 
     def _normalize_layout(self, layout: str, outline: SlideOutline) -> str:
         if layout == "chart" and not outline.content_json.get("metrics"):
@@ -741,6 +1287,28 @@ class DesignAgent:
         if layout not in self.layout_fallbacks:
             return "icon_rows"
         return layout
+
+    def _is_source_repair_slide(self, outline: SlideOutline) -> bool:
+        return bool((outline.content_json or {}).get("visual_qa_source_repair"))
+
+    def _safe_source_repair_layout(self, outline: SlideOutline, current: str | None) -> str:
+        normalized = str(current or "").strip().lower().replace("-", "_")
+        if normalized in {
+            "callouts",
+            "icon_rows",
+            "icon_grid",
+            "two_column",
+            "checklist",
+            "quote_sidebar",
+            "process",
+        }:
+            return normalized
+        bullets = self._content_bullets(outline.content_json)
+        if "question" in self._outline_text(outline) or "checklist" in self._outline_text(outline):
+            return "checklist"
+        if len(bullets) <= 3:
+            return "callouts"
+        return "icon_rows"
 
     def _visuals_for_layout(self, layout: str) -> list[str]:
         if layout == "cover":

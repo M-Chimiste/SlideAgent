@@ -318,10 +318,15 @@ export default function SetupScreen({
                 ? "Upload a master deck to extract its brand DNA — theme colors, typefaces, logo placement, and layout rules will appear here."
                 : "Upload a rigid template to review its field schema — the fields SlideForge will inject via XML will appear here."}
             </div>
-          ) : isBrand ? (
-            <BrandProfile template={template} assets={assets} />
           ) : (
-            <StrictSchema template={template} />
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {isBrand ? (
+                <BrandProfile template={template} assets={assets} />
+              ) : (
+                <StrictSchema template={template} />
+              )}
+              <TemplateFrameMap assets={assets} />
+            </div>
           )}
         </div>
       </div>
@@ -349,6 +354,112 @@ export default function SetupScreen({
           Continue to brief <span style={{ fontSize: 15 }}>→</span>
         </button>
       </div>
+    </div>
+  );
+}
+
+function TemplateFrameMap({ assets }: { assets: TemplateAssets | null }) {
+  const frameMap = assets?.frame_map;
+  const slides = frameMap?.slides ?? [];
+  return (
+    <div style={{ ...card, padding: 20 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 12,
+          alignItems: "baseline",
+          marginBottom: 6,
+        }}
+      >
+        <div style={{ fontFamily: SERIF, fontSize: 19, fontWeight: 600 }}>Template frame map</div>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+          {frameMap?.available ? `${frameMap.slot_count} slots` : "pending"}
+        </span>
+      </div>
+      <div style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45, marginBottom: 14 }}>
+        Claude-style source-deck analysis: slide frames, placeholder text, media slots, and schema-bearing slides before content is mapped.
+      </div>
+      {frameMap?.available ? (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 14 }}>
+            <FrameMetric label="Slides" value={String(frameMap.slide_count)} />
+            <FrameMetric label="Schema" value={String(frameMap.schema_bearing_slide_count)} />
+            <FrameMetric label="Slots" value={String(frameMap.slot_count)} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {slides.slice(0, 6).map((slide) => (
+              <div
+                key={slide.slide_index}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "38px 1fr auto",
+                  gap: 10,
+                  alignItems: "start",
+                  padding: "9px 10px",
+                  border: "1px solid var(--line)",
+                  borderRadius: 7,
+                  background: "var(--surface)",
+                }}
+              >
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--accent)" }}>
+                  S{String((slide.slide_index ?? 0) + 1).padStart(2, "0")}
+                </span>
+                <span style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {slide.label || slide.layout_name || "Slide frame"}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--ink-3)",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      marginTop: 2,
+                    }}
+                  >
+                    {slide.content_category
+                      ? `${slide.content_category.replace(/_/g, " ")} · ${slide.text_inventory || slide.visual_guidance || slide.layout_name || "No text inventory"}`
+                      : slide.text_inventory || slide.visual_guidance || slide.layout_name || "No text inventory"}
+                  </div>
+                </span>
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+                  {slide.text_slot_count ?? 0}T / {slide.media_slot_count ?? 0}M
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 12.5, color: "var(--ink-3)", lineHeight: 1.45 }}>
+          Frame-map analysis is not available for this template yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FrameMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--line)",
+        borderRadius: 7,
+        padding: "9px 10px",
+        background: "var(--surface-2)",
+      }}
+    >
+      <div style={{ fontFamily: MONO, fontSize: 9, color: "var(--ink-3)", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontFamily: MONO, fontSize: 16, color: "var(--ink)" }}>{value}</div>
     </div>
   );
 }

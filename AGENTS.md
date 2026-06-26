@@ -48,6 +48,20 @@ renderer quality without changing the product caveat above:
 - Renderer and VisualQA support the new native line-chart and 2x2-matrix
   exhibit paths, while strict mode remains preserve-first.
 
+Since that pass, the generated-deck rendering and review flow changed
+substantially:
+
+- The default renderer is now an HTML/CSS design system rendered by headless
+  Chrome (`RENDERER_ENGINE=html`), with an `authored` editable python-pptx
+  renderer as automatic fallback and `legacy` (the original deterministic
+  renderer) as rollback. Brand mode additionally clones the uploaded template
+  PPTX via `BrandTemplateCloneRenderer`.
+- An optional plan-review gate (`plan_only=true`) stops generated jobs at a new
+  `planned` status for outline review/editing before rendering.
+- A `narrative` planner pass rewrites the action-title ladder into one
+  Situation/Complication/Resolution story; `GenerationEditingContract` enforces
+  layout variety; and `rendered_slide_audit` inspects the built PPTX.
+
 The main quality frontier is now manual Office compatibility review, richer
 diagram/chart families, deeper brand/layout fidelity beyond the extracted
 profile, and broader local-model smoke coverage across non-demo source docs.
@@ -72,10 +86,15 @@ source ~/miniforge3/etc/profile.d/conda.sh && conda activate slideagent
 
 External runtime tools used by the full pipeline:
 
-- `node`: rasterizes diagram/icon assets through Sharp/react-icons workers;
-  icon rendering has a deterministic Pillow fallback when Node deps are absent.
+- headless Chrome/Chromium: the default `html` renderer prints slide HTML to PDF
+  (binary auto-discovered; override with `SLIDEFORGE_CHROME_BINARY`). When
+  absent, rendering degrades to the `authored` python-pptx renderer.
+- `node`: rasterizes diagram/icon assets through Sharp/react-icons workers for
+  the `authored`/`legacy` renderers; icon rendering has a deterministic Pillow
+  fallback when Node deps are absent.
 - `soffice`: LibreOffice PPTX-to-PDF rendering for visual QA and PDF export.
-- `pdftoppm`: Poppler PDF-to-image rendering for slide previews.
+- `pdftoppm`: Poppler PDF-to-image rendering for slide previews (also the HTML
+  renderer's PDF-to-slide-image step).
 
 ## Common Commands
 
@@ -132,6 +151,7 @@ DocumentIngester
   -> TemplateAnalyzer (brand/strict only)
   -> ContentPlanner
   -> DesignAgent
+  -> [plan-only gate]
   -> PptxBuilder
   -> VisualQAAgent
   -> deterministic QA repair loop
@@ -147,11 +167,19 @@ Storage is local-first:
 
 ### Job Lifecycle
 
-`queued -> analyzing -> planning -> generating -> qa -> done | error`
+`queued -> analyzing -> planning -> [planned] -> generating -> qa <-> repairing -> done | review_failed | error`
 
-There is no approval gate. `POST /api/jobs` creates a multipart-form job,
-enqueues it on `JobQueue`, and `JobOrchestrator.run_job` executes it in the
-background. Generation mode and quality knobs live in `job.config_json`.
+`POST /api/jobs` creates a multipart-form job, enqueues it on `JobQueue`, and
+`JobOrchestrator.run_job` executes it in the background. Generation mode and
+quality knobs live in `job.config_json`.
+
+By default jobs run straight through. With `plan_only=true` (generated modes
+only) a job stops at `planned` after planning so outlines can be reviewed/edited
+(`GET`/`PATCH /api/jobs/{id}/outline`) and then rendered via
+`POST /api/jobs/{id}/render`. `done` is the clean terminal state; `review_failed`
+means the deck rendered but still has unresolved visual-QA or editing-contract
+issues (still downloadable). The visual-QA loop alternates `qa`/`repairing`
+until issues clear, stall, or `QA_MAX_ROUNDS` (default 2) is reached.
 
 ### Service Facades And Packages
 
@@ -163,8 +191,11 @@ Keep these public service facades stable:
 
 Their internals are intentionally split into smaller packages:
 
-- `app.services.planning`: `blueprint`, `llm`, `specs`, `repairs`,
-  `grounding`, `outlines`, `exhibits`, `constants`
+- `app.services.planning`: `context`, `exhibit_selection`, `spec_gate`, `llm`,
+  `narrative`, `blueprint`, `specs`, `repairs`, `grounding`, `outlines`,
+  `exhibits`, `constants` (mixins composed onto `ContentPlanner`; `context`
+  builds the story map, `spec_gate` validates/repairs specs post-plan, and
+  `narrative` rewrites the action-title ladder)
 - `app.services.pptx_rendering`: `assets`, `chrome`, `core_layouts`,
   `table_layouts`, `immersive_layouts`, `exhibit_layouts`, `drawing`,
   `constants`
@@ -175,14 +206,32 @@ smoke flags, generated PPTX semantics, and strict-mode preserve-first behavior.
 
 ### PPTX Build Paths
 
-- `PptxBuilder.build_deck(...)` owns build-path selection.
-- **freeform / brand** use
-  `DeterministicPptxRenderer.render(...)`. The renderer owns positioning,
-  fonts, colors, native charts, tables, icons, diagram assets, headers,
-  footers, source display, text fitting, and contrast-aware foreground colors.
+- `PptxBuilder.build_deck(...)` owns build-path selection; `RENDERER_ENGINE`
+  (default `html`) picks the generated-slide engine.
+- **freeform / brand (generated slides)** use one of three engines:
+  - `html` (default): `HtmlSlideRenderer` (`app.services.html_rendering`) turns
+    outlines into a single CSS design system, prints it to PDF with headless
+    Chrome, converts pages to images with `pdftoppm`, and embeds them full-bleed
+    in the PPTX (speaker notes preserved as text). Falls back to `authored` with
+    a warning when Chrome/poppler is missing.
+  - `authored`: `AuthoredPptxRenderer`, a content-aware composition facade over
+    the deterministic renderer that keeps editable PPTX text and the native
+    drawing layer and degrades weak diagram requests to safer compositions.
+  - `legacy`: `DeterministicPptxRenderer.render(...)` directly. The renderer
+    owns positioning, fonts, colors, native charts, tables, icons, diagram
+    assets, headers, footers, source display, text fitting, and contrast-aware
+    foreground colors.
 - Diagram-capable generated slides can emit `diagram_spec`; deterministic SVG
   diagrams are rasterized to PNG for Office-safe insertion and debug artifacts
-  are written to `<output_stem>-diagrams/`.
+  are written to `<output_stem>-diagrams/` (authored/legacy engines).
+- **brand** first tries a full clone of the uploaded template PPTX via
+  `BrandTemplateCloneRenderer` (real master/layout/theme reuse), falling back to
+  the generated engine above when the clone yields nothing; `RENDERER_ENGINE=legacy`
+  skips cloning. With `BRAND_LAYOUT_INSTANTIATION=true` (default off),
+  `BrandLayoutInstantiationRenderer` runs before the clone and instantiates new
+  slides from the template's layout library (`slides.add_slide(layout)` +
+  role-matched placeholder fill), falling back to the clone path when it yields
+  nothing.
 - **strict** uses `StrictSlideInjector.inject(...)` for XML-level field
   updates. Strict mode does not generate diagram assets unless explicitly
   redesigned later; strict/flexible hybrid decks render flexible slides with
@@ -191,6 +240,13 @@ smoke flags, generated PPTX semantics, and strict-mode preserve-first behavior.
   preserving relationships, media, masters, layouts, and content types.
 - The legacy PptxGenJS worker path is retained but is not the primary tested
   path for current freeform/brand/strict flows.
+
+Cross-cutting generated-deck services: `GenerationEditingContract`
+(`app.services.generation_editing_contract`) enforces a Claude-style
+layout-variety standard and can fail final review; `rendered_slide_audit`
+audits the built PPTX (served at `GET /api/jobs/{id}/qa/rendered-slide-audit`);
+`freeform_theme.derive_freeform_brand(...)` derives a topic-specific palette for
+freeform decks without a brand template.
 
 ## LLM Provider Routing
 
@@ -201,6 +257,8 @@ smoke flags, generated PPTX semantics, and strict-mode preserve-first behavior.
   - `deep`: premium local planner, currently Minimax via Athena when configured.
 - `quality_profile=fast|balanced|showcase` controls output budget/detail.
 - `length_strategy=auto|concise|expanded` controls generated deck length.
+- `PLANNER_DECOMPOSE` (default true) splits deck planning into smaller batched
+  per-section LLM calls.
 - Visual QA uses separate `VISION_*` settings so a vision-capable model can
   inspect rendered slides independently of the planner.
 
@@ -239,6 +297,7 @@ smoke flags, generated PPTX semantics, and strict-mode preserve-first behavior.
 | `quality_profile` | `fast` \| `balanced` \| `showcase` | Default `balanced`. |
 | `length_strategy` | `auto` \| `concise` \| `expanded` | Default `auto`. |
 | `run_visual_qa` | bool | Default true. |
+| `plan_only` | bool | Default false; generated modes only. Stops at `planned` for plan review. |
 | `instructions` | text brief | Used by planner. |
 | `documents` | uploaded files | Ingested with provenance. |
 
@@ -249,18 +308,26 @@ Other important endpoints:
 - `GET /api/jobs/{id}/preview[/{image}]`
 - `GET /api/jobs/{id}/download?format=pptx|pdf`
 - `POST /api/jobs/{id}/regen/{slide_index}`
+- `POST /api/jobs/{id}/render` (render a `planned` job)
+- `GET`/`PATCH /api/jobs/{id}/outline`
+- `GET /api/jobs/{id}/planning/{artifact}`
+- `GET /api/jobs/{id}/qa/rendered-slide-audit`
 - `POST /api/templates/analyze`
 - `GET /api/templates[/{id}]`
 - `PATCH /api/templates/{id}`
 - `DELETE /api/templates/{id}`
 - `POST /api/templates/{id}/duplicate`
+- `GET /api/templates/{id}/assets`, `GET /api/templates/{id}/thumbnail/{image}`, `GET /api/templates/{id}/logo`
 
 ## Testing And Refactor Guidance
 
-- Latest recorded backend baseline is a 172-test suite:
-  `cd backend && python -m pytest tests/ -q` passes.
-- Latest recorded lint baseline: `ruff check app/ tests/` passes.
-- Latest recorded app coverage after the backend refactor: `78%` for `app/*`.
+- The backend suite is now ~400 tests (collected):
+  `cd backend && python -m pytest tests/ -q`. New suites since the last recorded
+  baseline include `test_html_renderer`, `test_generation_editing_contract`,
+  `test_freeform_theme`, and `test_planning_decomposition`. The prior
+  "172 tests / 78% coverage" baseline is stale — re-run tests/coverage to
+  confirm a current number before relying on it.
+- Lint baseline: `ruff check app/ tests/`.
 - Add or keep characterization tests before behavior-preserving extractions.
 - Prefer focused subsystem tests plus full backend tests after touching shared
   planner, renderer, strict injection, or QA behavior.

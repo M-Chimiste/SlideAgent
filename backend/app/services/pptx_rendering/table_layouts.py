@@ -65,7 +65,7 @@ class TableLayoutRenderingMixin:
         )
         self._add_dark_text(
             slide,
-            self._comparison_panel_insight(columns, display_rows),
+            self._comparison_panel_insight(columns, display_rows, outline),
             1.2,
             3.18,
             2.0,
@@ -137,16 +137,28 @@ class TableLayoutRenderingMixin:
         )
 
     def _comparison_panel_insight(
-        self, columns: list[str], rows: list[list[str]]
+        self,
+        columns: list[str],
+        rows: list[list[str]],
+        outline: SlideOutline | None = None,
     ) -> str:
         if not rows:
             return "Use the comparison to make the target-state behavior explicit."
+        title = self._authored_title(outline).lower() if outline is not None else ""
+        if any(token in title for token in ("synthetic", "public", "generic")):
+            return "Contrast weak benchmark shortcuts with source-grounded evaluation moves."
+        if any(token in title for token in ("contract", "question", "expectation")):
+            return "Separate declared success criteria from the harness steps that prove them."
+        if any(token in title for token in ("architecture", "layer", "interface")):
+            return "Show which layer owns the handoff from contract to evidence to execution."
+        if any(token in title for token in ("future", "data catalog", "confidence", "scale")):
+            return "Tie each scaling requirement to the evidence control that makes it reliable."
         header_text = " ".join(str(column).lower() for column in columns)
         if "target" in header_text or "after" in header_text:
-            return "Make the target model concrete by pairing each current behavior with the operating change."
+            return "Name the operating shift each evidence signal requires."
         if "risk" in header_text or "impact" in header_text:
             return "Separate the issue from the consequence so leaders can judge priority."
-        return "Turn the comparison into an operating choice, not a static list of differences."
+        return "Show how each source signal changes the benchmark workflow."
 
     def _add_reference_table(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         exhibit = self._exhibit(outline)
@@ -341,7 +353,10 @@ class TableLayoutRenderingMixin:
                 elif isinstance(row, list):
                     normalized_rows.append([self._table_cell_text(value) for value in row])
             if normalized_rows:
-                return [self._table_header_text(value) for value in columns], normalized_rows
+                return self._comparison_headers(columns), [
+                    self._dedupe_comparison_row(row, outline, index)
+                    for index, row in enumerate(normalized_rows)
+                ]
         table_rows = self._table_rows(outline)
         if len(table_rows) >= 2:
             return [str(value) for value in table_rows[0]], [
@@ -352,6 +367,122 @@ class TableLayoutRenderingMixin:
             [f"Area {idx + 1}", bullet, "Managed behavior"]
             for idx, bullet in enumerate(bullets or ["Context", "Review", "Cadence"])
         ]
+
+    def _comparison_headers(self, columns: list[Any]) -> list[str]:
+        headers = [self._table_header_text(value) for value in columns]
+        replacements = {
+            "signal": "Evidence signal",
+            "current readout": "Unmanaged pattern",
+            "current state": "Unmanaged pattern",
+            "target move": "Harness move",
+            "target state": "Harness move",
+        }
+        return [replacements.get(header.strip().lower(), header) for header in headers]
+
+    def _dedupe_comparison_row(
+        self,
+        row: list[str],
+        outline: SlideOutline,
+        index: int,
+    ) -> list[str]:
+        cells = (row + ["", ""])[:3]
+        label, current, target = cells
+        if current and self._text_starts_with(current, label):
+            current = self._comparison_current_fallback(label, outline, index)
+        if current.strip().lower() in {"source claim.", "source claim", "operating implication.", "operating implication"}:
+            current = self._comparison_current_fallback(label, outline, index)
+        if target and (
+            self._text_starts_with(target, label)
+            or self._text_starts_with(target, current)
+        ):
+            target = self._comparison_target_fallback(label, outline, index)
+        if target.strip().lower() in {"target move", "managed behavior"}:
+            target = self._comparison_target_fallback(label, outline, index)
+        return [label, current, target]
+
+    def _comparison_current_fallback(
+        self,
+        label: str,
+        outline: SlideOutline,
+        index: int,
+    ) -> str:
+        text = " ".join([label, self._authored_title(outline)]).lower()
+        if any(token in text for token in ("synthetic", "public", "generic")):
+            return [
+                "Benchmark shortcut.",
+                "Generated evidence gap.",
+                "Static public-test signal.",
+            ][index % 3]
+        if any(token in text for token in ("contract", "question", "expectation")):
+            return [
+                "Implicit success criteria.",
+                "Undeclared evaluation rule.",
+                "Ambiguous output standard.",
+            ][index % 3]
+        if any(token in text for token in ("architecture", "layer", "interface", "harness")):
+            return [
+                "Fragmented execution responsibility.",
+                "Unclear harness handoff.",
+                "Disconnected evidence flow.",
+            ][index % 3]
+        if any(token in text for token in ("future", "data catalog", "confidence", "scale")):
+            return [
+                "Manual discovery bottleneck.",
+                "Uncalibrated evidence confidence.",
+                "Metadata integration gap.",
+            ][index % 3]
+        return [
+            "Unverified claim.",
+            "Loose operating implication.",
+            "Unassigned review requirement.",
+            "Unclear scale condition.",
+        ][index % 4]
+
+    def _comparison_target_fallback(
+        self,
+        label: str,
+        outline: SlideOutline,
+        index: int,
+    ) -> str:
+        text = " ".join([label, self._authored_title(outline)]).lower()
+        if any(token in text for token in ("synthetic", "public", "generic")):
+            return [
+                "Ground tests in validated workflows.",
+                "Use source-backed answerability checks.",
+                "Refresh cases from real operating evidence.",
+            ][index % 3]
+        if any(token in text for token in ("contract", "question", "expectation")):
+            return [
+                "Declare the success rule before execution.",
+                "Bind each question to a contract field.",
+                "Make scoring thresholds inspectable.",
+            ][index % 3]
+        if any(token in text for token in ("architecture", "layer", "interface", "harness")):
+            return [
+                "Assign the harness handoff explicitly.",
+                "Connect contract, data, execution, and review.",
+                "Persist run evidence for replay.",
+            ][index % 3]
+        if any(token in text for token in ("future", "data catalog", "confidence", "scale")):
+            return [
+                "Tie scaling to metadata and evidence controls.",
+                "Calibrate confidence by source quality.",
+                "Automate schema discovery before rollout.",
+            ][index % 3]
+        return [
+            "Turn the claim into a named evidence test.",
+            "Assign ownership before scaling.",
+            "Tie the decision to documented evidence.",
+            "Refresh the benchmark when evidence changes.",
+        ][index % 4]
+
+    def _text_starts_with(self, text: str, prefix: str) -> bool:
+        normalized_text = re.sub(r"[^a-z0-9 ]+", "", str(text).casefold()).strip()
+        normalized_prefix = re.sub(r"[^a-z0-9 ]+", "", str(prefix).casefold()).strip()
+        return (
+            len(normalized_prefix.split()) >= 3
+            and normalized_text.startswith(normalized_prefix)
+        )
 
     def _reference_rows(
         self, exhibit: dict[str, Any], outline: SlideOutline
@@ -404,7 +535,16 @@ class TableLayoutRenderingMixin:
         blocks = outline.content_json.get("content_blocks") or []
         for block in blocks:
             if block.get("type") == "table" and isinstance(block.get("body"), list):
-                rows = [row for row in block["body"] if isinstance(row, list)]
+                rows = [
+                    [
+                        self._clean_display_text(str(cell))
+                        for cell in row
+                        if self._clean_display_text(str(cell))
+                    ]
+                    for row in block["body"]
+                    if isinstance(row, list)
+                ]
+                rows = [row for row in rows if row]
                 if rows:
                     return rows
         bullets = self._bullets(outline)[:5]

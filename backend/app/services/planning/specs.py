@@ -255,17 +255,31 @@ class SlideSpecPlanningMixin:
                 "connector_labels": ["feeds", "constrains", "verifies"],
             }
         if archetype == "framework_cycle":
+            steps = [
+                self._phrase(item, "")
+                for item in bullets[:5]
+                if self._phrase(item, "")
+            ]
+            while len(steps) < 4:
+                steps.append(
+                    [
+                        "Define the benchmark contract.",
+                        "Bind tests to source evidence.",
+                        "Run the harness against real workflows.",
+                        "Review failures before expanding coverage.",
+                    ][len(steps)]
+                )
             return {
                 "type": "cycle",
-                "center_label": "Operating loop",
+                "center_label": self._short_label(section.title),
                 "steps": [
-                    {"label": "Frame", "description": "Write the decision and success criteria."},
-                    {"label": "Ground", "description": "Load the source context and constraints."},
-                    {"label": "Build", "description": "Draft the work against the evidence."},
-                    {"label": "Review", "description": "Check output against the decision standard."},
-                    {"label": "Update", "description": "Record what changed before the next cycle."},
+                    {
+                        "label": self._short_label(step),
+                        "description": step,
+                    }
+                    for step in steps[:5]
                 ],
-                "reset_label": "Update the shared record before the next task.",
+                "reset_label": "Revise the benchmark when evidence changes.",
             }
         if archetype == "comparison_table":
             if tables or source_metrics:
@@ -310,15 +324,13 @@ class SlideSpecPlanningMixin:
         if archetype in {"code_panel", "reference"}:
             return self._code_panel_spec_for_section(section)
         if archetype == "checklist":
-            return {
-                "type": "checklist",
-                "items": [
-                    {"action": "Name the decision and success criteria", "owner": "Sponsor", "timing": "Now"},
-                    {"action": "Assign evidence and review owners", "owner": "Lead", "timing": "Next"},
-                    {"action": "Pilot the operating loop on one workflow", "owner": "Team", "timing": "Pilot"},
-                    {"action": "Codify lessons before scaling", "owner": "Owner", "timing": "Scale"},
-                ],
-            }
+            return self.exhibit_compiler.compile(
+                archetype,
+                "implementation",
+                section,
+                tables or [],
+                source_metrics or [],
+            )
         if archetype == "quote_sidebar":
             return {
                 "type": "quote_sidebar",
@@ -495,9 +507,20 @@ class SlideSpecPlanningMixin:
             ],
         ]
         if bullets:
+            triggers = [
+                "Evidence changes",
+                "Workflow changes",
+                "Review standard changes",
+                "Ownership changes",
+            ]
             reference_rows = [
-                [self._short_label(bullet), bullet, "When conditions change"]
-                for bullet in bullets[:4]
+                [
+                    self._short_label(bullet),
+                    self._clean_generated_visual_placeholder(bullet),
+                    triggers[index % len(triggers)],
+                ]
+                for index, bullet in enumerate(bullets[:4])
+                if self._clean_generated_visual_placeholder(bullet)
             ]
         return {
             "type": "reference_table",
@@ -564,19 +587,21 @@ class SlideSpecPlanningMixin:
         if archetype == "quote_sidebar":
             return [ContentBlock(type="bullets", body=exhibit_spec.get("supporting_points", []))]
         if archetype == "callouts":
+            points = exhibit_spec.get("points", [])
+            if isinstance(points, list) and any(str(point).strip() for point in points):
+                return [ContentBlock(type="callout", body=points)]
             metrics = exhibit_spec.get("metrics", [])
-            if isinstance(metrics, list) and metrics:
+            if isinstance(metrics, list) and len(metrics) >= 2:
                 return [
                     ContentBlock(
                         type="callout",
                         body=[
-                            str(item.get("label") or item.get("name") or item)
+                            self._metric_display_text(item)
                             for item in metrics
-                            if isinstance(item, dict) or str(item).strip()
+                            if isinstance(item, dict)
                         ],
                     )
                 ]
-            points = exhibit_spec.get("points", [])
             return [ContentBlock(type="callout", body=points if isinstance(points, list) else [])]
         if archetype == "icon_rows":
             items = exhibit_spec.get("items", [])
@@ -640,7 +665,7 @@ class SlideSpecPlanningMixin:
             "metric_chart": "Quantify the signal before making the decision",
             "matrix_2x2": "Prioritize the moves by impact and readiness",
             "callouts": "Surface the highest-signal proof points for the decision",
-            "icon_rows": "Sequence the operating moves into scanable actions",
+            "icon_rows": "Sequence the operating moves into scannable actions",
             "two_column": "Separate the implication from the evidence",
             "closing_recommendation": "Commit to the next operating decision",
         }
@@ -695,7 +720,7 @@ class SlideSpecPlanningMixin:
             "metric_chart": "simple metric chart using sourced values",
             "matrix_2x2": "2x2 prioritization matrix with concise quadrant labels",
             "callouts": "three source-derived proof-point cards",
-            "icon_rows": "four scanable action rows with icons",
+            "icon_rows": "four scannable action rows with icons",
             "two_column": "balanced implication and evidence columns",
             "closing_recommendation": "closing recommendation with decision ask",
         }
@@ -727,13 +752,14 @@ class SlideSpecPlanningMixin:
     def _filler_phrases(self, section: DocumentSection, needed: int) -> list[str]:
         subject = self._clean_section_title(section.title) or "the source evidence"
         subject = self._truncate_at_word(subject.lower(), 44).removesuffix("...")
+        subject_title = subject[:1].upper() + subject[1:]
         pool = (
-            f"Use {subject} as the operating reference.",
-            f"Connect {subject} to an explicit review gate.",
-            f"Make {subject} visible before execution starts.",
-            f"Refresh {subject} when assumptions change.",
-            f"Assign ownership for {subject} before scaling.",
-            f"Test generated work against {subject}.",
+            f"{subject_title} defines the evidence to inspect.",
+            f"{subject_title} sets the benchmark condition to validate.",
+            f"{subject_title} names the workflow signal to preserve.",
+            f"{subject_title} clarifies what must change before scaling.",
+            f"{subject_title} gives the slide its operating context.",
+            f"{subject_title} explains why the decision needs source grounding.",
         )
         seed = sum(ord(char) for char in (section.title or "section")) % len(pool)
         return [pool[(seed + index) % len(pool)] for index in range(needed)]
@@ -743,11 +769,11 @@ class SlideSpecPlanningMixin:
         cleaned = re.split(r"[.!?]\s+", cleaned)[0] if cleaned else fallback
         cleaned = " ".join(cleaned.split())
         cleaned = self._repair_dangling_fragment(cleaned)
+        if cleaned.count('"') % 2 == 1:
+            return ""
         if len(cleaned) <= limit:
             return cleaned
-        return self._repair_dangling_fragment(
-            cleaned[:limit].rsplit(" ", 1)[0].rstrip(".,;:")
-        )
+        return ""
 
     def _derive_exhibit_spec(self, slide: GeneratedSlideSpec) -> dict[str, Any]:
         bullets = self._body_to_bullets(slide)
@@ -768,16 +794,16 @@ class SlideSpecPlanningMixin:
                 "rows": self._fallback_comparison_rows(slide, bullets),
             }
         if archetype == "dependency_map":
-            middle = bullets[:3] or ["Context", "Rules", "Review"]
+            middle = bullets[:3]
             return {
                 "type": "dependency_map",
-                "left_node": "Source context",
+                "left_node": self._short_label(slide.subheading or slide.action_title),
                 "middle_nodes": middle[:3],
                 "right_outcome": slide.action_title,
                 "connector_labels": ["feeds", "guides", "validates"],
             }
         if archetype == "framework_cycle":
-            steps = bullets[:5] or ["Frame", "Prime", "Generate", "Review", "Persist"]
+            steps = bullets[:5]
             return {
                 "type": "cycle",
                 "center_label": "Operating loop",
@@ -796,8 +822,12 @@ class SlideSpecPlanningMixin:
             return {
                 "type": "checklist",
                 "items": [
-                    {"action": bullet, "owner": "Owner", "timing": "Next"}
-                    for bullet in checklist_items
+                    {
+                        "action": self._repair_dangling_fragment(bullet),
+                        "owner": self.exhibit_compiler._owner_for_action(bullet, index),
+                        "timing": self.exhibit_compiler._timing_for_action(bullet, index),
+                    }
+                    for index, bullet in enumerate(checklist_items)
                 ],
             }
         if archetype == "code_panel":
@@ -835,7 +865,7 @@ class SlideSpecPlanningMixin:
                 return self._memory_bank_reference_spec()
             return {
                 "type": "reference_table",
-                "columns": ["Item", "Implication"],
+                "columns": ["Artifact", "Purpose"],
                 "rows": [[self._short_label(bullet), bullet] for bullet in bullets[:5]],
             }
         if archetype == "metric_chart":
@@ -851,16 +881,11 @@ class SlideSpecPlanningMixin:
                         "Track changes as conditions shift.",
                     ][len(items)]
                 )
-            labels = [
-                "High impact / high readiness",
-                "High impact / low readiness",
-                "Low impact / high readiness",
-                "Low impact / low readiness",
-            ]
+            labels = [self._short_label(item) for item in items[:4]]
             return {
                 "type": "matrix_2x2",
-                "x_axis": "Readiness",
-                "y_axis": "Impact",
+                "x_axis": "Operational clarity",
+                "y_axis": "Evidence strength",
                 "quadrants": [
                     {"label": labels[index], "description": self._truncate_at_word(item, 78)}
                     for index, item in enumerate(items[:4])
@@ -882,7 +907,7 @@ class SlideSpecPlanningMixin:
                 "type": "recommendation",
                 "recommendation": slide.action_title,
                 "next_steps": bullets[:3],
-                "decision_ask": "Confirm ownership and timing.",
+                "decision_ask": "Approve the recommended pilot with named owners and a review date.",
             }
         return {"type": archetype or "text_exhibit", "points": bullets}
 
@@ -927,8 +952,8 @@ class SlideSpecPlanningMixin:
                 for item in exhibit_spec.get("middle_nodes", [])
                 if self._clean_generated_visual_placeholder(str(item))
             ][:4]
-            while len(middle_nodes) < 2:
-                middle_nodes.append(["Context", "Rules", "Review"][len(middle_nodes)])
+            if len(middle_nodes) < 2:
+                return None
             return {
                 "kind": "dependency_flow",
                 "title": fallback_title,
@@ -958,8 +983,8 @@ class SlideSpecPlanningMixin:
                     str(step.get("label") or step.get("description") or "")
                 )
             ][:6]
-            while len(labels) < 4:
-                labels.append(["Frame", "Ground", "Build", "Review", "Update", "Reset"][len(labels)])
+            if len(labels) < 4:
+                return None
             return {
                 "kind": "cycle",
                 "title": fallback_title,
@@ -1337,10 +1362,17 @@ class SlideSpecPlanningMixin:
         label = str(metric.get("label") or "Sourced signal")
         unit = self._normalize_metric_unit(str(metric.get("unit") or ""))
         if unit == "%":
-            return f"{label} show adoption pressure."
+            return f"{label} is cited as a sourced percentage."
         if unit == "tokens":
             return f"{label} signals context capacity pressure."
         return f"{label} is a sourced signal."
+
+    def _metric_display_text(self, metric: dict[str, Any]) -> str:
+        label = str(metric.get("label") or "Sourced metric").strip()
+        value = metric.get("value", "")
+        unit = self._normalize_metric_unit(str(metric.get("unit") or "")) or ""
+        value_text = f"{value:g}" if isinstance(value, float) else str(value)
+        return f"{label}: {value_text}{unit}" if value_text else label
 
     def _first_table_block(self, slide: GeneratedSlideSpec) -> list[list[Any]]:
         for block in slide.content_blocks:

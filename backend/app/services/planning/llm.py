@@ -16,6 +16,7 @@ from app.services.planning.constants import (
     UPLOADED_SOURCE_LABEL,
     build_planner_system_prompt,
 )
+from app.services.presentation_styles import get_style
 
 
 class LLMPlanningMixin:
@@ -43,7 +44,7 @@ class LLMPlanningMixin:
         ]
         allowed_numbers = sorted(self._supported_numeric_tokens(bundle))[:50]
         user_prompt = (
-            f"Create a {blueprint.target_slide_count}-slide consulting deck plan as strict JSON. "
+            f"Create a {blueprint.target_slide_count}-slide {get_style(self._presentation_style).label} deck plan as strict JSON. "
             "Use the supplied blueprint as the deck plan, but improve wording and exhibit details from the source. "
             f"The slides array must contain exactly {blueprint.target_slide_count} slide objects; "
             "do not return a sample, partial deck, or cover-only deck. "
@@ -85,7 +86,7 @@ class LLMPlanningMixin:
             "Use source_refs for exact source packet ids. Sources may only be Uploaded source, a short label copied from source_refs, or [source needed]. "
             "Do not invent document names, reports, URLs, people, companies, or dates as sources. "
             "Do not include markdown, comments, reasoning, or text outside the JSON. "
-            f"Generation mode: {mode}. Quality profile: {quality_profile}. "
+            f"Generation mode: {mode}. Quality profile: {quality_profile}. Presentation style: {get_style(self._presentation_style).label}. "
             f"Instructions: {instructions or 'No extra instructions.'}\n"
             f"Blueprint: {blueprint.model_dump()}\n"
             f"Story map: {story_map.model_dump() if story_map else {}}\n"
@@ -94,7 +95,7 @@ class LLMPlanningMixin:
             f"Source packet: {json.dumps(source_packet, ensure_ascii=True)}\n"
             f"Metrics: {json.dumps(metrics, ensure_ascii=True)}"
         )
-        system_prompt = build_planner_system_prompt(quality_profile)
+        system_prompt = build_planner_system_prompt(quality_profile, self._presentation_style)
         max_tokens = self._planner_max_tokens(
             quality_profile, blueprint.target_slide_count
         )
@@ -118,7 +119,16 @@ class LLMPlanningMixin:
             require_exact_slide_count=require_exact_slide_count,
         )
         if deck is not None:
-            return deck
+            return self._complete_partial_llm_deck(
+                deck,
+                bundle,
+                instructions,
+                mode,
+                blueprint,
+                story_map,
+            )
+        if self._should_skip_schema_repair_retry():
+            return None
         # One schema-repair retry: re-prompt with the validation error before
         # giving up and falling back to the deterministic deck.
         repair_prompt = (
@@ -144,10 +154,278 @@ class LLMPlanningMixin:
                 "model repair response did not contain a JSON object"
             )
             return None
-        return self._validate_deck_payload(
+        deck = self._validate_deck_payload(
             payload,
             blueprint,
             require_exact_slide_count=require_exact_slide_count,
+        )
+        if deck is None:
+            return None
+        return self._complete_partial_llm_deck(
+            deck,
+            bundle,
+            instructions,
+            mode,
+            blueprint,
+            story_map,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Decomposed generation (batched for fast profile, per-slide for deep)
+    # ------------------------------------------------------------------ #
+    def _generate_deck_slides(
+        self,
+        bundle: DocumentBundle,
+        instructions: str,
+        mode: str,
+        *,
+        blueprint: DeckBlueprint,
+        quality_profile: str,
+        source_compression: SourceCompression | None = None,
+        story_map: StoryMap | None = None,
+    ) -> DeckSpec | None:
+        """Author the deck, choosing batched/per-slide generation by strategy.
+
+        Falls back to the monolithic single-call planner when decomposition is
+        disabled, there are no story beats to scaffold from, or the decomposed
+        attempt yields nothing usable. Returning None preserves the caller's
+        existing deterministic-fallback / no-fallback behavior.
+        """
+        if self.llm_client is None:
+            return None
+        beats = list(story_map.beats) if story_map and story_map.beats else []
+        if getattr(self, "decompose", True) and beats:
+            try:
+                batch_size = 1 if getattr(self, "slide_generation_strategy", "batched") == "per_slide" else 4
+                deck = self._plan_with_llm_batched(
+                    bundle,
+                    instructions,
+                    mode,
+                    blueprint=blueprint,
+                    quality_profile=quality_profile,
+                    source_compression=source_compression,
+                    story_map=story_map,
+                    batch_size=batch_size,
+                )
+            except Exception as exc:  # never let decomposition hard-fail the job
+                self._last_planning_error = (
+                    f"decomposed planning error: {type(exc).__name__}: {exc}"
+                )
+                deck = None
+            if deck is not None and deck.slides:
+                return deck
+        return self._plan_with_llm(
+            bundle,
+            instructions,
+            mode,
+            blueprint=blueprint,
+            quality_profile=quality_profile,
+            source_compression=source_compression,
+            story_map=story_map,
+        )
+
+    def _plan_with_llm_per_slide(self, *args, **kwargs) -> DeckSpec | None:
+        kwargs["batch_size"] = 1
+        return self._plan_with_llm_batched(*args, **kwargs)
+
+    def _plan_with_llm_batched(
+        self,
+        bundle: DocumentBundle,
+        instructions: str,
+        mode: str,
+        *,
+        blueprint: DeckBlueprint,
+        quality_profile: str,
+        source_compression: SourceCompression | None = None,
+        story_map: StoryMap | None = None,
+        batch_size: int = 4,
+    ) -> DeckSpec | None:
+        beats = list(story_map.beats) if story_map and story_map.beats else []
+        if not beats:
+            return None
+        allowed_numbers = sorted(self._supported_numeric_tokens(bundle))[:40]
+        step = max(1, batch_size)
+        slides: list[GeneratedSlideSpec] = []
+        for start in range(0, len(beats), step):
+            subset = beats[start : start + step]
+            batch = self._generate_slide_batch(
+                subset,
+                slides,
+                bundle,
+                blueprint,
+                quality_profile,
+                story_map,
+                allowed_numbers,
+                start_number=start + 1,
+            )
+            if batch is None:
+                # The model returned a whole-deck response instead of a batch;
+                # let the monolithic handler process it.
+                return None
+            slides.extend(batch)
+        if not slides:
+            return None
+        deck = DeckSpec(
+            deck_title=blueprint.deck_title,
+            audience=blueprint.audience,
+            goal=(story_map.recommendation if story_map else "")
+            or "Communicate a clear recommendation.",
+            narrative_arc=(story_map.narrative_arc if story_map else "")
+            or "Situation -> Complication -> Resolution",
+            slides=slides,
+            blueprint=blueprint,
+        )
+        # Honor the requested deck length even if the story map returned fewer
+        # beats than the blueprint target (fills the remainder deterministically).
+        target_count = max(len(beats), blueprint.target_slide_count)
+        deck = self._fill_deck_to_target(
+            deck, target_count, bundle, instructions, mode, blueprint, story_map
+        )
+        for index, slide in enumerate(deck.slides, start=1):
+            slide.slide_number = index
+        self._repair_model_titles(deck)
+        return deck
+
+    def _generate_slide_batch(
+        self,
+        subset: list[Any],
+        prior_slides: list[GeneratedSlideSpec],
+        bundle: DocumentBundle,
+        blueprint: DeckBlueprint,
+        quality_profile: str,
+        story_map: StoryMap | None,
+        allowed_numbers: list[str],
+        *,
+        start_number: int,
+    ) -> list[GeneratedSlideSpec] | None:
+        prior_titles = [s.action_title for s in prior_slides if s.action_title][-12:]
+        prior_archetypes = [s.archetype for s in prior_slides if getattr(s, "archetype", None)][-12:]
+        beats_payload = [
+            {
+                "slide_number": start_number + offset,
+                "role": beat.role,
+                "claim": beat.claim,
+                "preferred_exhibit": beat.preferred_exhibit,
+                "source_refs": beat.source_refs,
+                "rationale": beat.rationale,
+            }
+            for offset, beat in enumerate(subset)
+        ]
+        section_context = self._beat_source_context(subset, bundle)
+        thesis = story_map.thesis if story_map else ""
+        count = len(subset)
+        user_prompt = (
+            f"Author exactly {count} {get_style(self._presentation_style).label} slide object(s) as strict JSON, one per beat below, in order. "
+            'Return exactly this shape: {"slides":[ <one slide object per beat> ]}. '
+            "Each slide object uses exactly this shape: " + self._slide_schema_block() + ". "
+            "Each action_title must be a complete sentence with a verb, 15 words or fewer, avoid the word 'and', "
+            "and must not repeat any prior slide title. "
+            "Every non-cover slide needs exactly one primary exhibit_spec matching the beat's preferred_exhibit. "
+            "Comparison exhibits need clear columns and row labels; checklist, cycle, and dependency exhibits need structured arrays, not prose. "
+            "Only use numbers that appear in the allowed numeric tokens; otherwise write [source needed] beside the number. "
+            "Use the beat's source_refs as source_refs. Sources may only be 'Uploaded source', a label copied from source_refs, or '[source needed]'. "
+            "Do not invent document names, people, companies, dates, or URLs. No markdown, comments, reasoning, or text outside the JSON.\n"
+            f"Deck thesis: {thesis}\nAudience: {blueprint.audience}\n"
+            f"Prior slide titles (do not repeat): {prior_titles or ['none']}\n"
+            f"Prior slide archetypes used (vary from these; avoid repeating an archetype on adjacent slides): {prior_archetypes or ['none']}\n"
+            f"Beats: {json.dumps(beats_payload, ensure_ascii=True)}\n"
+            f"Allowed numeric tokens: {allowed_numbers or ['none']}\n"
+            f"Source sections: {json.dumps(section_context, ensure_ascii=True)}"
+        )
+        system_prompt = build_planner_system_prompt(quality_profile, self._presentation_style)
+        max_tokens = min(9000, 1800 + count * 1200)
+        try:
+            payload = self.llm_client.complete_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                temperature=0.2,
+            )
+        except Exception as exc:
+            self._last_planning_error = f"batch generation error: {type(exc).__name__}: {exc}"
+            return []
+        if not isinstance(payload, dict):
+            return []
+        # A response carrying whole-deck fields is not a batch — signal the
+        # caller to abort decomposition and use the monolithic handler instead.
+        if "deck_title" in payload or "narrative_arc" in payload:
+            return None
+        raw_slides = payload.get("slides")
+        if not isinstance(raw_slides, list):
+            raw_slides = [payload] if payload.get("action_title") else []
+        specs: list[GeneratedSlideSpec] = []
+        for offset, raw in enumerate(raw_slides[:count]):
+            normalized = self._normalize_llm_slide_payload(raw)
+            try:
+                spec = GeneratedSlideSpec.model_validate(normalized)
+            except Exception:
+                continue
+            spec.slide_number = start_number + offset
+            specs.append(spec)
+        return specs
+
+    def _beat_source_context(
+        self, subset: list[Any], bundle: DocumentBundle, char_limit: int = 900
+    ) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for beat in subset:
+            for ref in beat.source_refs or []:
+                ref_str = str(ref)
+                if ref_str in seen or "source needed" in ref_str.lower():
+                    continue
+                seen.add(ref_str)
+                section = self._section_for_source_ref(ref_str, bundle)
+                if section is None:
+                    continue
+                out.append(
+                    {
+                        "id": ref_str,
+                        "title": section.title,
+                        "content": self._source_excerpt(section.content, char_limit),
+                    }
+                )
+        return out
+
+    def _fill_deck_to_target(
+        self,
+        deck: DeckSpec,
+        target_count: int,
+        bundle: DocumentBundle,
+        instructions: str,
+        mode: str,
+        blueprint: DeckBlueprint,
+        story_map: StoryMap | None,
+    ) -> DeckSpec:
+        if len(deck.slides) >= target_count:
+            return deck
+        fallback = self._fallback_deck(bundle, instructions, mode, blueprint, story_map=story_map)
+        existing = {" ".join(s.action_title.lower().split()) for s in deck.slides}
+        for fb_slide in fallback.slides:
+            if len(deck.slides) >= target_count:
+                break
+            key = " ".join(fb_slide.action_title.lower().split())
+            if key in existing:
+                continue
+            deck.slides.append(
+                fb_slide.model_copy(update={"slide_number": len(deck.slides) + 1}, deep=True)
+            )
+            existing.add(key)
+        return deck
+
+    def _slide_schema_block(self) -> str:
+        return (
+            '{"slide_number":1,"slide_type":"cover|executive_summary|content|chart|comparison|process|framework|reference|checklist|anti_pattern|quote|decision|closing",'
+            '"action_title":"complete sentence with a verb, 15 words or fewer",'
+            '"subheading":"evidence context",'
+            '"content_blocks":[{"type":"bullets|chart|table|callout|text","body":["short evidence point"],"annotations":[],"callouts":[]}],'
+            '"chart_spec":null,"sources":["Uploaded source"],'
+            '"archetype":"cover|section_divider|comparison_table|dependency_map|cycle|code_panel|checklist|quote_sidebar|anti_patterns|metric_chart|executive_summary|table_reference|matrix_2x2|callouts|icon_rows|two_column|closing_recommendation",'
+            '"narrative_role":"cover|executive_summary|problem|evidence|framework|implementation|reference|decision|closing",'
+            '"exhibit_spec":{"type":"comparison_table|dependency_map|cycle|checklist|code_panel|anti_patterns|quote_sidebar|metric_chart|reference_table|matrix_2x2|callouts|icon_rows|two_column|recommendation"},'
+            '"diagram_spec":null,"design_intent":"short renderer guidance",'
+            '"source_refs":["a source id or [source needed]"],'
+            '"speaker_notes":"short presenter note","qa":{"consulting_status":"pending","visual_status":"pending","issues":[]}}'
         )
 
     def _validate_deck_payload(
@@ -177,22 +455,122 @@ class LLMPlanningMixin:
             return False
         if getattr(client, "require_exact_slide_count", False):
             return True
+        if self._uses_small_model_harness():
+            return False
         module = client.__class__.__module__
         if module.startswith("app.clients."):
             return True
         model = str(getattr(client, "model", "") or "").lower()
         return bool(model)
 
+    def _should_skip_schema_repair_retry(self) -> bool:
+        return self._uses_small_model_harness()
+
+    def _uses_small_model_harness(self) -> bool:
+        model = str(getattr(self.llm_client, "model", "") or "").lower()
+        return any(marker in model for marker in ["qwen3.6", "qwen3-6", "qwen3.5", "qwen3-5"])
+
+    def _complete_partial_llm_deck(
+        self,
+        deck: DeckSpec,
+        bundle: DocumentBundle,
+        instructions: str,
+        mode: str,
+        blueprint: DeckBlueprint,
+        story_map: StoryMap | None,
+    ) -> DeckSpec:
+        if not self._uses_small_model_harness():
+            return deck
+        if len(deck.slides) >= blueprint.target_slide_count:
+            return deck
+        fallback = self._fallback_deck(
+            bundle,
+            instructions,
+            mode,
+            blueprint,
+            story_map=story_map,
+        )
+        existing_titles = {
+            " ".join(slide.action_title.lower().split()) for slide in deck.slides
+        }
+        for fallback_slide in fallback.slides:
+            if len(deck.slides) >= blueprint.target_slide_count:
+                break
+            normalized_title = " ".join(fallback_slide.action_title.lower().split())
+            if normalized_title in existing_titles:
+                continue
+            deck.slides.append(
+                fallback_slide.model_copy(
+                    update={"slide_number": len(deck.slides) + 1},
+                    deep=True,
+                )
+            )
+            existing_titles.add(normalized_title)
+        return deck
+
     def _normalize_llm_payload(
         self, payload: dict[str, Any], blueprint: DeckBlueprint
     ) -> dict[str, Any]:
         normalized = dict(payload)
         normalized["blueprint"] = blueprint.model_dump()
+        slides = normalized.get("slides")
+        if isinstance(slides, list):
+            normalized["slides"] = [
+                self._normalize_llm_slide_payload(slide) for slide in slides
+            ]
         return normalized
+
+    def _normalize_llm_slide_payload(self, slide: Any) -> Any:
+        if not isinstance(slide, dict):
+            return slide
+        normalized = dict(slide)
+        blocks = normalized.get("content_blocks")
+        if isinstance(blocks, list):
+            normalized["content_blocks"] = [
+                self._normalize_llm_content_block(block) for block in blocks
+            ]
+        return normalized
+
+    def _normalize_llm_content_block(self, block: Any) -> Any:
+        if not isinstance(block, dict):
+            return block
+        normalized = dict(block)
+        for key in ("annotations", "callouts"):
+            values = normalized.get(key)
+            if isinstance(values, list):
+                normalized[key] = [self._stringify_llm_list_item(item) for item in values]
+        return normalized
+
+    def _stringify_llm_list_item(self, item: Any) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            title = str(
+                item.get("title")
+                or item.get("label")
+                or item.get("name")
+                or ""
+            ).strip()
+            detail = str(
+                item.get("detail")
+                or item.get("description")
+                or item.get("body")
+                or item.get("text")
+                or item.get("value")
+                or ""
+            ).strip()
+            if title and detail:
+                return f"{title}: {detail}"
+            if title or detail:
+                return title or detail
+            return json.dumps(item, ensure_ascii=True, sort_keys=True)
+        return str(item)
 
     def _planner_max_tokens(self, quality_profile: str, target_slide_count: int) -> int:
         if quality_profile == "fast":
-            return max(6000, min(9000, target_slide_count * 800))
+            # Headroom so the full deck JSON rarely truncates on a local model;
+            # extract_json salvages anything that still overflows.
+            return max(9000, min(16000, target_slide_count * 1400))
         if quality_profile == "showcase":
             return max(32000, min(40000, target_slide_count * 2600))
         return max(24000, min(32000, target_slide_count * 1800))

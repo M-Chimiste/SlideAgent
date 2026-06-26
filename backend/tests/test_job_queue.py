@@ -25,6 +25,21 @@ class DummyStore:
                 error_message=None,
                 created_at="2026-01-01T00:00:00Z",
                 completed_at=None,
+            ),
+            JobRecord(
+                id="job-2",
+                template_id="template-1",
+                instructions=None,
+                config_json=None,
+                status="repairing",
+                progress=0.82,
+                qa_rounds=1,
+                warnings=[],
+                result_file=None,
+                preview_dir=None,
+                error_message=None,
+                created_at="2026-01-01T00:00:01Z",
+                completed_at=None,
             )
         ]
 
@@ -62,8 +77,13 @@ async def test_queue_recovers_and_runs_pending_jobs() -> None:
     await asyncio.sleep(0.05)
     await queue.stop()
 
-    assert "job-1" in orchestrator.ran
-    assert any(update for update in store.updated if update[1].get("status") == "queued")
+    assert set(orchestrator.ran) == {"job-1", "job-2"}
+    assert any(
+        update for update in store.updated if update == ("job-1", {"status": "queued"})
+    )
+    assert any(
+        update for update in store.updated if update == ("job-2", {"status": "queued"})
+    )
 
 
 @pytest.mark.asyncio

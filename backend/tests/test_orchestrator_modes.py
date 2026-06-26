@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,88 @@ class CleanQAAgent:
         return None
 
 
+class PersistentCriticalQAAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def inspect_deck(self, output_path, output_dir, outlines):
+        self.calls += 1
+        return (
+            QAResult(
+                passed=False,
+                issues=[
+                    QAIssue(
+                        severity="CRITICAL",
+                        category="content_quality",
+                        message="Rendered slide still contains incomplete text.",
+                        slide_index=0,
+                    )
+                ],
+            ),
+            [],
+        )
+
+    def export_pdf(self, output_path, working_dir):
+        return None
+
+
+class RecordingSQLiteStore(SQLiteStore):
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.status_updates: list[str] = []
+
+    async def update_job(self, job_id: str, **fields) -> None:
+        if "status" in fields:
+            self.status_updates.append(str(fields["status"]))
+        await super().update_job(job_id, **fields)
+
+
+class NonActionableWarningQAAgent:
+    def inspect_deck(self, output_path, output_dir, outlines):
+        return (
+            QAResult(
+                passed=True,
+                issues=[
+                    QAIssue(
+                        severity="INFO",
+                        category="render_fallback",
+                        message="Used approximate preview rendering.",
+                        slide_index=None,
+                    )
+                ],
+            ),
+            [],
+        )
+
+    def export_pdf(self, output_path, working_dir):
+        return None
+
+
+class WarningEditingContract:
+    def build(
+        self,
+        template: TemplateProfile,
+        outlines: list[SlideOutline],
+        phase: str = "planned",
+    ) -> dict:
+        return {
+            "artifact": "editing-contract",
+            "standard": "claude-pptx-editing-v1",
+            "phase": phase,
+            "status": "warning",
+            "issue_count": 1,
+            "requirements": [
+                {
+                    "id": "varied_composition_families",
+                    "label": "Vary visible composition families",
+                    "status": "warning",
+                    "message": "Only one visible composition family used.",
+                }
+            ],
+            "warnings": ["Only one visible composition family used."],
+        }
+
+
 class CountingIngester(StaticIngester):
     def __init__(self) -> None:
         self.calls = 0
@@ -109,6 +192,7 @@ class CountingPlanner(ContentPlanner):
         generation_mode: str | None = None,
         quality_profile: str = "balanced",
         length_strategy: str = "auto",
+        presentation_style: str = "consulting",
     ):
         self.calls += 1
         return super().plan(
@@ -118,6 +202,7 @@ class CountingPlanner(ContentPlanner):
             generation_mode=generation_mode,
             quality_profile=quality_profile,
             length_strategy=length_strategy,
+            presentation_style=presentation_style,
         )
 
 
@@ -130,6 +215,7 @@ class DuplicateOutlinePlanner(ContentPlanner):
         generation_mode: str | None = None,
         quality_profile: str = "balanced",
         length_strategy: str = "auto",
+        presentation_style: str = "consulting",
     ):
         created_at = "2026-01-01T00:00:00Z"
         outlines = []
@@ -163,6 +249,26 @@ class DuplicateOutlinePlanner(ContentPlanner):
                 )
             )
         return outlines, []
+
+
+class ArtifactFailingPlanner(ContentPlanner):
+    def plan(
+        self,
+        template: TemplateProfile,
+        bundle: DocumentBundle,
+        instructions: str = "",
+        generation_mode: str | None = None,
+        quality_profile: str = "balanced",
+        length_strategy: str = "auto",
+        presentation_style: str = "consulting",
+    ):
+        self.last_planning_artifacts = {
+            "story-map": {
+                "status": "unavailable",
+                "fallback_reason": "model timed out",
+            }
+        }
+        raise RuntimeError("planner unavailable")
 
 
 def _timestamp() -> str:
@@ -203,6 +309,11 @@ def test_orchestrator_selects_deep_planner_profile(tmp_path: Path) -> None:
     assert planner.llm_client is not None
     assert planner.llm_client.base_url == "http://athena.local:1240/v1"
     assert planner.llm_client.model == "minimax-m2.7"
+    # Deep profile authors slides one-by-one; fast profile batches.
+    assert planner.slide_generation_strategy == "per_slide"
+    assert orchestrator._planner_for_job(
+        _job("fast-job", FREEFORM_TEMPLATE_ID, "freeform")
+    ).slide_generation_strategy == "batched"
 
 
 def _job(job_id: str, template_id: str, mode: str) -> JobRecord:
@@ -258,7 +369,9 @@ async def test_orchestrator_runs_freeform_job_without_template(tmp_path: Path) -
     await store.init()
     await store.create_job(_job("freeform-job", FREEFORM_TEMPLATE_ID, "freeform"))
 
-    await _orchestrator(settings, store, storage).run_job("freeform-job")
+    await _orchestrator_with_qa(settings, store, storage, CleanQAAgent()).run_job(
+        "freeform-job"
+    )
 
     job = await store.get_job("freeform-job")
     outlines = await store.list_slide_outlines("freeform-job")
@@ -270,11 +383,39 @@ async def test_orchestrator_runs_freeform_job_without_template(tmp_path: Path) -
     assert outlines
     assert {outline.layout_json["generation_mode"] for outline in outlines} == {"freeform"}
     assert len(Presentation(job.result_file).slides) == len(outlines)
-    assert list((storage.job_dir("freeform-job") / "preview").glob("slide-*.jpg"))
     planning_dir = storage.job_dir("freeform-job") / "planning"
     assert (planning_dir / "source-compression.json").exists()
     assert (planning_dir / "story-map.json").exists()
     assert (planning_dir / "spec-gate.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_persists_planning_artifacts_when_planner_fails(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("planner-error-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=ArtifactFailingPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object()),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("planner-error-job")
+
+    job = await store.get_job("planner-error-job")
+    assert job is not None
+    assert job.status == "error"
+    assert job.error_message == "planner unavailable"
+    assert storage.planning_artifact_path("planner-error-job", "story-map").exists()
 
 
 @pytest.mark.asyncio
@@ -299,8 +440,10 @@ async def test_orchestrator_plan_only_persists_plan_without_rendering(tmp_path: 
     assert planned.result_file is None
     assert planned.preview_dir is None
     assert outlines
+    assert all(outline.layout_json.get("composition_family") for outline in outlines)
     assert (planning_dir / "document-bundle.json").exists()
     assert (planning_dir / "source-compression.json").exists()
+    assert (planning_dir / "editing-contract.json").exists()
     assert not (storage.job_dir("plan-only-job") / "output.pptx").exists()
     assert not list((storage.job_dir("plan-only-job") / "preview").glob("slide-*.jpg"))
 
@@ -364,7 +507,7 @@ async def test_orchestrator_repairs_actionable_warning_and_persists_outline(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
-    store = SQLiteStore(settings)
+    store = RecordingSQLiteStore(settings)
     storage = LocalStorage(settings)
     qa_agent = WarningThenCleanQAAgent()
     await store.init()
@@ -380,8 +523,119 @@ async def test_orchestrator_repairs_actionable_warning_and_persists_outline(
     assert job.qa_rounds == 1
     assert qa_agent.calls == 2
     assert outlines[0].layout_json["qa_repair"]["applied"] is True
+    assert outlines[0].qa_status == "pass"
+    assert "repairing" in store.status_updates
+    assert store.status_updates.count("qa") >= 2
     assert (storage.job_dir("repair-job") / "qa" / "round-0.json").exists()
     assert (storage.job_dir("repair-job") / "qa" / "round-1.json").exists()
+    round_0 = json.loads(
+        (storage.job_dir("repair-job") / "qa" / "round-0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    round_1 = json.loads(
+        (storage.job_dir("repair-job") / "qa" / "round-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert round_0["repair_applied"] is True
+    assert round_0["actionable_issue_count"] == 1
+    assert round_0["stop_reason"] == "repair_applied"
+    assert round_1["repair_applied"] is False
+    assert round_1["actionable_issue_count"] == 0
+    assert round_1["stop_reason"] == "no_actionable_issues"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_non_actionable_qa_without_repair(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("non-actionable-qa-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    await _orchestrator_with_qa(
+        settings,
+        store,
+        storage,
+        NonActionableWarningQAAgent(),
+    ).run_job("non-actionable-qa-job")
+
+    job = await store.get_job("non-actionable-qa-job")
+    round_0 = json.loads(
+        (storage.job_dir("non-actionable-qa-job") / "qa" / "round-0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert job is not None
+    assert job.status == "done"
+    assert job.qa_rounds == 0
+    assert round_0["repair_applied"] is False
+    assert round_0["actionable_issue_count"] == 0
+    assert round_0["stop_reason"] == "no_actionable_issues"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_marks_review_failed_when_final_editing_contract_warns(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("contract-review-failed-job", FREEFORM_TEMPLATE_ID, "freeform"))
+    orchestrator = _orchestrator_with_qa(settings, store, storage, CleanQAAgent())
+    orchestrator.editing_contract = WarningEditingContract()
+
+    await orchestrator.run_job("contract-review-failed-job")
+
+    job = await store.get_job("contract-review-failed-job")
+    assert job is not None
+    assert job.status == "review_failed"
+    assert job.result_file
+    assert Path(job.result_file).exists()
+    assert job.error_message
+    assert "editing contract" in job.error_message
+    assert any(warning["field"] == "editing_contract" for warning in job.warnings)
+    final_contract = json.loads(
+        (storage.job_dir("contract-review-failed-job") / "planning" / "editing-contract.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert final_contract["phase"] == "final"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_marks_review_failed_when_final_qa_still_fails(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    qa_agent = PersistentCriticalQAAgent()
+    await store.init()
+    await store.create_job(_job("final-review-failed-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    await _orchestrator_with_qa(settings, store, storage, qa_agent).run_job(
+        "final-review-failed-job"
+    )
+
+    job = await store.get_job("final-review-failed-job")
+    assert job is not None
+    assert job.status == "review_failed"
+    assert job.result_file
+    assert Path(job.result_file).exists()
+    assert job.error_message and "failed final review" in job.error_message
+    assert list((storage.job_dir("final-review-failed-job") / "qa").glob("round-*.json"))
+    assert (
+        storage.job_dir("final-review-failed-job") / "outline" / "render-input.json"
+    ).exists()
+    assert (
+        storage.job_dir("final-review-failed-job") / "outline" / "repair-round-1.json"
+    ).exists()
 
 
 @pytest.mark.asyncio
@@ -439,7 +693,9 @@ async def test_orchestrator_runs_brand_job_from_template_profile(tmp_path: Path)
     await store.create_template(template)
     await store.create_job(_job("brand-job", "brand-template", "brand"))
 
-    await _orchestrator(settings, store, storage).run_job("brand-job")
+    await _orchestrator_with_qa(settings, store, storage, CleanQAAgent()).run_job(
+        "brand-job"
+    )
 
     job = await store.get_job("brand-job")
     outlines = await store.list_slide_outlines("brand-job")
@@ -505,7 +761,9 @@ async def test_orchestrator_runs_strict_job_with_xml_injection(tmp_path: Path) -
     await store.create_template(template)
     await store.create_job(_job("strict-job", "strict-template", "strict"))
 
-    await _orchestrator(settings, store, storage).run_job("strict-job")
+    await _orchestrator_with_qa(settings, store, storage, CleanQAAgent()).run_job(
+        "strict-job"
+    )
 
     job = await store.get_job("strict-job")
     outlines = await store.list_slide_outlines("strict-job")
@@ -534,3 +792,42 @@ def _write_strict_template(path: Path) -> None:
         box.name = name
         box.text = text
     prs.save(path.as_posix())
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_freeform_job_with_html_engine(tmp_path: Path) -> None:
+    """Full pipeline (ingest -> plan -> design -> build -> QA) with the polished
+    HTML renderer as the engine produces a terminal, image-based deck."""
+    from app.services.html_rendering import find_chrome
+
+    if find_chrome() is None:
+        pytest.skip("headless Chrome not available")
+
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("html-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=ContentPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object(), renderer_engine="html"),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("html-job")
+
+    job = await store.get_job("html-job")
+    outlines = await store.list_slide_outlines("html-job")
+    assert job is not None
+    assert job.status in {"done", "review_failed"}
+    assert job.result_file and Path(job.result_file).exists()
+    prs = Presentation(job.result_file)
+    assert len(prs.slides) == len(outlines)
+    # HTML engine embeds each slide as a full-bleed picture
+    for slide in prs.slides:
+        assert any(shape.shape_type == 13 for shape in slide.shapes), "slide missing picture"

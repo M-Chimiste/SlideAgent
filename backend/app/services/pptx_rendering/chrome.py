@@ -70,11 +70,22 @@ class ChromeRenderingMixin:
         wraps_two_lines = len(" ".join(title.split())) > one_line_chars
         if not wraps_two_lines:
             title_height, show_subheading = 0.55, True
-        elif title_font_size >= 20:
-            title_height, show_subheading = 0.86, False
         else:
-            title_height, show_subheading = 0.98, False
-        title_height = max(title_height, min(float(title_profile.get("h", title_height)), 1.1))
+            # Keep generated titles inside the header safe zone. Brand templates
+            # often reserve a taller title placeholder, but our content layouts
+            # begin around 1.5in; inheriting that height makes the title box
+            # overlap the first content row even when the visible text does not.
+            title_font_size = min(title_font_size, 20)
+            title_height, show_subheading = 0.68, False
+        profile_height = float(title_profile.get("h", title_height))
+        if wraps_two_lines:
+            title_height = min(max(title_height, min(profile_height, 0.68)), 0.68)
+        else:
+            # Brand templates often expose generous title placeholders. Reusing
+            # that full height for one-line generated titles makes the text box
+            # intrude into the first content row, which produces visible layout
+            # ambiguity and audit occlusion warnings.
+            title_height = min(max(title_height, min(profile_height, 0.68)), 0.68)
         title_box = slide.shapes.add_textbox(
             Inches(title_x),
             Inches(title_y),
@@ -118,9 +129,12 @@ class ChromeRenderingMixin:
                 "layout instruction",
                 "diagram description",
                 "placeholder",
+                "cover slide",
+                "executive overview deck",
                 "visually tied",
                 "compact reference block",
                 "distinct exhibit",
+                "evidence from",
             )
         )
 
@@ -276,7 +290,7 @@ class ChromeRenderingMixin:
             size=title_size,
             bold=True,
         )
-        if subheading and len(title) <= 96:
+        if subheading and len(title) <= 96 and title_height <= 0.8:
             self._add_dark_text(
                 slide,
                 self._truncate_at_word(subheading, 150),

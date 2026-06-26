@@ -142,27 +142,71 @@ class OpenAICompatibleClient:
 
     @staticmethod
     def extract_json(text: str) -> Optional[dict[str, Any]]:
-        if not text.strip():
+        if not text or not text.strip():
             return None
-        try:
-            payload = json.loads(text)
-            return payload if isinstance(payload, dict) else None
-        except json.JSONDecodeError:
-            pass
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+        candidates: list[str] = [text.strip()]
+        # fenced ```json ... ``` block (greedy to the last brace, so nested objects survive)
+        fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, flags=re.DOTALL)
         if fenced:
-            try:
-                return json.loads(fenced.group(1))
-            except json.JSONDecodeError:
-                return None
+            candidates.append(fenced.group(1))
         first = text.find("{")
         last = text.rfind("}")
         if first != -1 and last > first:
+            candidates.append(text[first : last + 1])
+        for candidate in candidates:
             try:
-                payload = json.loads(text[first : last + 1])
-                return payload if isinstance(payload, dict) else None
+                payload = json.loads(candidate)
+                if isinstance(payload, dict):
+                    return payload
             except json.JSONDecodeError:
-                return None
+                continue
+        # Last resort: salvage a truncated/unbalanced object (common when a local
+        # model hits its token budget mid-deck) by closing open structures.
+        return OpenAICompatibleClient._salvage_json(text)
+
+    @staticmethod
+    def _salvage_json(text: str) -> Optional[dict[str, Any]]:
+        start = text.find("{")
+        if start == -1:
+            return None
+        body = text[start:]
+        stack: list[str] = []
+        in_str = False
+        esc = False
+        last_comma: tuple[int, list[str]] | None = None
+        for index, ch in enumerate(body):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+            elif ch == ",":
+                last_comma = (index, list(stack))
+
+        def _close(open_stack: list[str]) -> str:
+            return "".join("}" if c == "{" else "]" for c in reversed(open_stack))
+
+        attempts: list[str] = [body + ('"' if in_str else "") + _close(stack)]
+        if last_comma is not None:
+            cut_index, snapshot = last_comma
+            attempts.append(body[:cut_index] + _close(snapshot))
+        for candidate in attempts:
+            try:
+                payload = json.loads(candidate)
+                if isinstance(payload, dict):
+                    return payload
+            except json.JSONDecodeError:
+                continue
         return None
 
     @staticmethod

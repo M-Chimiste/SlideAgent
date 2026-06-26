@@ -43,20 +43,11 @@ class ImmersiveLayoutRenderingMixin:
             ][:6]
         else:
             bullets = self._bullets(outline)[:6]
-        if len(bullets) < 4:
-            bullets = (
-                bullets
-                + [
-                    "Load context",
-                    "Plan the work",
-                    "Execute changes",
-                    "Review evidence",
-                    "Update memory",
-                    "Reset cleanly",
-                ]
-            )[:6]
+        if len(bullets) < 4 or self._labels_are_generic_visual_fallbacks(bullets):
+            self._add_authored_proof_strip(slide, outline, brand)
+            return
         while len(bullets) < 6:
-            bullets.append(["Plan", "Execute", "Review", "Update", "Reset", "Repeat"][len(bullets)])
+            bullets.append(bullets[-1])
         center_x, center_y = 6.66, 4.18
         loop = slide.shapes.add_shape(
             MSO_SHAPE.OVAL,
@@ -167,21 +158,21 @@ class ImmersiveLayoutRenderingMixin:
             1.16,
             3.35,
             4.92,
-            1.0,
+            1.22,
             brand,
-            size=20,
+            size=17,
             bold=True,
             color=brand.colors.text_light,
         )
         self._add_dark_text(
             slide,
-            "Use the model to decide what must be explicit before the next session.",
+            self._topic_support_sentence(outline),
             1.18,
             4.72,
             4.8,
             0.34,
             brand,
-            size=9,
+            size=11,
             color=self._tint(brand.colors.primary, 0.68),
         )
         icons = self._icons(outline)
@@ -192,7 +183,7 @@ class ImmersiveLayoutRenderingMixin:
                 Inches(7.35),
                 Inches(y),
                 Inches(4.35),
-                Inches(0.64),
+                Inches(0.76),
             )
             card.fill.solid()
             card.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.primary, 0.15 + idx * 0.03))
@@ -202,11 +193,11 @@ class ImmersiveLayoutRenderingMixin:
                 slide,
                 self._truncate_phrase(text, 78),
                 8.16,
-                y + 0.14,
+                y + 0.12,
                 3.1,
-                0.28,
+                0.44,
                 brand,
-                size=8,
+                size=10,
                 color=self._tint(brand.colors.primary, 0.84),
             )
         connector = slide.shapes.add_connector(
@@ -227,6 +218,7 @@ class ImmersiveLayoutRenderingMixin:
         slide_number: int,
         total_slides: int,
     ) -> None:
+        outline = self._closing_display_outline(outline)
         self._add_dark_slide_chrome(
             slide, outline, brand, slide_number, total_slides, "FINAL DECISION"
         )
@@ -240,16 +232,25 @@ class ImmersiveLayoutRenderingMixin:
             str(recommendation),
             str(outline.content_json.get("action_title") or outline.label),
         )
-        next_steps = [str(item) for item in exhibit.get("next_steps", []) if str(item).strip()]
-        if not next_steps:
-            next_steps = self._bullets(outline)[:3]
+        if self._closing_text_is_source_excerpt(recommendation) or self._is_incomplete_display_fragment(recommendation):
+            recommendation = self._default_closing_recommendation(outline)
+        next_steps = [
+            str(item)
+            for item in exhibit.get("next_steps", [])
+            if str(item).strip() and self._closing_step_is_actionable(str(item))
+        ][:3]
+        if len(next_steps) < 2:
+            next_steps = self._closing_next_steps(outline)
         if not next_steps:
             next_steps = [
-                "Confirm the decision owner.",
-                "Run the first governed workflow.",
-                "Update the shared reference after each milestone.",
+                "Select the first governed benchmark pilot.",
+                "Bind the pilot to validated source evidence.",
+                "Review failures before expanding coverage.",
             ]
-        ask = str(exhibit.get("decision_ask") or "Confirm owner, scope, and timing.")
+        ask = self._closing_decision_ask(
+            str(exhibit.get("decision_ask") or ""),
+            outline,
+        )
         self._add_dark_text(slide, "RECOMMENDATION", 0.92, 2.5, 2.2, 0.24, brand, size=9, bold=True, color=brand.colors.accent)
         self._add_dark_text(
             slide,
@@ -268,61 +269,78 @@ class ImmersiveLayoutRenderingMixin:
             Inches(0.92),
             Inches(4.82),
             Inches(5.86),
-            Inches(0.78),
+            Inches(0.66),
         )
         ask_box.fill.solid()
         ask_box.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.accent, 0.18))
-        ask_box.line.color.rgb = self._rgb(self._tint(brand.colors.accent, 0.38))
-        self._add_dark_text(slide, "DECISION ASK", 1.16, 5.04, 1.3, 0.18, brand, size=7, bold=True, color=brand.colors.text_light)
+        ask_box.line.color.rgb = ask_box.fill.fore_color.rgb
+        self._add_dark_text(slide, "DECISION ASK", 1.14, 5.0, 1.3, 0.18, brand, size=7, bold=True, color=brand.colors.text_dark)
         self._add_dark_text(
             slide,
             self._truncate_at_word(ask, 96),
             2.48,
-            4.98,
+            4.94,
             3.82,
-            0.28,
+            0.34,
             brand,
-            size=9,
-            color=brand.colors.text_light,
+            size=10,
+            color=brand.colors.text_dark,
         )
+        rail = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(7.86),
+            Inches(2.56),
+            Inches(0.035),
+            Inches(3.34),
+        )
+        rail.fill.solid()
+        rail.fill.fore_color.rgb = self._rgb(brand.colors.accent)
+        rail.line.color.rgb = rail.fill.fore_color.rgb
         for idx, step in enumerate(next_steps[:3]):
-            y = 2.42 + idx * 1.04
-            card = slide.shapes.add_shape(
+            y = 2.54 + idx * 1.14
+            self._add_badge(slide, str(idx + 1), 7.65, y + 0.05, 0.48, brand, self._icon_fill(brand, idx))
+            rule = slide.shapes.add_shape(
                 MSO_SHAPE.RECTANGLE,
-                Inches(7.78),
-                Inches(y),
-                Inches(4.12),
-                Inches(0.76),
+                Inches(8.38),
+                Inches(y + 0.94),
+                Inches(3.12),
+                Inches(0.018),
             )
-            card.fill.solid()
-            card.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.primary, 0.14 + idx * 0.04))
-            card.line.color.rgb = self._rgb(self._tint(brand.colors.primary, 0.34))
-            self._add_badge(slide, str(idx + 1), 8.02, y + 0.18, 0.38, brand, self._icon_fill(brand, idx))
+            rule.fill.solid()
+            rule.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.primary, 0.4))
+            rule.line.color.rgb = rule.fill.fore_color.rgb
             self._add_dark_text(
                 slide,
-                self._truncate_phrase(step, 82),
-                8.62,
-                y + 0.18,
-                2.8,
-                0.28,
+                self._truncate_phrase(step, 118),
+                8.38,
+                y,
+                3.62,
+                0.84,
                 brand,
-                size=8,
-                color=self._tint(brand.colors.primary, 0.84),
+                size=10,
+                color=self._tint(brand.colors.primary, 0.86),
             )
 
     def _add_closing_recommendation(
         self, slide, outline: SlideOutline, brand: BrandDNA
     ) -> None:
+        outline = self._closing_display_outline(outline)
         exhibit = self._exhibit(outline)
         recommendation = (
             exhibit.get("recommendation")
             or outline.content_json.get("action_title")
             or outline.label
         )
-        next_steps = [str(item) for item in exhibit.get("next_steps", []) if str(item).strip()]
-        if not next_steps:
-            next_steps = self._bullets(outline)[:3]
-        ask = exhibit.get("decision_ask") or "Confirm owner, scope, and timing."
+        if self._closing_text_is_source_excerpt(str(recommendation)) or self._is_incomplete_display_fragment(str(recommendation)):
+            recommendation = self._default_closing_recommendation(outline)
+        next_steps = [
+            str(item)
+            for item in exhibit.get("next_steps", [])
+            if str(item).strip() and self._closing_step_is_actionable(str(item))
+        ][:3]
+        if len(next_steps) < 2:
+            next_steps = self._closing_next_steps(outline)
+        ask = self._closing_decision_ask(str(exhibit.get("decision_ask") or ""), outline)
         panel = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
             Inches(0.85),
@@ -369,6 +387,123 @@ class ImmersiveLayoutRenderingMixin:
                 brand,
                 size=13,
             )
+
+    def _closing_display_outline(self, outline: SlideOutline) -> SlideOutline:
+        title = str(
+            outline.content_json.get("action_title")
+            or outline.content_json.get("title")
+            or outline.label
+        )
+        if not self._closing_text_is_source_excerpt(title) and not self._is_incomplete_display_fragment(title):
+            return outline
+        title = self._default_closing_title(outline)
+        content = dict(outline.content_json)
+        content["action_title"] = title
+        return outline.model_copy(update={"label": title, "content_json": content})
+
+    def _default_closing_title(self, outline: SlideOutline) -> str:
+        text = self._outline_text_for_closing(outline)
+        if any(token in text for token in ("benchmark", "harness", "ground truth", "evaluation")):
+            return "Commit to a governed benchmark pilot"
+        return "Commit to the next governed operating move"
+
+    def _default_closing_recommendation(self, outline: SlideOutline) -> str:
+        text = self._outline_text_for_closing(outline)
+        if any(token in text for token in ("benchmark", "harness", "ground truth", "evaluation")):
+            return "Launch a governed benchmark pilot tied to validated source evidence."
+        return "Approve the first governed pilot and make the evidence standard explicit."
+
+    def _closing_text_is_source_excerpt(self, text: str) -> bool:
+        lowered = " ".join(str(text).casefold().split())
+        return lowered.startswith(
+            (
+                "benchmarks have been",
+                "commit to models are only as trustworthy",
+                "historically,",
+                "histopathology",
+                "models are only as trustworthy",
+                "organizations deploying",
+                "the proliferation",
+                "this white paper",
+                "with the proliferation",
+            )
+        )
+
+    def _closing_decision_ask(self, ask: str, outline: SlideOutline) -> str:
+        cleaned = self._clean_display_text(ask)
+        normalized = re.sub(r"[^a-z0-9]+", " ", cleaned.casefold()).strip()
+        if normalized in {
+            "",
+            "confirm owner scope and timing",
+            "confirm ownership and timing",
+            "confirm owner timing and success measure",
+        }:
+            text = self._outline_text_for_closing(outline)
+            if any(token in text for token in ("benchmark", "harness", "ground truth", "evaluation")):
+                return "Approve the first governed benchmark pilot."
+            return "Approve the first governed pilot."
+        return cleaned
+
+    def _closing_next_steps(self, outline: SlideOutline) -> list[str]:
+        bullets = [
+            bullet
+            for bullet in self._bullets(outline)
+            if self._closing_step_is_actionable(bullet)
+        ][:3]
+        if len(bullets) >= 2:
+            return bullets
+        text = self._outline_text_for_closing(outline)
+        if any(token in text for token in ("benchmark", "harness", "ground truth", "evaluation")):
+            return [
+                "Select one consequential internal benchmark pilot.",
+                "Bind test cases to validated source evidence.",
+                "Review failures before expanding coverage.",
+            ]
+        if "memory" in text or "context" in text:
+            return [
+                "Name the shared context owner.",
+                "Run one workflow with persistent memory.",
+                "Refresh the record after each milestone.",
+            ]
+        return [
+            "Select the first governed pilot.",
+            "Define the evidence standard.",
+            "Review results before scaling.",
+        ]
+
+    def _closing_step_is_actionable(self, text: str) -> bool:
+        cleaned = self._clean_display_text(text)
+        if not cleaned or self._is_incomplete_display_fragment(cleaned):
+            return False
+        if self._closing_text_is_source_excerpt(cleaned):
+            return False
+        first = re.findall(r"[A-Za-z][A-Za-z'-]*", cleaned[:32])
+        if not first:
+            return False
+        return first[0].casefold() in {
+            "approve",
+            "assign",
+            "bind",
+            "calibrate",
+            "commit",
+            "define",
+            "launch",
+            "name",
+            "review",
+            "run",
+            "select",
+        }
+
+    def _outline_text_for_closing(self, outline: SlideOutline) -> str:
+        content = outline.content_json
+        parts = [
+            str(content.get("action_title") or ""),
+            str(content.get("subheading") or ""),
+            str(content.get("summary") or ""),
+            str(content.get("speaker_notes") or ""),
+            " ".join(str(item) for item in content.get("sources", []) if str(item).strip()),
+        ]
+        return " ".join(parts).casefold()
 
     def _add_section_divider(
         self,

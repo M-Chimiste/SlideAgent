@@ -373,13 +373,16 @@ class SourceGroundingMixin:
         return text
 
     def _numeric_tokens(self, text: str) -> set[str]:
-        return {
-            self._normalize_numeric_token(match.group(0))
-            for match in re.finditer(
-                r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)%?(?!\w)",
-                text,
-            )
-        }
+        tokens: set[str] = set()
+        for match in re.finditer(
+            r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)%?(?!\w)",
+            text,
+        ):
+            token = self._normalize_numeric_token(match.group(0))
+            if re.fullmatch(r"\d", token):
+                continue
+            tokens.add(token)
+        return tokens
 
     def _normalize_numeric_token(self, token: str) -> str:
         cleaned = token.strip().replace(",", "")
@@ -432,7 +435,57 @@ class SourceGroundingMixin:
             cleaned,
             flags=re.IGNORECASE,
         )
+        cleaned = re.sub(
+            r"\(\s*owner\s*/\s*next\s*\)|\bowner\s*/\s*next\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        convert_match = re.match(
+            r"\s*convert\s+(.+?)\s+into\s+an?(?:\s+owned)?(?:\s+action)?\.?\s*$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if convert_match:
+            cleaned = convert_match.group(1)
+        if self._looks_like_raw_pipe_row(cleaned):
+            cleaned = self._pipe_row_to_display_text(cleaned)
         return self._repair_dangling_fragment(" ".join(cleaned.split()).strip(" -:;"))
+
+    def _looks_like_raw_pipe_row(self, text: str) -> bool:
+        if "|" not in str(text):
+            return False
+        cells = [cell.strip() for cell in str(text).split("|") if cell.strip()]
+        return len(cells) >= 2
+
+    def _pipe_row_to_display_text(self, text: str) -> str:
+        cells = [
+            " ".join(cell.strip(" -:;").split())
+            for cell in str(text).split("|")
+            if cell.strip(" -:;")
+        ]
+        header_cells = {
+            "artifact",
+            "purpose",
+            "update trigger",
+            "signal",
+            "implication",
+            "action",
+            "owner",
+            "timing",
+        }
+        meaningful = [
+            cell
+            for cell in cells
+            if cell.casefold() not in header_cells
+            and not re.fullmatch(r"-+", cell)
+        ]
+        if not meaningful:
+            return ""
+        # Table extraction often duplicates a short label and a longer body in
+        # one markdown row. Keep the richest cell so the slide does not show raw
+        # pipes or repeat the same fragment in two columns.
+        return max(meaningful, key=lambda cell: (len(cell.split()), len(cell)))
 
     def _metrics_from_slide(self, slide: GeneratedSlideSpec) -> list[dict[str, Any]]:
         if isinstance(slide.exhibit_spec, dict):
@@ -810,7 +863,7 @@ class SourceGroundingMixin:
 
     def _to_bullets(self, content: str) -> list[str]:
         lines = [line.strip("-• ") for line in content.splitlines() if line.strip()]
-        bullets = [line for line in lines if len(line.split()) > 3]
+        bullets = [line for line in lines if len(line.split()) >= 3]
         return bullets[:4] if bullets else lines[:4]
 
     def _pick_metrics(

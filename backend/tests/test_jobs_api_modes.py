@@ -151,6 +151,8 @@ async def test_create_freeform_job_without_template() -> None:
         "planner_profile": "fast",
         "quality_profile": "balanced",
         "length_strategy": "auto",
+        "presentation_style": "auto",
+        "design_language": "auto",
         "run_visual_qa": True,
         "plan_only": False,
     }
@@ -214,6 +216,8 @@ async def test_create_brand_job_uses_template_mode() -> None:
         "planner_profile": "fast",
         "quality_profile": "balanced",
         "length_strategy": "auto",
+        "presentation_style": "auto",
+        "design_language": "auto",
         "run_visual_qa": True,
         "plan_only": False,
     }
@@ -241,6 +245,8 @@ async def test_create_brand_job_accepts_deep_planner_profile() -> None:
         "planner_profile": "deep",
         "quality_profile": "balanced",
         "length_strategy": "auto",
+        "presentation_style": "auto",
+        "design_language": "auto",
         "run_visual_qa": True,
         "plan_only": False,
     }
@@ -270,6 +276,8 @@ async def test_create_job_accepts_quality_and_length_controls() -> None:
         "planner_profile": "fast",
         "quality_profile": "showcase",
         "length_strategy": "expanded",
+        "presentation_style": "auto",
+        "design_language": "auto",
         "run_visual_qa": False,
         "plan_only": False,
     }
@@ -331,6 +339,9 @@ async def test_get_job_status_returns_latest_qa_issues_and_summary(tmp_path) -> 
                     }
                 ],
                 "passed": True,
+                "actionable_issue_count": 1,
+                "repair_applied": True,
+                "stop_reason": "repair_applied",
             }
         ),
         encoding="utf-8",
@@ -353,6 +364,9 @@ async def test_get_job_status_returns_latest_qa_issues_and_summary(tmp_path) -> 
                     },
                 ],
                 "passed": False,
+                "actionable_issue_count": 0,
+                "repair_applied": False,
+                "stop_reason": "no_actionable_issues",
             }
         ),
         encoding="utf-8",
@@ -376,11 +390,17 @@ async def test_get_job_status_returns_latest_qa_issues_and_summary(tmp_path) -> 
             "round": 0,
             "passed": True,
             "summary": {"critical": 0, "warning": 1, "info": 0, "count": 1},
+            "actionable_issue_count": 1,
+            "repair_applied": True,
+            "stop_reason": "repair_applied",
         },
         {
             "round": 1,
             "passed": False,
             "summary": {"critical": 1, "warning": 0, "info": 1, "count": 2},
+            "actionable_issue_count": 0,
+            "repair_applied": False,
+            "stop_reason": "no_actionable_issues",
         },
     ]
 
@@ -403,7 +423,23 @@ def _review_outline() -> SlideOutline:
             "source_refs": ["sec-1"],
             "speaker_notes": "Use this as the talk track.",
         },
-        layout_json={"layout": "comparison_table"},
+        layout_json={
+            "layout": "comparison_table",
+            "template_frame": {
+                "index": 2,
+                "source_slide": 3,
+                "label": "Comparison frame",
+                "layout_name": "Two Column",
+                "method": "semantic_match",
+                "match_score": 8,
+                "match_confidence": "high",
+                "match_reason": "category:comparison, token:comparison",
+                "content_category": "comparison",
+                "visual_guidance": "2 text slot(s): title, body",
+                "source_file": "/private/template/path/brand.pptx",
+                "reuse_mode": "duplicate-slide-edit",
+            },
+        },
         qa_status="warning",
         qa_issues_json={"issues": [{"category": "title", "message": "Too generic"}]},
         created_at="2026-01-01T00:00:00Z",
@@ -427,6 +463,23 @@ async def test_outline_endpoint_returns_review_safe_slide_data() -> None:
             "narrative_role": "evidence",
             "layout": "comparison_table",
             "archetype": "comparison_table",
+            "composition_family": None,
+            "composition_signature": None,
+            "template_frame": {
+                "index": 2,
+                "source_slide": 3,
+                "label": "Comparison frame",
+                "layout_name": "Two Column",
+                "method": "semantic_match",
+                "match_score": 8,
+                "match_confidence": "high",
+                "match_reason": "category:comparison, token:comparison",
+                "content_category": "comparison",
+                "visual_guidance": "2 text slot(s): title, body",
+                "reuse_mode": "duplicate-slide-edit",
+            },
+            "visual_intent": {},
+            "visual_degradation": {},
             "exhibit_type": "comparison_table",
             "sources": ["Uploaded source: Section 1"],
             "source_refs": ["sec-1"],
@@ -532,6 +585,45 @@ async def test_get_job_status_returns_planning_summary(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
+    (planning_dir / "editing-contract.json").write_text(
+        json.dumps(
+            {
+                "status": "warning",
+                "phase": "planned",
+                "issue_count": 1,
+                "slide_count": 6,
+                "unique_layout_count": 3,
+                "unique_composition_family_count": 4,
+                "bullet_card_ratio": 0.667,
+                "composition_card_ratio": 0.5,
+                "diagram_count": 1,
+                "template_mapped_count": 0,
+                "slot_risk_count": 2,
+                "structural_operation_count": 6,
+                "structural_warning_count": 1,
+                "formatting_fix_count": 4,
+                "formatting_warning_count": 0,
+                "standard": "claude-pptx-editing-v1",
+                "source": "https://github.com/anthropics/skills/blob/main/skills/pptx/editing.md",
+                "requirements": [
+                    {
+                        "id": "varied_composition_families",
+                        "label": "Vary visible composition families",
+                        "status": "pass",
+                        "message": "4 visible composition families used; target is at least 4.",
+                    },
+                    {
+                        "id": "complete_structure_before_content_edit",
+                        "label": "Complete structural plan before content edits",
+                        "status": "warning",
+                        "message": "1 structural warning.",
+                    },
+                ],
+                "warnings": ["1 structural warning."],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     status = await get_job_status(
         "status-job",
@@ -541,7 +633,7 @@ async def test_get_job_status_returns_planning_summary(tmp_path) -> None:
 
     assert status.planning_summary == {
         "available": True,
-        "artifacts": ["source-compression", "story-map", "spec-gate"],
+        "artifacts": ["source-compression", "story-map", "spec-gate", "editing-contract"],
         "story_map_status": "fallback",
         "story_map_fallback_reason": "timeout",
         "source_coverage": {
@@ -556,7 +648,439 @@ async def test_get_job_status_returns_planning_summary(tmp_path) -> None:
             "repaired_count": 3,
             "unresolved_count": 0,
         },
+        "editing_contract": {
+            "standard": "claude-pptx-editing-v1",
+            "source": "https://github.com/anthropics/skills/blob/main/skills/pptx/editing.md",
+            "status": "warning",
+            "phase": "planned",
+            "issue_count": 1,
+            "requirement_count": 2,
+            "passed_requirement_count": 1,
+            "warning_requirement_count": 1,
+            "slide_count": 6,
+            "unique_layout_count": 3,
+            "unique_composition_family_count": 4,
+            "bullet_card_ratio": 0.667,
+            "composition_card_ratio": 0.5,
+            "diagram_count": 1,
+            "template_mapped_count": 0,
+            "slot_risk_count": 2,
+            "structural_operation_count": 6,
+            "structural_warning_count": 1,
+            "formatting_fix_count": 4,
+            "formatting_warning_count": 0,
+            "requirements": [
+                {
+                    "id": "varied_composition_families",
+                    "label": "Vary visible composition families",
+                    "status": "pass",
+                    "message": "4 visible composition families used; target is at least 4.",
+                },
+                {
+                    "id": "complete_structure_before_content_edit",
+                    "label": "Complete structural plan before content edits",
+                    "status": "warning",
+                    "message": "1 structural warning.",
+                },
+            ],
+            "warnings": ["1 structural warning."],
+        },
     }
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_separates_qa_pass_from_editing_contract_failure(
+    tmp_path,
+) -> None:
+    storage = DummyStorage(tmp_path)
+    qa_dir = storage.job_dir("status-job") / "qa"
+    qa_dir.mkdir(parents=True)
+    (qa_dir / "round-0.json").write_text(
+        json.dumps(
+            {
+                "issues": [],
+                "passed": True,
+                "actionable_issue_count": 0,
+                "repair_applied": False,
+                "stop_reason": "no_actionable_issues",
+            }
+        ),
+        encoding="utf-8",
+    )
+    planning_dir = storage.job_dir("status-job") / "planning"
+    planning_dir.mkdir(parents=True)
+    (planning_dir / "editing-contract.json").write_text(
+        json.dumps(
+            {
+                "status": "warning",
+                "phase": "final",
+                "issue_count": 1,
+                "requirements": [
+                    {
+                        "id": "varied_composition_families",
+                        "label": "Vary visible composition families",
+                        "status": "warning",
+                        "message": "Only one visible composition family used.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    job = _status_job().model_copy(
+        update={
+            "status": "review_failed",
+            "error_message": (
+                "Deck generated but failed final review with 1 unresolved "
+                "editing contract issue(s)."
+            ),
+        }
+    )
+
+    status = await get_job_status(
+        "status-job",
+        store=StatusStore(job),
+        storage=storage,
+    )
+
+    assert status.final_qa_passed is True
+    assert status.final_review_passed is False
+    assert status.unresolved_editing_contract_count == 1
+    assert status.unresolved_critical_count == 0
+    assert status.unresolved_actionable_issue_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_returns_visual_review_summary(tmp_path) -> None:
+    storage = DummyStorage(tmp_path)
+    preview_dir = storage.preview_dir("status-job")
+    preview_dir.mkdir(parents=True)
+    for index in range(1, 4):
+        (preview_dir / f"slide-{index:02d}.jpg").write_bytes(b"jpg")
+    qa_dir = storage.job_dir("status-job") / "qa"
+    qa_dir.mkdir(parents=True)
+    (qa_dir / "rendered-slide-audit.json").write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "issue_count": 0,
+                "critical_count": 0,
+                "warning_count": 0,
+                "visual_rhythm": {
+                    "slide_count": 2,
+                    "unique_family_count": 2,
+                    "card_like_ratio": 0.333,
+                    "family_counts": {"proof_strip": 1, "timeline": 1},
+                },
+                "slides": [{}, {}, {}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (storage.job_dir("status-job") / "template-clone-edit.json").write_text(
+        json.dumps(
+            {
+                "artifact": "template-clone-edit",
+                "status": "pass",
+                "slide_count": 3,
+                "package_cleanup": {
+                    "deleted_part_count": 2,
+                    "deleted_unreferenced_media_part_count": 1,
+                    "removed_content_type_override_count": 1,
+                },
+                "mappings": [
+                    {
+                        "output_slide": 1,
+                        "source_slide": 2,
+                        "rewritten_table_cell_count": 3,
+                        "rewritten_chart_count": 1,
+                        "rewritten_chart_point_count": 4,
+                        "bolded_text_run_count": 5,
+                        "deleted_table_row_count": 1,
+                        "deleted_media_placeholder_count": 2,
+                        "slot_cleanup": {
+                            "planned_excess_slot_count": 3,
+                            "actual_deleted_slot_count": 3,
+                            "cleanup_required": True,
+                            "cleanup_satisfied": True,
+                        },
+                        "editTargets": [
+                            {"action": "rewrite", "shapeId": "2"},
+                            {"action": "rewrite", "shapeId": "3"},
+                            {"action": "delete", "shapeId": "4"},
+                        ],
+                    }
+                ],
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = await get_job_status(
+        "status-job",
+        store=StatusStore(_status_job()),
+        storage=storage,
+    )
+
+    assert status.rendered_slide_audit == {
+        "available": True,
+        "artifact": "rendered-slide-audit",
+        "path": "qa/rendered-slide-audit",
+        "passed": True,
+        "issue_count": 0,
+        "critical_count": 0,
+        "warning_count": 0,
+        "slide_count": 3,
+        "rhythm_slide_count": 2,
+        "unique_family_count": 2,
+        "card_like_ratio": 0.333,
+        "most_repeated_family": {"family": "proof_strip", "count": 1},
+        "top_issues": [],
+    }
+    assert status.visual_review == {
+        "status": "pass",
+        "preview_count": 3,
+        "expected_slide_count": 3,
+        "preview_coverage": True,
+        "audit_available": True,
+        "audit_slide_count": 3,
+        "audit_preview_match": True,
+        "audit_passed": True,
+        "audit_issue_count": 0,
+        "audit_critical_count": 0,
+        "message": "Full-resolution previews and rendered-slide audit are complete.",
+    }
+    assert status.template_clone_edit == {
+        "available": True,
+        "artifact": "template-clone-edit",
+        "status": "pass",
+        "slide_count": 3,
+        "mapping_count": 1,
+        "blocked_mapping_count": 0,
+        "weak_mapping_count": 0,
+        "unfilled_placeholder_count": 0,
+        "closest_candidate_count": 0,
+        "closest_candidate_samples": [],
+        "edit_target_count": 3,
+        "rewritten_target_count": 2,
+        "deleted_target_count": 1,
+        "rewritten_table_cell_count": 3,
+        "rewritten_chart_count": 1,
+        "rewritten_chart_point_count": 4,
+        "bolded_text_run_count": 5,
+        "deleted_table_row_count": 1,
+        "deleted_media_placeholder_count": 2,
+        "planned_excess_slot_count": 3,
+        "actual_deleted_slot_count": 3,
+        "unsatisfied_slot_cleanup_count": 0,
+        "package_cleanup_deleted_part_count": 2,
+        "package_cleanup_deleted_media_part_count": 1,
+        "package_cleanup_removed_override_count": 1,
+        "warning_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_counts_blocked_template_clone_edit_mappings(tmp_path) -> None:
+    storage = DummyStorage(tmp_path)
+    job_dir = storage.job_dir("status-job")
+    job_dir.mkdir(parents=True)
+    (job_dir / "template-clone-edit.json").write_text(
+        json.dumps(
+            {
+                "artifact": "template-clone-edit",
+                "status": "blocked",
+                "slide_count": 1,
+                "mappings": [
+                    {
+                        "output_slide": 1,
+                        "source_slide": 3,
+                        "method": "low_confidence_match",
+                        "match_confidence": "low",
+                        "clone_edit_blocked": True,
+                        "block_reason": "method=low_confidence_match",
+                        "closest_candidates": [
+                            {
+                                "source_slide": 2,
+                                "label": "Evidence frame",
+                                "match_score": 2,
+                                "match_reason": "category:evidence_points",
+                            }
+                        ],
+                        "editTargets": [],
+                    }
+                ],
+                "warnings": [{"message": "clone/edit was blocked"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "template-deviation-log.json").write_text(
+        json.dumps(
+            {
+                "artifact": "template-deviation-log",
+                "status": "blocked",
+                "deviation_count": 1,
+                "deviations": [
+                    {
+                        "type": "blocked_clone_edit",
+                        "severity": "warning",
+                        "output_slide": 1,
+                        "source_slide": 3,
+                        "reason": "method=low_confidence_match",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "template-frame-map.json").write_text(
+        json.dumps(
+            {
+                "artifact": "template-frame-map",
+                "status": "blocked",
+                "outputSlideCount": 1,
+                "sourceSlideCount": 4,
+                "omittedSourceSlideCount": 3,
+                "outputSlides": [
+                    {
+                        "outputSlide": 1,
+                        "sourceSlide": 3,
+                        "reuseMode": "blocked",
+                        "matchConfidence": "low",
+                        "matchScore": 1,
+                    }
+                ],
+                "omittedSourceSlides": [
+                    {"sourceSlide": 1, "reason": "not selected"},
+                    {"sourceSlide": 2, "reason": "not selected"},
+                    {"sourceSlide": 4, "reason": "not selected"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = await get_job_status(
+        "status-job",
+        store=StatusStore(_status_job()),
+        storage=storage,
+    )
+
+    assert status.template_clone_edit["status"] == "blocked"
+    assert status.template_clone_edit["mapping_count"] == 1
+    assert status.template_clone_edit["blocked_mapping_count"] == 1
+    assert status.template_clone_edit["weak_mapping_count"] == 1
+    assert status.template_clone_edit["closest_candidate_count"] == 1
+    assert status.template_clone_edit["closest_candidate_samples"] == [
+        {
+            "output_slide": 1,
+            "source_slide": 2,
+            "label": "Evidence frame",
+            "match_score": 2,
+            "match_reason": "category:evidence_points",
+        }
+    ]
+    assert status.template_clone_edit["edit_target_count"] == 0
+    assert status.template_clone_edit["warning_count"] == 1
+    assert status.template_frame_map == {
+        "available": True,
+        "artifact": "template-frame-map",
+        "status": "blocked",
+        "output_slide_count": 1,
+        "source_slide_count": 4,
+        "omitted_source_slide_count": 3,
+        "blocked_output_slide_count": 1,
+        "samples": [
+            {
+                "output_slide": 1,
+                "source_slide": 3,
+                "reuse_mode": "blocked",
+                "match_confidence": "low",
+                "match_score": 1,
+            }
+        ],
+    }
+    assert status.template_deviation_log == {
+        "available": True,
+        "artifact": "template-deviation-log",
+        "status": "blocked",
+        "deviation_count": 1,
+        "samples": [
+            {
+                "type": "blocked_clone_edit",
+                "severity": "warning",
+                "output_slide": 1,
+                "source_slide": 3,
+                "reason": "method=low_confidence_match",
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_warns_when_visual_review_is_incomplete(tmp_path) -> None:
+    storage = DummyStorage(tmp_path)
+    preview_dir = storage.preview_dir("status-job")
+    preview_dir.mkdir(parents=True)
+    (preview_dir / "slide-01.jpg").write_bytes(b"jpg")
+    qa_dir = storage.job_dir("status-job") / "qa"
+    qa_dir.mkdir(parents=True)
+    (qa_dir / "rendered-slide-audit.json").write_text(
+        json.dumps(
+            {
+                "passed": False,
+                "issue_count": 2,
+                "critical_count": 1,
+                "warning_count": 1,
+                "visual_rhythm": {"slide_count": 3, "unique_family_count": 1},
+                "slides": [
+                    {
+                        "slide_index": 0,
+                        "issues": [
+                            {
+                                "severity": "CRITICAL",
+                                "category": "overflow",
+                                "message": "Slide text is cut off.",
+                            }
+                        ],
+                    },
+                    {},
+                    {},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = await get_job_status(
+        "status-job",
+        store=StatusStore(_status_job()),
+        storage=storage,
+    )
+
+    assert status.visual_review == {
+        "status": "warning",
+        "preview_count": 1,
+        "expected_slide_count": 3,
+        "preview_coverage": False,
+        "audit_available": True,
+        "audit_slide_count": 3,
+        "audit_preview_match": False,
+        "audit_passed": False,
+        "audit_issue_count": 2,
+        "audit_critical_count": 1,
+        "message": "Full-resolution preview coverage or rendered-slide audit needs review.",
+    }
+    assert status.rendered_slide_audit["top_issues"] == [
+        {
+            "severity": "CRITICAL",
+            "category": "overflow",
+            "message": "Slide text is cut off.",
+            "slide_index": 0,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -635,6 +1159,34 @@ async def test_template_asset_endpoints_return_thumbnails_and_logo(tmp_path) -> 
     thumb_dir.mkdir(parents=True)
     thumb_path = thumb_dir / "slide-001.jpg"
     thumb_path.write_bytes(b"jpg")
+    frame_map_path = storage.template_dir("brand-template") / "frame-map.json"
+    frame_map_path.write_text(
+        json.dumps(
+            {
+                "artifact": "template-frame-map",
+                "standard": "claude-pptx-editing-v1",
+                "slide_count": 2,
+                "schema_bearing_slide_count": 1,
+                "slot_count": 7,
+                "slides": [
+                    {
+                        "slide_index": 0,
+                        "label": "Cover",
+                        "layout_name": "Title",
+                        "mode": "flexible",
+                        "content_category": "section_or_cover",
+                        "visual_guidance": "2 text slot(s): title, body; 1 media slot(s)",
+                        "slot_count": 3,
+                        "text_slot_count": 2,
+                        "media_slot_count": 1,
+                        "schema_field_count": 0,
+                        "text_inventory": "Title and subtitle placeholders",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     assets = await get_template_assets("brand-template", store=store, storage=storage)
     thumbnail = await get_template_thumbnail(
@@ -649,6 +1201,29 @@ async def test_template_asset_endpoints_return_thumbnails_and_logo(tmp_path) -> 
         "template_id": "brand-template",
         "thumbnails": ["slide-001.jpg"],
         "logo_available": True,
+        "frame_map": {
+            "available": True,
+            "artifact": "template-frame-map",
+            "standard": "claude-pptx-editing-v1",
+            "slide_count": 2,
+            "schema_bearing_slide_count": 1,
+            "slot_count": 7,
+            "slides": [
+                {
+                    "slide_index": 0,
+                    "label": "Cover",
+                    "layout_name": "Title",
+                    "mode": "flexible",
+                    "content_category": "section_or_cover",
+                    "visual_guidance": "2 text slot(s): title, body; 1 media slot(s)",
+                    "slot_count": 3,
+                    "text_slot_count": 2,
+                    "media_slot_count": 1,
+                    "schema_field_count": 0,
+                    "text_inventory": "Title and subtitle placeholders",
+                }
+            ],
+        },
     }
     assert thumbnail.path == thumb_path.as_posix()
     assert logo.path == logo_path.as_posix()

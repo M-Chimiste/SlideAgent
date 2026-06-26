@@ -19,16 +19,26 @@ GENERIC_TITLE_PATTERNS = {
 
 ACTION_VERBS = {
     "accelerate",
+    "act",
+    "anchor",
+    "bind",
+    "ground",
     "adopt",
     "are",
     "build",
+    "calibrate",
+    "calibrates",
     "capture",
+    "cannot",
     "clarify",
     "clarifies",
     "codify",
     "commit",
     "compare",
+    "connect",
+    "connects",
     "create",
+    "creates",
     "contrast",
     "deliver",
     "demonstrate",
@@ -45,6 +55,8 @@ ACTION_VERBS = {
     "form",
     "forms",
     "grow",
+    "govern",
+    "governs",
     "highlight",
     "identify",
     "improve",
@@ -59,8 +71,12 @@ ACTION_VERBS = {
     "makes",
     "manage",
     "map",
+    "need",
+    "needs",
     "occur",
     "occurs",
+    "orchestrate",
+    "orchestrates",
     "outpace",
     "outpaces",
     "prioritize",
@@ -85,6 +101,9 @@ ACTION_VERBS = {
     "reviews",
     "run",
     "secure",
+    "sequence",
+    "shape",
+    "shapes",
     "show",
     "shows",
     "shift",
@@ -92,8 +111,13 @@ ACTION_VERBS = {
     "specifies",
     "standardize",
     "structure",
+    "substitute",
+    "substitutes",
     "target",
     "treat",
+    "treats",
+    "turn",
+    "turns",
     "translate",
     "transition",
     "undermine",
@@ -115,13 +139,43 @@ GENERIC_FILLER_PATTERNS = {
     "validate every output against the original intent",
     "capture assumptions so they can be revisited later",
     "close the loop with a short, honest retrospective",
+    "tie the claim to a source backed evaluation artifact",
+    "name the review gate before expanding the benchmark",
+    "update the benchmark when source evidence changes",
+    "make the next move visible enough to own inspect and revise",
+    "adopt the operating model through a named pilot and review gate",
+    "confirm owner scope and timing",
+    "anchor the decision in source evidence before scaling the workflow",
+    "use sourced evidence as the decision basis",
 }
+
+BAD_COPY_RE = re.compile(
+    r"\bconvert\b.{0,180}\binto an(?: owned)?(?: action)?|"
+    r"\(\s*owner\s*/\s*next\s*\)|\bowner\s*/\s*next\b|"
+    r"\w\s*\|\s*\w|"
+    r"\btie the claim\b.{0,80}\bsource-backed evaluation artifact\b|"
+    r"\bconnect\b.{0,80}\bto an explicit review gate\b|"
+    r"\bmake\b.{0,80}\bvisible before execution starts\b|"
+    r"\bname the review gate before expanding the benchmark\b|"
+    r"\bupdate the benchmark when source evidence changes\b|"
+    r"\badopt the operating model through a named pilot and review gate\b|"
+    r"\bconfirm owner,?\s+scope,?\s+and timing\b|"
+    r"\bconfirm ownership and timing\b|"
+    r"\bthis white paper has presented\b|"
+    r"\bthe key contributions are\b|"
+    r"\ba reframing of the benchmark problem\b|"
+    r"\brather than treating\b.{0,160}\bwe treat it\b",
+    re.IGNORECASE,
+)
 
 
 class ConsultingQA:
     def inspect(self, deck: DeckSpec) -> tuple[DeckSpec, list[dict]]:
         warnings: list[dict] = []
         for slide in deck.slides:
+            if self._slide_is_cover(slide):
+                slide.qa.consulting_status = "pass"
+                continue
             slide_issues = self.inspect_slide(slide)
             if slide_issues:
                 slide.qa.consulting_status = "warning"
@@ -254,6 +308,13 @@ class ConsultingQA:
                     "message": "Action title is a generic topic label.",
                 }
             )
+        if self._has_meta_title_frame(title):
+            issues.append(
+                {
+                    "category": "action_title",
+                    "message": "Action title contains meta framing instead of a claim.",
+                }
+            )
         if len(title.split()) > 16:
             issues.append(
                 {
@@ -261,7 +322,7 @@ class ConsultingQA:
                     "message": "Action title should be 15 words or fewer.",
                 }
             )
-        if " and " in title.lower():
+        if self._has_multiple_title_messages(title):
             issues.append(
                 {
                     "category": "one_message",
@@ -284,6 +345,9 @@ class ConsultingQA:
                 }
             )
         return issues
+
+    def _slide_is_cover(self, slide: GeneratedSlideSpec) -> bool:
+        return str(slide.archetype or "").strip().lower().replace("-", "_") == "cover"
 
     def _has_action_signal(self, title: str) -> bool:
         words = {re.sub(r"[^a-z]", "", word.lower()) for word in title.split()}
@@ -316,6 +380,15 @@ class ConsultingQA:
                     slide_index=outline.slide_index,
                 )
             )
+        if self._has_meta_title_frame(title):
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="action_title",
+                    message="Action title contains meta framing instead of a claim.",
+                    slide_index=outline.slide_index,
+                )
+            )
         if len(title.split()) > 16:
             issues.append(
                 QAIssue(
@@ -325,7 +398,7 @@ class ConsultingQA:
                     slide_index=outline.slide_index,
                 )
             )
-        if " and " in title.lower():
+        if self._has_multiple_title_messages(title):
             issues.append(
                 QAIssue(
                     severity="WARNING",
@@ -353,6 +426,33 @@ class ConsultingQA:
                 )
             )
         return issues
+
+    def _has_meta_title_frame(self, title: str) -> bool:
+        normalized = " ".join(str(title).lower().split())
+        patterns = [
+            r"^make\s+the\s+case\s+for\b",
+            r"^use\s+the\s+(case|need|argument|notion|idea)\b",
+            r"^use\s+the\s+.{2,40}\bview\b",
+            r"^(make|turn|clarify|review)\b.+\bexplicit operating decision\b",
+            r"^(translate|convert)\b.+\bdistinct operating decision\b",
+            r"^(translate|convert)\s+(executive summary|business case|evidence)\b",
+            r"^turn\s+closing remarks\b",
+        ]
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    def _has_multiple_title_messages(self, title: str) -> bool:
+        normalized = " ".join(str(title).lower().split())
+        if " and " not in normalized:
+            return False
+        # Lists such as "contracts, data, execution, and review" are one
+        # integrated operating system, not two competing slide messages.
+        if ", and " in normalized:
+            return False
+        if normalized.startswith(("connect ", "link ", "compare ", "contrast ")):
+            return False
+        if re.search(r"\bbetween\b.+\band\b", normalized):
+            return False
+        return True
 
     def _has_dangling_connector(self, title: str) -> bool:
         normalized = " ".join(str(title).split())
@@ -407,6 +507,16 @@ class ConsultingQA:
                 )
             )
         for bullet in bullets:
+            if BAD_COPY_RE.search(bullet):
+                issues.append(
+                    QAIssue(
+                        severity="WARNING",
+                        category="content_quality",
+                        message="Slide body contains generated artifact text or raw table syntax.",
+                        slide_index=outline.slide_index,
+                    )
+                )
+                break
             if self._normalize_text(bullet) in GENERIC_FILLER_PATTERNS:
                 issues.append(
                     QAIssue(
@@ -417,8 +527,58 @@ class ConsultingQA:
                     )
                 )
                 break
+        if self._is_sparse_outline_content(outline, bullets, body_text):
+            issues.append(
+                QAIssue(
+                    severity="WARNING",
+                    category="sparse_content",
+                    message="Slide has too little source-backed body content for its layout.",
+                    slide_index=outline.slide_index,
+                )
+            )
         issues.extend(self._outline_exhibit_match_issues(outline, title, body_text))
         return issues
+
+    def _is_sparse_outline_content(
+        self,
+        outline: SlideOutline,
+        bullets: list[str],
+        body_text: str,
+    ) -> bool:
+        if self._outline_is_cover(outline):
+            return False
+        layout = str(outline.layout_json.get("layout") or "").lower()
+        archetype = str(
+            outline.content_json.get("archetype")
+            or outline.layout_json.get("archetype")
+            or ""
+        ).lower()
+        sparse_sensitive = {
+            "callouts",
+            "checklist",
+            "comparison_table",
+            "icon_rows",
+            "matrix_2x2",
+            "quote_sidebar",
+            "table_reference",
+            "two_column",
+        }
+        if layout not in sparse_sensitive and archetype not in sparse_sensitive:
+            return False
+        display_items = [
+            *bullets,
+            *self._outline_exhibit_items(outline.content_json.get("exhibit_spec")),
+        ]
+        meaningful_items = [
+            item
+            for item in display_items
+            if len(self._meaningful_tokens(str(item))) >= 4
+            and self._normalize_text(str(item)) not in GENERIC_FILLER_PATTERNS
+            and not BAD_COPY_RE.search(str(item))
+        ]
+        if len(meaningful_items) >= 2:
+            return False
+        return True
 
     def _outline_exhibit_match_issues(
         self,
@@ -478,6 +638,43 @@ class ConsultingQA:
         if exhibit:
             parts.append(self._flatten_for_similarity(exhibit))
         return " ".join(parts)
+
+    def _outline_exhibit_items(self, exhibit) -> list[str]:
+        if not isinstance(exhibit, dict):
+            return []
+        items: list[str] = []
+        for key in (
+            "points",
+            "supporting_points",
+            "next_steps",
+            "items",
+            "steps",
+            "rows",
+            "lines",
+            "rules",
+            "cards",
+            "callouts",
+            "patterns",
+            "quadrants",
+        ):
+            value = exhibit.get(key)
+            if isinstance(value, list):
+                items.extend(self._coerce_exhibit_item(item) for item in value)
+        return [item for item in items if item.strip()]
+
+    def _coerce_exhibit_item(self, item) -> str:
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, list):
+            return " | ".join(self._coerce_exhibit_item(value) for value in item)
+        if isinstance(item, dict):
+            values = [
+                str(value).strip()
+                for key, value in item.items()
+                if key not in {"id", "icon"} and str(value).strip()
+            ]
+            return " ".join(values)
+        return str(item).strip()
 
     def _has_semantic_support(
         self,
@@ -552,6 +749,44 @@ class ConsultingQA:
                 "reset",
                 "reliability",
                 "repeatable",
+            },
+            {
+                "benchmark",
+                "benchmarks",
+                "evaluation",
+                "evaluate",
+                "evaluates",
+                "evaluating",
+                "harness",
+                "harnesses",
+                "contract",
+                "contracts",
+                "ground",
+                "truth",
+                "validated",
+                "synthetic",
+                "model",
+                "models",
+                "agent",
+                "agents",
+                "source",
+                "sources",
+                "evidence",
+                "operational",
+                "performance",
+            },
+            {
+                "enterprise",
+                "catalog",
+                "catalogs",
+                "data",
+                "schema",
+                "metadata",
+                "deployment",
+                "production",
+                "integration",
+                "discovery",
+                "automated",
             },
         ]
         return any(title_tokens & family and body_tokens & family for family in families)

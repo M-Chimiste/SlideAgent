@@ -3,6 +3,7 @@ from typing import Iterable
 
 from app.config import Settings
 from app.models.document import DocumentBundle
+from app.models.outline import SlideOutline
 
 
 class LocalStorage:
@@ -58,6 +59,30 @@ class LocalStorage:
         target.write_text(outline_json, encoding="utf-8")
         return target
 
+    def save_outline_snapshot(
+        self,
+        job_id: str,
+        label: str,
+        outlines: list[SlideOutline],
+    ) -> Path:
+        self.ensure_job_dirs(job_id)
+        import json
+
+        safe_label = "".join(
+            char if char.isalnum() or char in {"-", "_"} else "-"
+            for char in label.strip().lower()
+        ).strip("-") or "snapshot"
+        target = self.job_dir(job_id) / "outline" / f"{safe_label}.json"
+        target.write_text(
+            json.dumps(
+                [outline.model_dump() for outline in outlines],
+                indent=2,
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        return target
+
     def save_planning_artifacts(
         self,
         job_id: str,
@@ -68,7 +93,13 @@ class LocalStorage:
         import json
 
         for name, payload in artifacts.items():
-            if name not in {"source-compression", "story-map", "spec-gate"}:
+            if name not in {
+                "source-compression",
+                "story-map",
+                "spec-gate",
+                "editing-contract",
+                "narrative-pass",
+            }:
                 continue
             target = planning_dir / f"{name}.json"
             target.write_text(

@@ -9,7 +9,11 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Anchor the .env to the repo root (next to data/) so it loads no matter the
+    # process cwd — the backend is usually launched from backend/, where a plain
+    # relative ".env" would silently miss the root file. In Docker the file is
+    # absent and pydantic falls back to real environment variables.
+    model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), extra="ignore")
 
     app_name: str = "SlideForge"
     environment: str = "dev"
@@ -68,6 +72,7 @@ class Settings(BaseSettings):
     vision_timeout_seconds: int = Field(
         default=60, alias="VISION_TIMEOUT_SECONDS"
     )
+    vision_max_slides: int = Field(default=4, alias="VISION_MAX_SLIDES")
     vision_reasoning_effort: str | None = Field(
         default="none", alias="VISION_REASONING_EFFORT"
     )
@@ -82,6 +87,23 @@ class Settings(BaseSettings):
 
     qa_max_rounds: int = Field(default=2, alias="QA_MAX_ROUNDS")
     job_worker_concurrency: int = Field(default=1, alias="JOB_WORKER_CONCURRENCY")
+    # Default to the polished HTML/design-system renderer. It degrades to the
+    # authored python-pptx renderer automatically when headless Chrome/poppler
+    # are unavailable (e.g. a minimal container), so this is safe everywhere.
+    renderer_engine: str = Field(default="html", alias="RENDERER_ENGINE")
+
+    # Decompose deck planning into smaller LLM calls (batched for the fast
+    # profile, per-slide for the deep profile) instead of one monolithic
+    # deck-JSON call. Kill-switch back to the single call when False.
+    planner_decompose: bool = Field(default=True, alias="PLANNER_DECOMPOSE")
+
+    # Brand mode: when True, instantiate new slides from the uploaded template's
+    # *layout library* (unbounded variety, real master/theme reuse) instead of
+    # duplicating its authored slides. Default off until validated on real
+    # templates; falls back to the clone path when instantiation yields nothing.
+    brand_layout_instantiation: bool = Field(
+        default=False, alias="BRAND_LAYOUT_INSTANTIATION"
+    )
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
