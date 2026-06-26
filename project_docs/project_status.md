@@ -528,10 +528,10 @@ Verification (this session):
   `render_slide_html` (HTML-string generation, no Chrome) confirmed the new
   family primitives render and the history-aware selector breaks card monotony
   (six same-family slides → multiple distinct primitives).
-- NOT run this session (no local LLM / headless Chrome available here): the full
-  HTML engine render (Chrome→PDF→images), `app.tools.all_mode_smoke --vision`,
-  `app.tools.html_render_preview`, and `scripts/e2e-ui.sh`. Run these in an
-  environment with the local model + Chrome before merge.
+- The full live-model end-to-end run (HTML→Chrome→images render + vision QA,
+  `app.tools.all_mode_smoke --vision`) was subsequently completed on both docx
+  files against `qwen3.6-35b-a3b-mtp` — see "Live qwen e2e + content-fit polish
+  (2026-06-26)" below.
 
 Brand layout-library instantiation (Phase 2, behind a default-off flag): brand
 mode can now build a deck by instantiating **new** slides from the uploaded
@@ -551,6 +551,45 @@ multi-agent review of the implementation found no confirmed defects.
 Still future work: per-slide mixing of clone + instantiation within one deck,
 image-placeholder fill for picture layouts, and removing the now-superseded dead
 `_layout_with_variety` cycle in `planning/grounding.py`.
+
+### Live qwen e2e + content-fit polish (2026-06-26)
+
+Ran the full pipeline end-to-end on the real local model (`qwen3.6-35b-a3b-mtp`)
+for **both** source docx files (`Beyond Vibe Coding`, `Bootstrapping Benchmarks`)
+through the default HTML engine (Chrome→PDF→images). Servers exercised:
+`athena.local:1240` (freeform confirmation on both docs — it loads the model on
+demand, so the first call is slow but completes cleanly) and `metis.local:1240`
+(comprehensive: freeform + brand, `--vision`).
+
+The pipeline works end-to-end with **no planner fallback and zero build warnings**
+on every run, and variety is strong and consistent:
+- 10–12 distinct layouts per 12-slide deck, layout-diversity 0.75–1.0, no layout
+  repeated more than once in a row, every slide carries a visual, and the
+  image-based HTML deck is correctly detected. The athena no-vision freeform runs
+  were fully clean (0 QA issues).
+- New variety knobs confirmed on the live model: `investor_pitch`
+  (→ `bold_minimal`) vs `academic_lecture` (→ `editorial_serif`) produced distinct
+  design languages **and** distinct title framings; `BRAND_LAYOUT_INSTANTIATION`
+  against an 11-layout template instantiated a deck across 4 distinct
+  role-appropriate layouts with real qwen content.
+
+Content-fit polish — the qwen vision pass surfaced real fit defects on dense
+slides (verified by viewing the rendered images, then fixed):
+- `_lead_body` no longer splits on idiomatic verbs ("in turn") or inside an
+  unbalanced bracket/quote, so derived leads are never dangling fragments
+  ("Three files, in"; "Tests pass (or there").
+- New `_fit` helper trims every card/row/list body to a complete first sentence
+  (or a clean word boundary) instead of a mid-sentence CSS ellipsis.
+- `.body-area { overflow: hidden }` + tighter row metrics + `MAX_ROWS 5→4` /
+  `MAX_STEPS 10→8` stop dense lists overflowing the slide / colliding with the footer.
+- Covered by new `test_html_renderer.py` cases; full suite **422 passed**, ruff clean.
+
+These removed the rendering-defect classes (overflow/footer-collision, fragment
+leads, bracket-splits, mid-sentence truncation). The CRITICAL findings that remain
+are almost entirely **planner content-quality**, not rendering: title↔exhibit
+count mismatches ("claims 'five harness layers' but shows one"), occasional
+grammatically-incomplete bullets, and misleading chart data/labels — the
+pre-existing "storytelling depth" planner frontier, not the variety/rendering work.
 
 ### Output polish pass (2026-06-18)
 
