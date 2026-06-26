@@ -21,19 +21,9 @@ class ExhibitLayoutRenderingMixin:
     def _add_matrix_2x2(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         exhibit = self._exhibit(outline)
         quadrants = exhibit.get("quadrants") if exhibit.get("type") == "matrix_2x2" else []
-        if not isinstance(quadrants, list) or len(quadrants) < 4:
-            bullets = self._bullets(outline)[:4]
-            quadrants = [
-                {"label": label, "description": bullets[idx] if idx < len(bullets) else label}
-                for idx, label in enumerate(
-                    [
-                        "High impact / high readiness",
-                        "High impact / low readiness",
-                        "Low impact / high readiness",
-                        "Low impact / low readiness",
-                    ]
-                )
-            ]
+        if not self._usable_matrix_quadrants(quadrants):
+            self._add_authored_proof_strip(slide, outline, brand)
+            return
         x0, y0, w, h = 0.92, 1.58, 10.95, 4.55
         x_mid, y_mid = x0 + w / 2, y0 + h / 2
         fills = [
@@ -115,15 +105,20 @@ class ExhibitLayoutRenderingMixin:
         ][:4] or self._bullets(outline)[:4]
         if not bullets:
             bullets = ["Shift the operating model from ad hoc execution to managed discipline."]
-        quote = self._first_content_text(
+        header_texts = [
+            self._authored_title(outline),
+            str(outline.content_json.get("subheading") or ""),
+        ]
+        quote = self._first_distinct_sidebar_text(
             [
                 exhibit.get("quote"),
                 exhibit.get("key_idea"),
                 outline.content_json.get("summary"),
-                outline.content_json.get("subheading"),
                 bullets[0],
+                self._authored_canvas_support(outline),
             ],
-            fallback=bullets[0],
+            header_texts,
+            fallback=self._authored_canvas_support(outline),
         )
         panel = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(8.4), Inches(1.48), Inches(3.75), Inches(4.85))
         panel.fill.solid()
@@ -141,7 +136,11 @@ class ExhibitLayoutRenderingMixin:
             size=16,
             bold=True,
         )
-        support = bullets[1] if len(bullets) > 1 else bullets[0]
+        support = self._first_distinct_sidebar_text(
+            [self._authored_canvas_support(outline), *bullets[1:], *bullets[:1]],
+            [*header_texts, str(quote)],
+            fallback=self._topic_support_sentence(outline),
+        )
         self._add_dark_text(
             slide,
             self._truncate_at_word(support, 105),
@@ -154,7 +153,20 @@ class ExhibitLayoutRenderingMixin:
             color=self._tint(brand.colors.primary, 0.72),
         )
         icons = self._icons(outline)
-        for idx, text in enumerate(bullets[:4]):
+        sidebar_items = [
+            text
+            for text in bullets
+            if not self._authored_text_overlaps(str(text), str(quote))
+            and not self._authored_text_overlaps(str(text), str(support))
+        ][:4]
+        if not sidebar_items:
+            sidebar_items = [
+                text
+                for text in self._authored_filler_items(outline)
+                if not self._authored_text_overlaps(str(text), str(quote))
+                and not self._authored_text_overlaps(str(text), str(support))
+            ][:3]
+        for idx, text in enumerate(sidebar_items):
             y = 1.55 + idx * 1.08
             self._add_icon(slide, icons[idx], 0.95, y, 0.7, brand, self._icon_fill(brand, idx))
             connector = slide.shapes.add_connector(
@@ -177,6 +189,21 @@ class ExhibitLayoutRenderingMixin:
                 size=13,
             )
 
+    def _first_distinct_sidebar_text(
+        self,
+        candidates: list[Any],
+        existing: list[str],
+        fallback: str,
+    ) -> str:
+        for candidate in candidates:
+            text = self._clean_display_text(str(candidate or ""))
+            if not text:
+                continue
+            if any(self._authored_text_overlaps(text, value) for value in existing):
+                continue
+            return text
+        return fallback
+
     def _add_framework_cycle(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         if self._try_add_diagram_asset(
             slide, outline, brand, 0.78, 1.36, 11.75, 5.08
@@ -192,18 +219,9 @@ class ExhibitLayoutRenderingMixin:
             ][:6]
         else:
             bullets = self._bullets(outline)[:6]
-        if len(bullets) < 4:
-            bullets = (
-                bullets
-                + [
-                    "Load context",
-                    "Plan the work",
-                    "Execute changes",
-                    "Review evidence",
-                    "Update memory",
-                    "Reset cleanly",
-                ]
-            )[:6]
+        if len(bullets) < 4 or self._labels_are_generic_visual_fallbacks(bullets):
+            self._add_authored_proof_strip(slide, outline, brand)
+            return
         center_x, center_y = 6.65, 3.85
         center = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(center_x - 0.78), Inches(center_y - 0.78), Inches(1.56), Inches(1.56))
         center.fill.solid()
@@ -256,11 +274,21 @@ class ExhibitLayoutRenderingMixin:
             if str(item).strip()
         ][:3]
         bullets = self._bullets(outline)[:5]
-        while len(middle_nodes) < 3:
-            fallback = bullets[len(middle_nodes)] if len(middle_nodes) < len(bullets) else ""
-            middle_nodes.append(fallback or ["Product context", "System patterns", "Active decisions"][len(middle_nodes)])
         left_label = str(exhibit.get("left_node") or "Source context")
         right_label = str(exhibit.get("right_outcome") or "Reliable next session")
+        if (
+            len(middle_nodes) < 2
+            or self._labels_are_generic_visual_fallbacks(
+                [left_label, right_label, *middle_nodes, *bullets[:3]]
+            )
+        ):
+            self._add_authored_proof_strip(slide, outline, brand)
+            return
+        if len(middle_nodes) < 3:
+            middle_nodes.extend(bullets[: 3 - len(middle_nodes)])
+        if len(middle_nodes) < 3:
+            self._add_authored_proof_strip(slide, outline, brand)
+            return
         connector_labels = [
             str(item)
             for item in exhibit.get("connector_labels", [])
@@ -323,6 +351,51 @@ class ExhibitLayoutRenderingMixin:
         for _idx, (_x, y) in enumerate(mid_positions):
             self._add_arrow(slide, 7.08, y + 0.46, 8.18, 3.44, brand.colors.accent, width=2.0)
 
+    def _usable_matrix_quadrants(self, quadrants) -> bool:
+        if not isinstance(quadrants, list) or len(quadrants) < 4:
+            return False
+        labels = [
+            str(item.get("label") if isinstance(item, dict) else item).strip()
+            for item in quadrants[:4]
+        ]
+        if len([label for label in labels if label]) < 4:
+            return False
+        return not self._labels_are_generic_matrix(labels)
+
+    def _labels_are_generic_matrix(self, labels: list[str]) -> bool:
+        generic = {
+            "high impact / high readiness",
+            "high impact / low readiness",
+            "low impact / high readiness",
+            "low impact / low readiness",
+        }
+        normalized = {" ".join(label.casefold().split()) for label in labels if label.strip()}
+        return len(normalized.intersection(generic)) >= 2
+
+    def _labels_are_generic_visual_fallbacks(self, labels: list[str]) -> bool:
+        generic = {
+            "frame",
+            "ground",
+            "build",
+            "prime",
+            "generate",
+            "review",
+            "update",
+            "reset",
+            "persist",
+            "source context",
+            "rules",
+            "memory",
+            "reliable output",
+            "operating loop",
+            "reliable next session",
+            "product context",
+            "system patterns",
+            "active decisions",
+        }
+        normalized = {" ".join(str(label).casefold().split()) for label in labels if str(label).strip()}
+        return len(normalized.intersection(generic)) >= 3
+
     def _add_checklist(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         exhibit = self._exhibit(outline)
         items = exhibit.get("items") if exhibit.get("type") == "checklist" else None
@@ -369,10 +442,12 @@ class ExhibitLayoutRenderingMixin:
                 detail = owners[idx]
             if idx < len(timings) and timings[idx]:
                 detail = f"{detail} / {timings[idx]}".strip(" /")
-            body = text if not detail else f"{text.rstrip('.')} ({detail})"
+            if self._is_placeholder_owner_timing(detail):
+                detail = ""
+            body = self._checklist_body_text(text, detail)
             self._add_body_text(
                 slide,
-                self._truncate_at_word(body, 118),
+                body,
                 1.58,
                 y - 0.03,
                 6.2,
@@ -386,13 +461,25 @@ class ExhibitLayoutRenderingMixin:
         panel.line.color.rgb = self._rgb(brand.colors.primary)
         kicker, headline, support = self._emphasis_panel_text(
             outline,
-            bullets,
-            default_headline="Turn the checklist into operating cadence, not a one-time cleanup.",
-            default_support="Review the evidence and update the shared record before scaling.",
+            [],
+            default_headline="Use the checklist as an operating cadence, not a one-time readout.",
+            default_support="Assign ownership, timing, and evidence checks before scaling.",
         )
         self._add_dark_text(slide, kicker, 8.82, 2.0, 2.9, 0.28, brand, size=10, color=brand.colors.accent)
         self._add_dark_text(slide, headline, 8.82, 2.52, 2.8, 1.5, brand, size=16, bold=True)
         self._add_dark_text(slide, support, 8.84, 4.55, 2.8, 0.9, brand, size=9, color=self._tint(brand.colors.primary, 0.72))
+
+    def _is_placeholder_owner_timing(self, detail: str) -> bool:
+        normalized = " ".join(str(detail).casefold().split())
+        return normalized in {"owner", "next", "owner / next", "owner/next"}
+
+    def _checklist_body_text(self, text: str, detail: str) -> str:
+        if not detail:
+            return self._truncate_at_word(text, 118)
+        suffix = f" ({detail})"
+        action_limit = max(48, 118 - len(suffix))
+        action = self._truncate_at_word(text.rstrip("."), action_limit).rstrip(".")
+        return f"{action}{suffix}"
 
     def _add_code_panel(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
         exhibit = self._exhibit(outline)
@@ -617,9 +704,11 @@ class ExhibitLayoutRenderingMixin:
                 {"name": "Blind accept", "symptom": "Accepting code blindly", "better_behavior": "Run QA gates"},
             ]
         patterns = [pattern for pattern in patterns if isinstance(pattern, dict)]
+        patterns = self._safe_anti_pattern_patterns(patterns)
         if not patterns:
-            self._add_grid(slide, outline, brand)
+            self._add_grid(slide, self._anti_pattern_fallback_outline(outline), brand)
             return
+        self._pad_safe_anti_patterns(patterns)
         icons = self._icons(outline)
         count = min(len(patterns), 4)
         card_w = 11.4 / count - 0.24
@@ -648,10 +737,108 @@ class ExhibitLayoutRenderingMixin:
             body = "\n".join(body_parts)
             self._add_body_text(slide, body, x + 0.32, 2.88, card_w - 0.58, 1.72, brand, size=10)
 
+    def _safe_anti_pattern_patterns(self, patterns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        safe: list[dict[str, Any]] = []
+        for pattern in patterns:
+            name = self._clean_display_text(str(pattern.get("name") or ""))
+            symptom = self._clean_display_text(str(pattern.get("symptom") or ""))
+            behavior = self._clean_display_text(str(pattern.get("better_behavior") or ""))
+            if self._anti_pattern_text_is_broken(name, max_words=7):
+                continue
+            if symptom and self._anti_pattern_text_is_broken(symptom, max_words=9):
+                continue
+            if behavior and self._anti_pattern_text_is_broken(behavior, max_words=9):
+                continue
+            if not symptom and not behavior:
+                continue
+            safe.append(
+                {
+                    **pattern,
+                    "name": name,
+                    "symptom": symptom,
+                    "better_behavior": behavior,
+                }
+            )
+        return safe
+
+    def _pad_safe_anti_patterns(self, patterns: list[dict[str, Any]]) -> None:
+        defaults = [
+            {"name": "Chat drift", "symptom": "Relying on chat history", "better_behavior": "Persist context"},
+            {"name": "Thin sourcing", "symptom": "Skipping source checks", "better_behavior": "Cite evidence"},
+            {"name": "Blind accept", "symptom": "Accepting code blindly", "better_behavior": "Run QA gates"},
+        ]
+        seen = {str(pattern.get("name") or "").casefold() for pattern in patterns}
+        for default in defaults:
+            if len(patterns) >= 3:
+                return
+            key = str(default["name"]).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            patterns.append(default)
+
+    def _anti_pattern_text_is_broken(self, text: str, max_words: int) -> bool:
+        cleaned = " ".join(str(text).split()).strip()
+        if not cleaned:
+            return True
+        if self._is_incomplete_display_fragment(cleaned):
+            return True
+        lowered = cleaned.casefold()
+        if "..." in cleaned or "…" in cleaned:
+            return True
+        if cleaned.count("(") != cleaned.count(")"):
+            return True
+        if re.match(r"^(?:and|or|but|to|of|with|while|instead)\b", lowered):
+            return True
+        if re.search(
+            r"\b(?:a|an|already|and|as|been|being|by|for|from|in|into|of|or|rather|single|the|their|through|to|with|without)\.?$",
+            cleaned,
+            re.IGNORECASE,
+        ):
+            return True
+        if len(cleaned.split()) > max_words and not re.search(r"[.!?)]$", cleaned):
+            return True
+        source_prose_starts = (
+            "benchmarks have been",
+            "historically,",
+            "with the proliferation",
+            "while this approach",
+            "if we have capable",
+        )
+        return lowered.startswith(source_prose_starts)
+
+    def _anti_pattern_fallback_outline(self, outline: SlideOutline) -> SlideOutline:
+        content = dict(outline.content_json)
+        filler_items = self._authored_filler_items(outline)[:4]
+        content.update(
+            {
+                "bullets": filler_items,
+                "exhibit_spec": {"type": "callouts", "points": filler_items},
+                "visual_degradation": {
+                    "from": "anti_patterns",
+                    "to": "callouts",
+                    "reason": "Anti-pattern cards require complete named failure modes.",
+                },
+            }
+        )
+        return outline.model_copy(update={"content_json": content})
+
     def _add_grid(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
-        bullets = self._bullets(outline)[:4]
+        if (
+            outline.content_json.get("visual_qa_source_repair")
+            and outline.layout_json.get("composition_family") == "source_repair_cards"
+        ):
+            self._add_source_repair_cards(slide, outline, brand)
+            return
+        bullets = self._grid_items(outline)[:4]
         if not bullets:
-            bullets = ["Clarify the implication and required management action."]
+            fallback = (
+                outline.content_json.get("subheading")
+                or outline.content_json.get("summary")
+                or outline.content_json.get("speaker_notes")
+                or outline.label
+            )
+            bullets = [str(fallback)]
         icons = self._icons(outline)
         if len(bullets) == 1:
             self._add_card(slide, 1.1, 2.0, 11.2, 2.5, brand.colors.background_light, brand.colors.secondary)
@@ -703,8 +890,41 @@ class ExhibitLayoutRenderingMixin:
             self._add_icon(slide, icons[idx], x + 0.28, y + 0.25, 0.86, brand, self._icon_fill(brand, idx))
             self._add_body_text(slide, text, x + 1.34, y + 0.36, 3.52, 1.0, brand, size=13)
 
+    def _grid_items(self, outline: SlideOutline) -> list[str]:
+        exhibit = self._exhibit(outline)
+        items: list[str] = []
+        structured_items = exhibit.get("items")
+        if isinstance(structured_items, list):
+            items.extend(self._coerce_item_text(item) for item in structured_items)
+        items.extend(self._bullets(outline))
+        for key in ("points", "supporting_points", "next_steps", "lines", "rules"):
+            value = exhibit.get(key)
+            if isinstance(value, list):
+                items.extend(self._coerce_item_text(item) for item in value)
+        rows = exhibit.get("rows")
+        if isinstance(rows, list):
+            items.extend(self._coerce_item_text(row) for row in rows)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            cleaned = self._complete_display_item(str(item))
+            if not cleaned or self._is_placeholder_bullet(cleaned):
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cleaned)
+        return deduped
+
     def _add_icon_rows(self, slide, outline: SlideOutline, brand: BrandDNA) -> None:
-        bullets = self._bullets(outline)[:4]
+        if (
+            outline.content_json.get("visual_qa_source_repair")
+            and outline.layout_json.get("composition_family") == "source_repair_cards"
+        ):
+            self._add_source_repair_cards(slide, outline, brand)
+            return
+        bullets = self._grid_items(outline)[:4]
         if len(bullets) < 2:
             # A single point reads as a near-empty slide in a multi-row layout;
             # render it as one deliberate statement panel instead.
@@ -724,3 +944,272 @@ class ExhibitLayoutRenderingMixin:
                 self._icon_fill(brand, idx),
             )
             self._add_body_text(slide, text, 2.24, y + 0.25, 9.55, 0.48, brand, size=14)
+
+    def _add_source_repair_cards(
+        self,
+        slide,
+        outline: SlideOutline,
+        brand: BrandDNA,
+    ) -> None:
+        points = self._source_repair_points(outline)
+        variant = outline.slide_index % 4
+        if variant == 0:
+            self._add_source_repair_split(slide, points, brand)
+        elif variant == 1:
+            self._add_source_repair_stage_row(slide, points, brand)
+        elif variant == 2:
+            self._add_source_repair_editorial_cards(slide, points, brand)
+        else:
+            self._add_source_repair_proof_strip(slide, points, brand)
+
+    def _source_repair_points(self, outline: SlideOutline) -> list[str]:
+        points = self._grid_items(outline)[:4]
+        if not points:
+            fallback = (
+                outline.content_json.get("subheading")
+                or outline.content_json.get("summary")
+                or outline.label
+            )
+            points = [str(fallback)]
+        cleaned: list[str] = []
+        for point in points:
+            text = self._truncate_phrase(point, 132)
+            if text and not text.endswith((".", "?", "!")):
+                text = f"{text}."
+            if text:
+                cleaned.append(text)
+        return cleaned or ["Source evidence should be reviewed before scaling the decision."]
+
+    def _add_source_repair_split(
+        self,
+        slide,
+        points: list[str],
+        brand: BrandDNA,
+    ) -> None:
+        panel = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(0.88),
+            Inches(1.56),
+            Inches(3.28),
+            Inches(4.72),
+        )
+        panel.fill.solid()
+        panel.fill.fore_color.rgb = self._rgb(brand.colors.primary)
+        panel.line.color.rgb = self._rgb(brand.colors.primary)
+        self._add_dark_text(
+            slide,
+            "SOURCE-BACKED SHIFT",
+            1.16,
+            1.94,
+            2.3,
+            0.22,
+            brand,
+            size=8,
+            bold=True,
+            color=brand.colors.accent,
+        )
+        self._add_dark_text(
+            slide,
+            f"{len(points[:3])} signals",
+            1.16,
+            2.42,
+            2.1,
+            0.46,
+            brand,
+            size=22,
+            bold=True,
+            color=brand.colors.text_light,
+        )
+        self._add_dark_text(
+            slide,
+            self._truncate_phrase(points[0], 118),
+            1.18,
+            3.26,
+            2.42,
+            1.24,
+            brand,
+            size=12,
+            color=self._tint(brand.colors.primary, 0.78),
+        )
+        self._add_dark_text(
+            slide,
+            "Use the source evidence as the review gate, not as decorative slide filler.",
+            1.18,
+            5.3,
+            2.34,
+            0.48,
+            brand,
+            size=8,
+            color=self._tint(brand.colors.primary, 0.64),
+        )
+        for idx, point in enumerate(points[:3]):
+            y = 1.72 + idx * 1.42
+            accent = self._icon_fill(brand, idx)
+            self._add_card(slide, 4.72, y, 7.5, 1.02, "FFFFFF", brand.colors.background_light)
+            self._add_badge(slide, f"{idx + 1:02d}", 5.0, y + 0.26, 0.46, brand, accent)
+            self._add_body_text(
+                slide,
+                point,
+                5.72,
+                y + 0.22,
+                5.94,
+                0.44,
+                brand,
+                size=12,
+            )
+
+    def _add_source_repair_stage_row(
+        self,
+        slide,
+        points: list[str],
+        brand: BrandDNA,
+    ) -> None:
+        count = min(3, len(points))
+        start_x = 1.0
+        card_w = 3.55
+        gap = 0.55
+        y = 2.02
+        for idx, point in enumerate(points[:count]):
+            x = start_x + idx * (card_w + gap)
+            accent = self._icon_fill(brand, idx)
+            card_y = y + (0.28 if idx == 1 else 0)
+            self._add_card(slide, x, card_y, card_w, 3.38, "FFFFFF", brand.colors.background_light)
+            strip = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(x),
+                Inches(card_y),
+                Inches(card_w),
+                Inches(0.14),
+            )
+            strip.fill.solid()
+            strip.fill.fore_color.rgb = self._rgb(accent)
+            strip.line.color.rgb = strip.fill.fore_color.rgb
+            self._add_dark_text(
+                slide,
+                f"STAGE {idx + 1}",
+                x + 0.34,
+                card_y + 0.46,
+                1.4,
+                0.2,
+                brand,
+                size=8,
+                bold=True,
+                color=accent,
+            )
+            self._add_body_text(
+                slide,
+                point,
+                x + 0.34,
+                card_y + 1.08,
+                card_w - 0.68,
+                1.34,
+                brand,
+                size=13,
+            )
+            if idx < count - 1:
+                arrow_y = card_y + 1.72
+                self._add_arrow(
+                    slide,
+                    x + card_w + 0.12,
+                    arrow_y,
+                    x + card_w + gap - 0.14,
+                    arrow_y,
+                    brand.colors.accent,
+                    width=1.5,
+                )
+                self._add_arrowhead(
+                    slide,
+                    x + card_w + gap - 0.14,
+                    arrow_y,
+                    0.2,
+                    0,
+                    brand.colors.accent,
+                )
+
+    def _add_source_repair_editorial_cards(
+        self,
+        slide,
+        points: list[str],
+        brand: BrandDNA,
+    ) -> None:
+        hero = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(0.92),
+            Inches(1.6),
+            Inches(11.35),
+            Inches(1.36),
+        )
+        hero.fill.solid()
+        hero.fill.fore_color.rgb = self._rgb(self._tint(brand.colors.primary, 0.92))
+        hero.line.color.rgb = self._rgb(self._tint(brand.colors.primary, 0.78))
+        self._add_body_text(
+            slide,
+            self._truncate_phrase(points[0], 142),
+            1.28,
+            2.02,
+            10.36,
+            0.42,
+            brand,
+            center=True,
+            size=15,
+        )
+        support = points[1:4] or points[:1]
+        for idx, point in enumerate(support):
+            x = 1.02 + idx * 3.86
+            accent = self._icon_fill(brand, idx)
+            self._add_card(slide, x, 3.48, 3.36, 2.24, "FFFFFF", brand.colors.background_light)
+            self._add_badge(slide, str(idx + 1), x + 0.3, 3.82, 0.42, brand, accent)
+            self._add_body_text(
+                slide,
+                point,
+                x + 0.9,
+                3.8,
+                2.0,
+                0.92,
+                brand,
+                size=11,
+            )
+
+    def _add_source_repair_proof_strip(
+        self,
+        slide,
+        points: list[str],
+        brand: BrandDNA,
+    ) -> None:
+        for idx, point in enumerate(points[:4]):
+            y = 1.5 + idx * 1.12
+            accent = self._icon_fill(brand, idx)
+            fill = "FFFFFF" if idx % 2 == 0 else "F4F6F8"
+            self._add_card(slide, 0.92, y, 11.52, 0.86, fill, brand.colors.background_light)
+            marker = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(0.92),
+                Inches(y),
+                Inches(0.1),
+                Inches(0.86),
+            )
+            marker.fill.solid()
+            marker.fill.fore_color.rgb = self._rgb(accent)
+            marker.line.color.rgb = marker.fill.fore_color.rgb
+            self._add_dark_text(
+                slide,
+                f"{idx + 1:02d}",
+                1.26,
+                y + 0.28,
+                0.42,
+                0.2,
+                brand,
+                size=8,
+                bold=True,
+                color=accent,
+            )
+            self._add_body_text(
+                slide,
+                point,
+                1.92,
+                y + 0.18,
+                9.34,
+                0.34,
+                brand,
+                size=12,
+            )

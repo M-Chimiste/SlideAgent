@@ -83,6 +83,12 @@ class OutlinePlanningMixin:
     def _section_label_for(self, role: str | None, archetype: str) -> str:
         """Section label for a slide's kicker, derived from its narrative role
         (preferred) or archetype. Numbering is assigned sequentially by the caller."""
+        from app.services.presentation_styles import get_style
+
+        role_key = str(role or "").lower()
+        style_labels = get_style(getattr(self, "_presentation_style", "consulting")).section_labels
+        if role_key in style_labels:
+            return style_labels[role_key].upper()
         role_labels = {
             "executive_summary": "EXECUTIVE SUMMARY",
             "problem": "DIAGNOSIS",
@@ -325,6 +331,26 @@ class OutlinePlanningMixin:
 
     def _themed_action_title(self, subject: str, theme_text: str) -> str:
         frames = [
+            (("executive summary", "saturation", "labeling cost"),
+             "Current benchmarks need harnesses that discover operational truth"),
+            (("introduction", "static benchmark", "frontier model", "leaderboard"),
+             "Static benchmarks need operational validity beyond leaderboards"),
+            (("future directions", "data catalog", "confidence calibration"),
+             "Data catalogs shape benchmark governance through confidence calibration"),
+            (("conclusion", "closing remarks", "deployment", "real use cases"),
+             "Build evaluation systems around real use cases"),
+            (("harness-centric", "harness centric", "harness-centric view"),
+             "Harness-centric design turns existing workflows into evaluation evidence"),
+            (("synthetic benchmark", "synthetic data"),
+             "Use source-grounded harnesses instead of synthetic benchmark shortcuts"),
+            (("implicit ground truth", "validated truth", "ground truth discovery"),
+             "Implicit ground truth discovery makes benchmark creation scalable"),
+            (("model contract", "contract question", "contract must answer"),
+             "Model contracts make evaluation expectations explicit"),
+            (("harness interface", "benchmark harness"),
+             "Harness interfaces turn contracts into repeatable tests"),
+            (("benchmark", "evaluation", "ground truth"),
+             f"Make {subject} measurable through the harness"),
             (("risk", "failure", "anti", "pitfall", "trap", "rot"),
              f"Eliminate {subject} before it undermines reliability"),
             (("spec", "acceptance", "criteria", "requirement", "authentication", "feature"),
@@ -341,7 +367,7 @@ class OutlinePlanningMixin:
         for cues, framed in frames:
             if any(cue in theme_text for cue in cues):
                 return framed
-        return f"Turn {subject} into a managed operating decision"
+        return f"Ground the next decision in {self._clean_title_subject(subject)}"
 
     def _clean_section_title(self, title: str) -> str:
         cleaned = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", title).strip()
@@ -352,6 +378,54 @@ class OutlinePlanningMixin:
     def _keyword_action_title(self, title: str, content: str) -> str | None:
         combined = f"{title} {content}".lower()
         rules = [
+            (
+                "why not simply generate synthetic benchmarks",
+                "Synthetic benchmarks cannot substitute for validated operating evidence",
+            ),
+            (
+                "implicit ground truth discovery",
+                "Implicit ground truth discovery makes benchmark creation scalable",
+            ),
+            (
+                "questions the model contract must answer",
+                "Six contract questions keep every benchmark operational",
+            ),
+            (
+                "the model contract",
+                "Model contracts make evaluation expectations explicit",
+            ),
+            (
+                "the harness interface",
+                "Harness interfaces turn contracts into repeatable tests",
+            ),
+            (
+                "conclusion and future directions",
+                "Govern agent-assisted benchmark discovery before deployment",
+            ),
+            (
+                "harness-centric view",
+                "Harness-centric design turns existing workflows into evaluation evidence",
+            ),
+            (
+                "bootstrapping strategies",
+                "Bootstrapping strategies should map to reusable evidence patterns",
+            ),
+            (
+                "architecture overview",
+                "Five harness layers connect contracts, data, execution, and review",
+            ),
+            (
+                "future directions",
+                "Enterprise data catalogs make benchmark discovery scalable",
+            ),
+            (
+                "closing remarks",
+                "Make benchmark governance a managed operating capability",
+            ),
+            (
+                "executive summary",
+                "Current benchmarks need harnesses that discover operational truth",
+            ),
             (
                 "when and how to update",
                 "Update memory after meaningful changes",

@@ -5,7 +5,15 @@ from app.infra.sqlite_store import SQLiteStore
 from app.services.orchestrator import JobOrchestrator
 
 
-ACTIVE_JOB_STATUSES = {"queued", "running", "analyzing", "planning", "generating", "qa"}
+ACTIVE_JOB_STATUSES = {
+    "queued",
+    "running",
+    "analyzing",
+    "planning",
+    "generating",
+    "qa",
+    "repairing",
+}
 
 
 class JobQueue:

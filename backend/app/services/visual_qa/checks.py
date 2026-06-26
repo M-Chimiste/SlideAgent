@@ -324,6 +324,7 @@ class RuleAndPackageChecksMixin:
         else:
             issues.extend(self._content_type_checks(pptx_path, names))
         issues.extend(self._relationship_checks(pptx_path, names))
+        issues.extend(self._unfilled_placeholder_checks(pptx_path, names))
         try:
             prs = Presentation(pptx_path.as_posix())
         except Exception as exc:
@@ -430,6 +431,81 @@ class RuleAndPackageChecksMixin:
         except zipfile.BadZipFile:
             return issues
         return issues
+
+    def _unfilled_placeholder_checks(
+        self,
+        pptx_path: Path,
+        names: set[str],
+    ) -> list[QAIssue]:
+        issues: list[QAIssue] = []
+        slide_names = sorted(
+            name
+            for name in names
+            if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+        )
+        try:
+            with zipfile.ZipFile(pptx_path, "r") as pptx_zip:
+                for slide_name in slide_names:
+                    try:
+                        root = etree.fromstring(
+                            pptx_zip.read(slide_name),
+                            parser=SAFE_XML_PARSER,
+                        )
+                    except Exception as exc:
+                        issues.append(
+                            QAIssue(
+                                severity="CRITICAL",
+                                message=f"Slide XML could not be parsed for placeholder QA: {slide_name}: {exc}",
+                                category="office_compatibility",
+                            )
+                        )
+                        continue
+                    slide_index = self._slide_index_from_name(slide_name)
+                    for shape in root.xpath(
+                        ".//p:sp[p:nvSpPr/p:nvPr/p:ph]",
+                        namespaces={
+                            "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+                            "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+                        },
+                    ):
+                        texts = [
+                            node.text or ""
+                            for node in shape.xpath(
+                                ".//a:t",
+                                namespaces={
+                                    "a": "http://schemas.openxmlformats.org/drawingml/2006/main"
+                                },
+                            )
+                        ]
+                        if any(text.strip() for text in texts):
+                            continue
+                        ph = shape.find(
+                            "p:nvSpPr/p:nvPr/p:ph",
+                            namespaces={
+                                "p": "http://schemas.openxmlformats.org/presentationml/2006/main"
+                            },
+                        )
+                        placeholder_type = ph.get("type") if ph is not None else "body"
+                        issues.append(
+                            QAIssue(
+                                severity="CRITICAL",
+                                message=(
+                                    "Final PPTX contains an unfilled inherited "
+                                    f"placeholder ({placeholder_type}); fill or delete it."
+                                ),
+                                slide_index=slide_index,
+                                category="unfilled_placeholder",
+                            )
+                        )
+        except zipfile.BadZipFile:
+            return issues
+        return issues
+
+    def _slide_index_from_name(self, slide_name: str) -> int | None:
+        match = re.search(r"slide(\d+)\.xml$", slide_name)
+        if not match:
+            return None
+        return max(0, int(match.group(1)) - 1)
 
     def _resolve_relationship_target(self, rels_name: str, target: str) -> str:
         if target.startswith("/"):

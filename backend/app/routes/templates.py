@@ -1,4 +1,5 @@
 import uuid
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -82,10 +83,63 @@ async def get_template_assets(
             ]
         )
     logo_path = Path(template.brand.logo.path) if template.brand.logo else None
+    frame_map = _template_frame_map_summary(storage, template_id)
     return {
         "template_id": template_id,
         "thumbnails": thumbnails,
         "logo_available": bool(logo_path and logo_path.exists()),
+        "frame_map": frame_map,
+    }
+
+
+def _template_frame_map_summary(
+    storage: LocalStorage,
+    template_id: str,
+) -> dict[str, object] | None:
+    path = storage.template_dir(template_id) / "frame-map.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "error": "unreadable"}
+    slides = payload.get("slides") if isinstance(payload, dict) else []
+    if not isinstance(slides, list):
+        slides = []
+    return {
+        "available": True,
+        "artifact": payload.get("artifact", "template-frame-map")
+        if isinstance(payload, dict)
+        else "template-frame-map",
+        "standard": payload.get("standard") if isinstance(payload, dict) else None,
+        "slide_count": int(payload.get("slide_count") or len(slides))
+        if isinstance(payload, dict)
+        else len(slides),
+        "schema_bearing_slide_count": int(
+            payload.get("schema_bearing_slide_count") or 0
+        )
+        if isinstance(payload, dict)
+        else 0,
+        "slot_count": int(payload.get("slot_count") or 0)
+        if isinstance(payload, dict)
+        else 0,
+        "slides": [
+            {
+                "slide_index": slide.get("slide_index"),
+                "label": slide.get("label"),
+                "layout_name": slide.get("layout_name"),
+                "mode": slide.get("mode"),
+                "content_category": slide.get("content_category"),
+                "visual_guidance": slide.get("visual_guidance"),
+                "slot_count": slide.get("slot_count", 0),
+                "text_slot_count": slide.get("text_slot_count", 0),
+                "media_slot_count": slide.get("media_slot_count", 0),
+                "schema_field_count": slide.get("schema_field_count", 0),
+                "text_inventory": slide.get("text_inventory", ""),
+            }
+            for slide in slides[:12]
+            if isinstance(slide, dict)
+        ],
     }
 
 

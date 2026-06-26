@@ -34,7 +34,12 @@ class VisionQAMixin:
                 image_format = "jpeg"
             return self.openai_client.complete_vision(
                 system_prompt=QA_SYSTEM_PROMPT,
-                user_prompt="Inspect this slide for layout, overlap, text-wall, contrast, and spacing issues. Return JSON only.",
+                user_prompt=(
+                    "Inspect this slide for layout, overlap, text-wall, contrast, spacing, "
+                    "cut-off or incomplete visible text, nonsensical copy, raw markdown/table "
+                    "artifacts, and whether any diagram or exhibit actually explains the slide "
+                    "claim. Return JSON only."
+                ),
                 image_bytes=self._vision_image_bytes(image_path, image_format),
                 image_format=image_format,
                 max_tokens=2400,
@@ -46,7 +51,11 @@ class VisionQAMixin:
         return self.bedrock.converse_vision(
             model_id=self.model_id,
             system_prompt=QA_SYSTEM_PROMPT,
-            user_prompt="Inspect this slide for layout, overlap, or text-wall issues.",
+            user_prompt=(
+                "Inspect this slide for layout, overlap, text-wall, contrast, cut-off "
+                "or incomplete visible text, nonsensical copy, raw artifacts, and "
+                "diagram/exhibit semantic fit."
+            ),
             image_bytes=self._vision_image_bytes(image_path, image_format),
         )
 

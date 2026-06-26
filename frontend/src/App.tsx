@@ -5,6 +5,7 @@ import {
   getJobOutline,
   getJobStatus,
   getPlanningArtifact,
+  getRenderedSlideAudit,
   JobRecord,
   JobOutlineSlide,
   JobStatus,
@@ -13,13 +14,14 @@ import {
   OutlineEdit,
   patchJobOutline,
   PlanningArtifactName,
+  RenderedSlideAudit,
   regenerateSlide,
   renderPlannedJob,
   SlideSpec,
   TemplateProfile,
   updateTemplate,
 } from "./api/client";
-import { Length, Mode, Planner, Quality, Screen, Theme } from "./types";
+import { DesignLanguage, Length, Mode, Planner, PresentationStyle, Quality, Screen, Theme } from "./types";
 import TopBar from "./components/TopBar";
 import Stepper from "./components/Stepper";
 import ModeScreen from "./components/ModeScreen";
@@ -32,8 +34,8 @@ import SlideLightbox from "./components/SlideLightbox";
 import LibraryRail from "./components/LibraryRail";
 import StrictSchemaEditor from "./components/StrictSchemaEditor";
 
-const TERMINAL = new Set(["planned", "done", "error"]);
-type PlanningArtifacts = { source?: any; story?: any; gate?: any };
+const TERMINAL = new Set(["planned", "done", "review_failed", "error"]);
+type PlanningArtifacts = { source?: any; story?: any; gate?: any; editing?: any };
 
 export default function App() {
   // ── presentation ──
@@ -45,6 +47,8 @@ export default function App() {
   const [planner, setPlanner] = useState<Planner>("fast");
   const [quality, setQuality] = useState<Quality>("balanced");
   const [length, setLength] = useState<Length>("auto");
+  const [presentationStyle, setPresentationStyle] = useState<PresentationStyle>("auto");
+  const [designLanguage, setDesignLanguage] = useState<DesignLanguage>("auto");
   const [visualQa, setVisualQa] = useState(true);
 
   // ── brief ──
@@ -77,6 +81,7 @@ export default function App() {
 
   // ── review / lightbox ──
   const [openSlide, setOpenSlide] = useState<number | null>(null);
+  const [renderedAudit, setRenderedAudit] = useState<RenderedSlideAudit | null>(null);
   const [regening, setRegening] = useState(false);
   const [regenError, setRegenError] = useState<string | null>(null);
 
@@ -108,34 +113,56 @@ export default function App() {
   useEffect(() => {
     if (!jobId || screen !== "job") return;
     let active = true;
+    let timer: number | undefined;
+    const finishTerminalJob = (nextStatus: string) => {
+      if (timer !== undefined) window.clearInterval(timer);
+      void refreshLibrary();
+      if (nextStatus === "planned") {
+        setScreen("plan");
+      } else if (nextStatus === "done" || nextStatus === "review_failed") {
+        setScreen("review");
+      }
+    };
     const tick = async () => {
       try {
         const s = await getJobStatus(jobId);
         if (!active) return;
         setStatus(s);
-        if (TERMINAL.has(s.job.status)) window.clearInterval(timer);
+        if (TERMINAL.has(s.job.status)) finishTerminalJob(s.job.status);
       } catch {
         /* keep polling */
       }
     };
+    timer = window.setInterval(tick, 1500);
     tick();
-    const timer = window.setInterval(tick, 1500);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearInterval(timer);
     };
   }, [jobId, screen]);
 
   useEffect(() => {
     if (!jobId || !status || (screen !== "plan" && screen !== "review")) return;
     loadPlanningContext(jobId);
-  }, [jobId, screen, status?.job.status]);
+  }, [
+    jobId,
+    screen,
+    status?.job.status,
+    status?.job.completed_at,
+    status?.rendered_slide_audit?.available,
+    status?.rendered_slide_audit?.issue_count,
+  ]);
 
   async function loadPlanningContext(targetJobId: string) {
     setPlanningLoading(true);
     setPlanningError(null);
     try {
-      const artifactNames: PlanningArtifactName[] = ["source-compression", "story-map", "spec-gate"];
+      const artifactNames: PlanningArtifactName[] = [
+        "source-compression",
+        "story-map",
+        "spec-gate",
+        "editing-contract",
+      ];
       const [outlineResult, ...artifactResults] = await Promise.allSettled([
         getJobOutline(targetJobId),
         ...artifactNames.map((artifact) => getPlanningArtifact(targetJobId, artifact)),
@@ -153,10 +180,21 @@ export default function App() {
           ? "source"
           : artifactNames[index] === "story-map"
             ? "story"
-            : "gate";
+            : artifactNames[index] === "spec-gate"
+              ? "gate"
+              : "editing";
         nextArtifacts[key] = result.value;
       });
       setPlanningArtifacts(nextArtifacts);
+      if (screen === "review" && status?.rendered_slide_audit?.available) {
+        try {
+          setRenderedAudit(await getRenderedSlideAudit(targetJobId));
+        } catch {
+          setRenderedAudit(null);
+        }
+      } else {
+        setRenderedAudit(null);
+      }
     } finally {
       setPlanningLoading(false);
     }
@@ -175,6 +213,7 @@ export default function App() {
     setStatus(null);
     setOutline([]);
     setPlanningArtifacts({});
+    setRenderedAudit(null);
     setOpenSlide(null);
     setSubmitError(null);
     setPlanningError(null);
@@ -190,6 +229,10 @@ export default function App() {
     if (nextQuality === "fast" || nextQuality === "balanced" || nextQuality === "showcase") {
       setQuality(nextQuality);
     }
+    const nextStyle = String(job.config_json?.presentation_style || "auto") as PresentationStyle;
+    setPresentationStyle(nextStyle);
+    const nextDesign = String(job.config_json?.design_language || "auto") as DesignLanguage;
+    setDesignLanguage(nextDesign);
     setBrief((job.instructions || "").split("\n\nAudience:")[0]);
   };
 
@@ -205,7 +248,7 @@ export default function App() {
       setScreen(
         nextStatus.job.status === "planned"
           ? "plan"
-          : nextStatus.job.status === "done"
+          : nextStatus.job.status === "done" || nextStatus.job.status === "review_failed"
             ? "review"
             : "job"
       );
@@ -289,6 +332,8 @@ export default function App() {
       form.append("planner_profile", planner);
       form.append("quality_profile", quality);
       form.append("length_strategy", length);
+      form.append("presentation_style", presentationStyle);
+      form.append("design_language", designLanguage);
       form.append("run_visual_qa", String(visualQa));
       form.append("plan_only", String(planOnly));
       if (mode !== "freeform" && template) form.append("template_id", template.id);
@@ -301,6 +346,7 @@ export default function App() {
       setStatus(null);
       setOutline([]);
       setPlanningArtifacts({});
+      setRenderedAudit(null);
       setPlanningError(null);
       setRegenError(null);
       setScreen("job");
@@ -433,10 +479,14 @@ export default function App() {
               planner={planner}
               quality={quality}
               length={length}
+              presentationStyle={presentationStyle}
+              designLanguage={designLanguage}
               visualQa={visualQa}
               onPlanner={setPlanner}
               onQuality={setQuality}
               onLength={setLength}
+              onPresentationStyle={setPresentationStyle}
+              onDesignLanguage={setDesignLanguage}
               onToggleVisualQa={() => setVisualQa((v) => !v)}
               submitting={submitting}
               error={submitError}
@@ -480,6 +530,7 @@ export default function App() {
               quality={quality}
               deckTitle={deckTitle}
               outline={outline}
+              artifacts={planningArtifacts}
               onOpenSlide={(i) => {
                 setOpenSlide(i);
                 setRegenError(null);
@@ -495,6 +546,7 @@ export default function App() {
           status={status}
           index={openSlide}
           outlineSlide={outline.find((slide) => slide.slide_index === openSlide)}
+          auditSlide={renderedAudit?.slides?.find((slide) => slide.slide_index === openSlide)}
           regening={regening}
           regenError={regenError}
           onClose={() => setOpenSlide(null)}

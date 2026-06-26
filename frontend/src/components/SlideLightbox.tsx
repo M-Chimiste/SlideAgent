@@ -1,5 +1,5 @@
 import { CSSProperties } from "react";
-import { JobOutlineSlide, JobStatus, previewImageUrl } from "../api/client";
+import { JobOutlineSlide, JobStatus, previewImageUrl, RenderedSlideAuditSlide } from "../api/client";
 import { slideIssues } from "../qa";
 
 const MONO = "'IBM Plex Mono', monospace";
@@ -9,6 +9,7 @@ type Props = {
   status: JobStatus;
   index: number;
   outlineSlide?: JobOutlineSlide;
+  auditSlide?: RenderedSlideAuditSlide;
   regening: boolean;
   regenError: string | null;
   onClose: () => void;
@@ -26,6 +27,7 @@ export default function SlideLightbox({
   status,
   index,
   outlineSlide,
+  auditSlide,
   regening,
   regenError,
   onClose,
@@ -42,6 +44,20 @@ export default function SlideLightbox({
   const consulting = qaBadge(consultingOk);
   const visual = qaBadge(visualOk);
   const page = String(index + 1).padStart(2, "0");
+  const diagnostics = auditSlide?.layout_diagnostics;
+  const auditIssues = auditSlide?.issues ?? [];
+  const templateFrame = outlineSlide?.template_frame ?? auditSlide?.template_frame ?? null;
+  const overflowCount = diagnostics?.overflow_risk_count ?? 0;
+  const smallTextCount = diagnostics?.small_text_risk_count ?? 0;
+  const overlapCount = diagnostics?.overlap_pair_count ?? 0;
+  const occlusionCount = diagnostics?.occlusion_pair_count ?? 0;
+  const hasDiagnostics = !!auditSlide && (
+    overflowCount > 0 ||
+    smallTextCount > 0 ||
+    overlapCount > 0 ||
+    occlusionCount > 0 ||
+    auditIssues.length > 0
+  );
 
   const issue =
     issues.length === 0
@@ -204,6 +220,56 @@ export default function SlideLightbox({
             </div>
           </div>
 
+          {hasDiagnostics && (
+            <>
+              <div
+                style={{
+                  fontFamily: MONO,
+                  fontSize: 10,
+                  letterSpacing: ".1em",
+                  color: "var(--ink-3)",
+                  marginBottom: 10,
+                }}
+              >
+                RENDERED AUDIT
+              </div>
+              <div style={{ marginBottom: 20, display: "flex", flexDirection: "column", gap: 8 }}>
+                <MetaRow label="Text boxes" value={String(diagnostics?.text_box_count ?? "-")} />
+                <MetaRow label="Cut-off risk" value={String(overflowCount)} tone={overflowCount > 0 ? "bad" : "normal"} />
+                <MetaRow label="Small text" value={String(smallTextCount)} tone={smallTextCount > 0 ? "bad" : "normal"} />
+                <MetaRow label="Overlap pairs" value={String(overlapCount)} tone={overlapCount > 0 ? "bad" : "normal"} />
+                <MetaRow label="Covered text" value={String(occlusionCount)} tone={occlusionCount > 0 ? "bad" : "normal"} />
+                {auditIssues.slice(0, 3).map((issue, i) => (
+                  <AuditNote key={`issue-${i}`} label={issue.category || issue.severity} value={issue.message} />
+                ))}
+                {(diagnostics?.overflow_risks ?? []).slice(0, 2).map((risk, i) => (
+                  <AuditNote key={`overflow-${i}`} label="Cut-off" value={risk.text || "Text region may overflow."} />
+                ))}
+                {(diagnostics?.small_text_risks ?? []).slice(0, 2).map((risk, i) => (
+                  <AuditNote
+                    key={`small-text-${i}`}
+                    label={`Small ${risk.font_size ?? "?"}pt`}
+                    value={risk.text || "Text is below the readable size floor."}
+                  />
+                ))}
+                {(diagnostics?.overlap_pairs ?? []).slice(0, 2).map((pair, i) => (
+                  <AuditNote
+                    key={`overlap-${i}`}
+                    label={`Overlap ${Math.round((pair.overlap_ratio ?? 0) * 100)}%`}
+                    value={(pair.texts || []).join(" / ") || "Text regions overlap."}
+                  />
+                ))}
+                {(diagnostics?.occlusion_pairs ?? []).slice(0, 2).map((pair, i) => (
+                  <AuditNote
+                    key={`occlusion-${i}`}
+                    label={`Covered ${Math.round((pair.overlap_ratio ?? 0) * 100)}%`}
+                    value={pair.text || "Text is partially covered by another shape."}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+
           {outlineSlide && (
             <>
               <div
@@ -230,7 +296,54 @@ export default function SlideLightbox({
                 </div>
                 <MetaRow label="Role" value={outlineSlide.narrative_role || "-"} />
                 <MetaRow label="Layout" value={outlineSlide.layout || outlineSlide.archetype || "-"} />
+                <MetaRow label="Composition" value={outlineSlide.composition_family || "-"} />
+                {templateFrame && (
+                  <>
+                    <MetaRow
+                      label="Source frame"
+                      value={`${templateFrame.source_slide ?? Number(templateFrame.index ?? 0) + 1}: ${
+                        templateFrame.label || templateFrame.layout_name || "template slide"
+                      }`}
+                    />
+                    <MetaRow
+                      label="Frame type"
+                      value={
+                        [
+                          templateFrame.content_category || templateFrame.method || "-",
+                          templateFrame.match_confidence
+                            ? `${templateFrame.match_confidence}${
+                                templateFrame.match_score != null ? `:${templateFrame.match_score}` : ""
+                              }`
+                            : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                      }
+                    />
+                    {templateFrame.match_reason && (
+                      <MetaRow label="Frame match" value={templateFrame.match_reason} />
+                    )}
+                    {templateFrame.closest_candidates?.length ? (
+                      <MetaRow
+                        label="Alternatives"
+                        value={templateFrame.closest_candidates
+                          .slice(0, 3)
+                          .map((candidate) => {
+                            const frameNo = candidate.source_slide ?? Number(candidate.index ?? 0) + 1;
+                            return `${frameNo} ${candidate.label || candidate.layout_name || "frame"}${
+                              candidate.match_score != null ? `:${candidate.match_score}` : ""
+                            }`;
+                          })
+                          .join(" / ")}
+                      />
+                    ) : null}
+                    <MetaRow label="Reuse" value={templateFrame.reuse_mode || "-"} />
+                  </>
+                )}
                 <MetaRow label="Exhibit" value={outlineSlide.exhibit_type || "-"} />
+                {outlineSlide.visual_degradation?.reason && (
+                  <MetaRow label="Degraded" value={String(outlineSlide.visual_degradation.reason)} />
+                )}
                 <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.4 }}>
                   {(outlineSlide.source_refs || []).slice(0, 4).join(", ") ||
                     (outlineSlide.sources || []).slice(0, 2).join("; ") ||
@@ -296,7 +409,7 @@ export default function SlideLightbox({
   );
 }
 
-function MetaRow({ label, value }: { label: string; value: string }) {
+function MetaRow({ label, value, tone = "normal" }: { label: string; value: string; tone?: "normal" | "bad" }) {
   return (
     <div
       style={{
@@ -308,7 +421,27 @@ function MetaRow({ label, value }: { label: string; value: string }) {
       }}
     >
       <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{label}</span>
-      <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--ink)" }}>{value}</span>
+      <span style={{ fontFamily: MONO, fontSize: 10.5, color: tone === "bad" ? "var(--bad)" : "var(--ink)" }}>{value}</span>
+    </div>
+  );
+}
+
+function AuditNote({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        padding: "9px 10px",
+        border: "1px solid var(--line)",
+        borderRadius: 8,
+        background: "var(--surface-2)",
+      }}
+    >
+      <div style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--bad)", marginBottom: 4 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.35 }}>
+        {value}
+      </div>
     </div>
   );
 }

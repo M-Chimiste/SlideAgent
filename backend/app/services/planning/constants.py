@@ -51,11 +51,20 @@ that proves its title, with at least one benchmark or comparison. Reject any bul
 on a different slide; make each one specific to this slide's evidence."""
 
 
-def build_planner_system_prompt(quality_profile: str = "balanced") -> str:
-    """Return the planner system prompt, escalating rigor for the showcase profile."""
+def build_planner_system_prompt(
+    quality_profile: str = "balanced",
+    presentation_style: str = "consulting",
+) -> str:
+    """Return the planner system prompt for a presentation style, escalating rigor
+    for the showcase profile. The ``consulting`` style returns the original prompt
+    byte-for-byte."""
+    from app.services.presentation_styles import DEFAULT_STYLE, compose_system_prompt, get_style
+
+    style = get_style(presentation_style)
+    base = PLANNER_SYSTEM_PROMPT if style.key == DEFAULT_STYLE else compose_system_prompt(style)
     if (quality_profile or "").strip().lower() == "showcase":
-        return f"{PLANNER_SYSTEM_PROMPT}\n{PLANNER_SHOWCASE_ADDENDUM}"
-    return PLANNER_SYSTEM_PROMPT
+        return f"{base}\n{PLANNER_SHOWCASE_ADDENDUM}"
+    return base
 
 
 UPLOADED_SOURCE_LABEL = "Uploaded source"

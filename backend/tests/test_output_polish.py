@@ -76,6 +76,38 @@ def _source_bundle() -> DocumentBundle:
     )
 
 
+def _benchmark_bundle() -> DocumentBundle:
+    section = DocumentSection(
+        title="Why Not Simply Generate Synthetic Benchmarks?",
+        level=1,
+        content=(
+            "Synthetic benchmark generation creates circular validation loops without "
+            "grounding in operational reality. Source-grounded harnesses evaluate "
+            "models against evidence that already matters to the organization. "
+            "Benchmark quality improves when test cases come from real workflows."
+        ),
+        source_doc_id="benchmarks",
+        source_id="benchmarks:section:1:why-not-synthetic",
+    )
+    return DocumentBundle(
+        job_id="job-benchmark-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            section.source_id: {
+                "kind": "section",
+                "source_doc_id": "benchmarks",
+                "filename": "Bootstrapping Benchmarks.docx",
+                "title": section.title,
+                "label": f"Bootstrapping Benchmarks > {section.title}",
+            }
+        },
+    )
+
+
 def _outline(
     index: int,
     title: str,
@@ -106,6 +138,80 @@ def _outline(
         layout_json={"layout": "comparison_table", "archetype": "comparison_table"},
         created_at="2026-01-01T00:00:00Z",
     )
+
+
+def test_pre_render_claim_gate_replaces_weak_source_fragments() -> None:
+    bundle = _benchmark_bundle()
+    slide = GeneratedSlideSpec(
+        slide_number=1,
+        slide_type="content",
+        action_title="Synthetic benchmarks cannot substitute for validated operating evidence",
+        subheading="Why Not Simply Generate Synthetic Benchmarks",
+        content_blocks=[
+            ContentBlock(
+                type="bullets",
+                body=[
+                    "Predictions",
+                    "While this approach does have merits in certain circumstances and is not incompatible with certain",
+                    "The Circular Validation Problem.",
+                    "When an LLM generates a test case and another LLM is evaluated against them, we create",
+                ],
+            )
+        ],
+        sources=["Bootstrapping Benchmarks > Why Not Simply Generate Synthetic Benchmarks"],
+        source_refs=[bundle.sections[0].source_id],
+        archetype="icon_rows",
+        exhibit_spec={
+            "type": "icon_rows",
+            "items": [
+                "Predictions",
+                "While this approach does have merits in certain circumstances and is not incompatible with certain",
+                "The Circular Validation Problem.",
+            ],
+        },
+    )
+    deck = DeckSpec(deck_title="Bootstrapping Benchmarks", slides=[slide])
+
+    ContentPlanner()._repair_weak_source_claims(deck, bundle)
+
+    body = deck.slides[0].content_blocks[0].body
+    rendered = json.dumps(deck.slides[0].model_dump()).lower()
+    assert "synthetic benchmarks can create circular validation loops" in rendered
+    assert "source-grounded harnesses evaluate models" in rendered
+    assert "predictions" not in rendered
+    assert "incompatible with certain" not in rendered
+    assert len(body) >= 3
+
+
+def test_outline_claim_gate_protects_render_from_plan_flow() -> None:
+    bundle = _benchmark_bundle()
+    outline = _outline(
+        0,
+        "Synthetic benchmarks cannot substitute for validated operating evidence",
+        [
+            "Predictions",
+            "While this approach does have merits in certain circumstances and is not incompatible with certain",
+        ],
+        source_refs=[bundle.sections[0].source_id],
+        exhibit_spec={
+            "type": "icon_rows",
+            "items": [
+                "Predictions",
+                "While this approach does have merits in certain circumstances and is not incompatible with certain",
+            ],
+        },
+    )
+    outline.content_json["archetype"] = "icon_rows"
+    outline.layout_json["layout"] = "icon_rows"
+    outline.layout_json["archetype"] = "icon_rows"
+
+    repaired = ContentPlanner().repair_weak_outline_claims([outline], bundle)
+
+    rendered = json.dumps(repaired[0].content_json).lower()
+    assert "synthetic benchmarks can create circular validation loops" in rendered
+    assert "source-grounded harnesses evaluate models" in rendered
+    assert "predictions" not in rendered
+    assert repaired[0].content_json["exhibit_spec"]["type"] == "icon_rows"
 
 
 def test_ingester_assigns_source_ids_and_source_index(tmp_path: Path) -> None:
@@ -329,7 +435,7 @@ def test_consulting_qa_ignores_repeated_table_headers_as_evidence() -> None:
             {
                 "type": "table",
                 "body": [
-                    ["Item", "Implication", "Update trigger"],
+                    ["Artifact", "Purpose", "Update trigger"],
                     [
                         "Context" if idx == 0 else "Rules",
                         "Persistent memory reduces handoff loss."
@@ -620,6 +726,124 @@ def test_consulting_qa_recognizes_semantic_body_support() -> None:
     assert set(unsupported).isdisjoint({0, 1})
 
 
+def test_consulting_qa_recognizes_benchmark_action_titles() -> None:
+    outlines = [
+        _outline(
+            0,
+            "Current benchmarks need harnesses that discover operational truth",
+            [
+                "Benchmark saturation and inconsistent real-world correlation require new evidence.",
+                "Harnesses discover validated operational truth from existing workflows.",
+            ],
+            source_refs=["source-doc:section:2:executive-summary"],
+            exhibit_spec={
+                "type": "comparison_table",
+                "rows": [{"label": "Current benchmarks", "values": ["Saturated"]}],
+            },
+        ),
+        _outline(
+            1,
+            "Synthetic benchmarks cannot substitute for validated operating evidence",
+            [
+                "Synthetic test generation can miss factual correctness and domain validity.",
+                "Source-grounded harnesses extract validated truth from existing workflows.",
+            ],
+            source_refs=["source-doc:section:4:synthetic-benchmarks"],
+            exhibit_spec={
+                "type": "cycle",
+                "steps": [{"label": "Source evidence"}, {"label": "Harness test"}],
+            },
+        ),
+        _outline(
+            2,
+            "Five harness layers connect contracts, data, execution, and review",
+            [
+                "The framework links model contracts, data sources, execution, and review.",
+                "Each layer turns evaluation requirements into repeatable benchmark runs.",
+            ],
+            source_refs=["source-doc:section:7:architecture-overview"],
+            exhibit_spec={
+                "type": "comparison_table",
+                "rows": [{"label": "Contract", "values": ["Input", "Expected"]}],
+            },
+        ),
+        _outline(
+            5,
+            "Synthetic benchmark generation creates circular validation loops",
+            [
+                "Synthetic generation can make benchmark creation look scalable.",
+                "Without source grounding, the loop validates itself rather than the workflow.",
+            ],
+            source_refs=["source-doc:section:5:synthetic-benchmarks"],
+            exhibit_spec={"type": "callouts", "points": ["Circular loop", "Weak evidence"]},
+        ),
+        _outline(
+            6,
+            "The five-layer architecture orchestrates benchmark creation",
+            [
+                "Contracts, data, execution, and review have to work as one system.",
+                "Agent-led coordination only works when each layer has explicit evidence.",
+            ],
+            source_refs=["source-doc:section:7:architecture-overview"],
+            exhibit_spec={"type": "callouts", "points": ["Contract", "Data", "Review"]},
+        ),
+        _outline(
+            3,
+            "Govern agent-assisted benchmark discovery before deployment",
+            [
+                "Organizations need benchmarks that reflect actual use cases.",
+                "Production deployment requires governance across data, schemas, and review.",
+            ],
+            source_refs=["source-doc:section:12:conclusion"],
+            exhibit_spec={
+                "type": "checklist",
+                "items": [{"action": "Assign governance owner"}],
+            },
+        ),
+        _outline(
+            4,
+            "Calibrate confidence against varying ground-truth certainty",
+            [
+                "Several areas warrant further development before production rollout.",
+                "Automated schema discovery and metadata extraction change certainty levels.",
+            ],
+            source_refs=["source-doc:section:13:future-directions"],
+            exhibit_spec={
+                "type": "matrix_2x2",
+                "quadrants": [{"label": "High certainty"}],
+            },
+        ),
+    ]
+
+    issues = ConsultingQA().inspect_outlines(outlines, has_source_material=True)
+
+    assert not [
+        issue
+        for issue in issues
+        if issue.category in {"action_title", "one_message", "title_body_support"}
+        and issue.slide_index in {0, 1, 2, 3, 4, 5, 6}
+    ]
+
+
+def test_consulting_qa_does_not_apply_action_title_rules_to_cover() -> None:
+    deck = DeckSpec(
+        deck_title="Bootstrapping Benchmarks: Agent-Assisted Discovery",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1,
+                slide_type="cover",
+                action_title="Bootstrapping Benchmarks: Agent-Assisted Discovery",
+                archetype="cover",
+            )
+        ],
+    )
+
+    inspected, warnings = ConsultingQA().inspect(deck)
+
+    assert warnings == []
+    assert inspected.slides[0].qa.consulting_status == "pass"
+
+
 def test_consulting_qa_flags_near_duplicate_slides() -> None:
     exhibit = {
         "type": "comparison_table",
@@ -675,6 +899,351 @@ def test_consulting_repair_rewrites_titles_sources_and_exhibits() -> None:
         repaired[0].content_json["exhibit_spec"]
     )
     assert "external brain" in str(repaired[0].content_json["exhibit_spec"]).lower()
+
+
+def test_consulting_qa_flags_sparse_card_layouts() -> None:
+    outline = _outline(
+        0,
+        "Implicit ground truth discovery makes benchmark creation scalable",
+        ["Validated truth exists."],
+        source_refs=["source-doc:section:2:implicit-ground-truth"],
+        exhibit_spec={"type": "callouts", "points": ["Validated truth exists."]},
+    )
+    outline.layout_json["layout"] = "callouts"
+    outline.content_json["archetype"] = "callouts"
+
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    assert "sparse_content" in {issue.category for issue in issues}
+
+
+def test_consulting_qa_flags_sparse_quote_sidebar_support() -> None:
+    outline = _outline(
+        0,
+        "Calibrate confidence against varying ground-truth certainty",
+        [],
+        source_refs=["source-doc:section:3:confidence-calibration"],
+        exhibit_spec={
+            "type": "quote_sidebar",
+            "key_idea": (
+                "Confidence calibration should change with the certainty of "
+                "the operational ground truth."
+            ),
+            "supporting_points": ["Semantic definitions are not automatically measurable."],
+        },
+    )
+    outline.layout_json["layout"] = "quote_sidebar"
+    outline.content_json["archetype"] = "quote_sidebar"
+
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    assert "sparse_content" in {issue.category for issue in issues}
+
+
+def test_consulting_qa_flags_renderer_filler_as_bad_copy() -> None:
+    outline = _outline(
+        0,
+        "Harness-centric design turns workflows into evaluation evidence",
+        [
+            "Predictions",
+            "Connect the harness-centric view to an explicit review gate.",
+            "Make the harness-centric view visible before execution starts.",
+        ],
+        source_refs=["source-doc:section:3:harness-centric-view"],
+        exhibit_spec={
+            "type": "callouts",
+            "points": [
+                "Connect the harness-centric view to an explicit review gate.",
+                "Make the harness-centric view visible before execution starts.",
+            ],
+        },
+    )
+    outline.layout_json["layout"] = "callouts"
+    outline.content_json["archetype"] = "callouts"
+
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+    categories = {issue.category for issue in issues}
+
+    assert "content_quality" in categories
+    assert "sparse_content" in categories
+
+
+def test_consulting_repair_expands_sparse_content_from_source() -> None:
+    section = DocumentSection(
+        title="Implicit Ground Truth",
+        level=1,
+        content=(
+            "Validated truth already exists in operational data. "
+            "Agents can extract that truth from workflows, logs, and reviews. "
+            "The harness converts those traces into reproducible benchmark cases."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:2:implicit-ground-truth",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            section.source_id: {
+                "kind": "section",
+                "source_doc_id": "source-doc",
+                "filename": "Bootstrapping Benchmarks.docx",
+                "title": "Implicit Ground Truth",
+                "label": "Bootstrapping Benchmarks > Implicit Ground Truth",
+            }
+        },
+    )
+    outline = _outline(
+        0,
+        "Implicit ground truth discovery makes benchmark creation scalable",
+        ["Validated truth exists."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "callouts", "points": ["Validated truth exists."]},
+    )
+    outline.layout_json["layout"] = "callouts"
+    outline.content_json["archetype"] = "callouts"
+    planner = ContentPlanner()
+    issues = planner.consulting_issues_for_outlines([outline], bundle)
+
+    repaired = planner.repair_outlines_for_consulting([outline], issues, bundle)
+
+    bullets = repaired[0].content_json["bullets"]
+    assert any(issue.category == "sparse_content" for issue in issues)
+    assert len(bullets) >= 3
+    assert any("operational data" in bullet for bullet in bullets)
+
+
+def test_callout_content_blocks_do_not_promote_single_metric_label() -> None:
+    planner = ContentPlanner()
+    section = DocumentSection(
+        title="Harness-Centric View",
+        level=1,
+        content="Harnesses convert existing workflows into reproducible evaluation evidence.",
+        source_doc_id="source-doc",
+    )
+
+    blocks = planner._content_blocks_from_exhibit(
+        "callouts",
+        {
+            "type": "callouts",
+            "points": [
+                "Harnesses convert workflows into reproducible evidence.",
+                "Agents extract validated cases from source systems.",
+            ],
+            "metrics": [{"label": "Predictions", "value": 1, "unit": "%"}],
+        },
+        section,
+    )
+
+    assert blocks[0].body == [
+        "Harnesses convert workflows into reproducible evidence.",
+        "Agents extract validated cases from source systems.",
+    ]
+
+
+def test_consulting_repair_rewrites_benchmark_heading_echoes() -> None:
+    section = DocumentSection(
+        title="Conclusion and Future Directions",
+        level=1,
+        content=(
+            "This white paper presented a framework for bootstrapping benchmark "
+            "creation through agent-assisted discovery of implicit ground truth."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:12:conclusion-and-future-directions",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={},
+    )
+    outline = _outline(
+        11,
+        "Make conclusion and future directions an explicit operating decision",
+        ["The framework reframes benchmark creation through implicit ground truth."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "code_panel", "snippets": ["benchmark governance"]},
+    )
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    repaired = ContentPlanner().repair_outlines_for_consulting(
+        [outline],
+        issues,
+        bundle,
+    )
+
+    assert repaired[0].label in {
+        "Govern agent-assisted benchmark discovery before deployment",
+        "Build evaluation systems around real use cases",
+    }
+    assert "conclusion and future directions" not in repaired[0].label.lower()
+
+
+def test_consulting_repair_rewrites_make_the_case_meta_frame() -> None:
+    section = DocumentSection(
+        title="The Case for Implicit Ground Truth Discovery",
+        level=1,
+        content=(
+            "A harness-centric approach asks where validated truth already exists "
+            "and how to systematically extract it."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:6:implicit-ground-truth",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={},
+    )
+    outline = _outline(
+        5,
+        "Make the case for implicit ground truth discovery an explicit operating decision",
+        ["Validated truth already exists in operational data."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "dependency_map", "nodes": ["Ground truth"]},
+    )
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    repaired = ContentPlanner().repair_outlines_for_consulting(
+        [outline],
+        issues,
+        bundle,
+    )
+
+    assert any(issue.category == "action_title" for issue in issues)
+    assert repaired[0].label == (
+        "Implicit ground truth discovery turns existing evidence into benchmarks"
+    )
+
+
+def test_consulting_repair_rewrites_benchmark_business_case_frame() -> None:
+    section = DocumentSection(
+        title="Future Directions",
+        level=1,
+        content=(
+            "Trust benchmark creation as a discovery task where agents identify "
+            "ground truth in organizational data."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:13:future-directions",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={},
+    )
+    outline = _outline(
+        12,
+        "Translate business case for shifting from manual into a distinct operating decision",
+        ["Trust benchmark creation as a discovery task where agents identify truth."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "callouts", "points": ["Manual discovery"]},
+    )
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    repaired = ContentPlanner().repair_outlines_for_consulting(
+        [outline],
+        issues,
+        bundle,
+    )
+
+    assert repaired[0].label == "Shift leaders from manual labeling to systematic discovery"
+
+
+def test_consulting_repair_rewrites_generic_benchmark_evidence_frame() -> None:
+    section = DocumentSection(
+        title="Closing Remarks",
+        level=1,
+        content=(
+            "Organizations must prioritize benchmarks that reflect actual use cases "
+            "over generic public evaluations."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:14:closing-remarks",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={},
+    )
+    outline = _outline(
+        12,
+        "Translate evidence for why generic benchmarks into a distinct operating decision",
+        ["Generic public evaluations do not reflect actual enterprise use cases."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "callouts", "points": ["Generic benchmarks"]},
+    )
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    repaired = ContentPlanner().repair_outlines_for_consulting(
+        [outline],
+        issues,
+        bundle,
+    )
+
+    assert repaired[0].label == (
+        "Use real use-case benchmarks instead of generic public evaluations"
+    )
+
+
+def test_consulting_repair_rewrites_distinct_operating_decision_frame() -> None:
+    section = DocumentSection(
+        title="The Harness Interface",
+        level=1,
+        content=(
+            "The Harness Interface operationalizes evaluation as a reproducible "
+            "lifecycle with setup, execution, validation, and review."
+        ),
+        source_doc_id="source-doc",
+        source_id="source-doc:section:11:harness-interface",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[section],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={},
+    )
+    outline = _outline(
+        10,
+        "Translate operationalizing evaluation into a distinct operating decision",
+        ["Operationalizing evaluation requires a reproducible harness lifecycle."],
+        source_refs=[section.source_id],
+        exhibit_spec={"type": "matrix_2x2", "quadrants": [{"label": "Readiness"}]},
+    )
+    issues = ConsultingQA().inspect_outlines([outline], has_source_material=True)
+
+    repaired = ContentPlanner().repair_outlines_for_consulting(
+        [outline],
+        issues,
+        bundle,
+    )
+
+    assert repaired[0].label == (
+        "Harness interfaces standardize benchmark execution across domains"
+    )
 
 
 def test_consulting_repair_moves_duplicate_slide_to_unused_source() -> None:
@@ -745,6 +1314,138 @@ def test_consulting_repair_moves_duplicate_slide_to_unused_source() -> None:
     assert repaired[1].content_json["source_refs"] == [second.source_id]
     assert repaired[1].label != repaired[0].label
     assert "Reviewer Mode" in repaired[1].content_json["sources"][0]
+
+
+def test_consulting_repair_moves_repeated_bullet_to_unused_source() -> None:
+    first = DocumentSection(
+        title="Synthetic Benchmarks",
+        level=1,
+        content="Synthetic data generation can miss domain validity and factual correctness.",
+        source_doc_id="source-doc",
+        source_id="source-doc:section:1:synthetic-benchmarks",
+    )
+    second = DocumentSection(
+        title="Implicit Ground Truth",
+        level=1,
+        content="Validated truth already exists in operational data and review traces.",
+        source_doc_id="source-doc",
+        source_id="source-doc:section:2:implicit-ground-truth",
+    )
+    bundle = DocumentBundle(
+        job_id="job-polish",
+        sections=[first, second],
+        tables=[],
+        metrics=[],
+        metadata=DocumentMetadata(title="Bootstrapping Benchmarks"),
+        content_inventory=[],
+        source_index={
+            first.source_id: {
+                "kind": "section",
+                "source_doc_id": "source-doc",
+                "filename": "Bootstrapping Benchmarks.docx",
+                "title": "Synthetic Benchmarks",
+                "label": "Bootstrapping Benchmarks > Synthetic Benchmarks",
+            },
+            second.source_id: {
+                "kind": "section",
+                "source_doc_id": "source-doc",
+                "filename": "Bootstrapping Benchmarks.docx",
+                "title": "Implicit Ground Truth",
+                "label": "Bootstrapping Benchmarks > Implicit Ground Truth",
+            },
+        },
+    )
+    repeated = "Synthetic data generation can miss domain validity and factual correctness."
+    outlines = [
+        _outline(
+            0,
+            "Synthetic benchmarks cannot substitute for validated operating evidence",
+            [repeated],
+            source_refs=[first.source_id],
+            exhibit_spec={"type": "checklist", "items": [{"action": repeated}]},
+        ),
+        _outline(
+            1,
+            "Clarify why not simply generate synthetic benchmarks before teams act",
+            [repeated],
+            source_refs=[first.source_id],
+            exhibit_spec={"type": "checklist", "items": [{"action": repeated}]},
+        ),
+    ]
+    planner = ContentPlanner()
+    issues = planner.consulting_issues_for_outlines(outlines, bundle)
+
+    repaired = planner.repair_outlines_for_consulting(outlines, issues, bundle)
+
+    assert any(issue.category == "repeated_bullet" for issue in issues)
+    assert repaired[1].content_json["source_refs"] == [second.source_id]
+    assert "Implicit Ground Truth" in repaired[1].content_json["sources"][0]
+
+
+def test_executive_summary_rejects_weak_prediction_metric_as_proof_point() -> None:
+    renderer = DeterministicPptxRenderer()
+    outline = _outline(
+        1,
+        "Current benchmarks need harnesses that discover operational truth",
+        ["Benchmark saturation requires a source-grounded evaluation harness."],
+        source_refs=["source-doc:section:2:executive-summary"],
+        exhibit_spec={
+            "type": "executive_summary",
+            "messages": [
+                {
+                    "label": "Situation",
+                    "detail": "Benchmark saturation weakens public scores.",
+                },
+                {
+                    "label": "Complication",
+                    "detail": "Synthetic data pollution reduces trust in static tests.",
+                },
+                {
+                    "label": "Resolution",
+                    "detail": "Harnesses discover validated truth from operations.",
+                },
+            ],
+            "proof_points": [
+                {
+                    "label": "Predictions",
+                    "value": 1,
+                    "unit": "%",
+                    "detail": "Predictions show adoption pressure.",
+                }
+            ],
+        },
+    )
+
+    proof_points = renderer._summary_proof_points(
+        outline.content_json["exhibit_spec"],
+        outline,
+    )
+
+    assert [point["label"] for point in proof_points] == [
+        "Situation",
+        "Complication",
+        "Resolution",
+    ]
+    assert not any(point.get("label") == "Predictions" for point in proof_points)
+
+
+def test_renderer_filters_placeholder_metric_bullets() -> None:
+    renderer = DeterministicPptxRenderer()
+    outline = _outline(
+        12,
+        "Calibrate confidence against varying ground-truth certainty",
+        [
+            "Predictions",
+            "Clarify the implication and required management action.",
+            "Production deployment requires robust interfaces.",
+        ],
+        source_refs=["source-doc:section:13:future-directions"],
+        exhibit_spec={"type": "callouts"},
+    )
+
+    bullets = renderer._bullets(outline)
+
+    assert bullets == ["Production deployment requires robust interfaces."]
 
 
 def test_consulting_repair_dedupes_rebuilt_closing_recommendation_steps() -> None:

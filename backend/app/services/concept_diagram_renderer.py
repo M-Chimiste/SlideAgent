@@ -59,16 +59,43 @@ class ConceptDiagramRenderer:
     def diagram_spec(self, outline: SlideOutline) -> dict[str, Any]:
         explicit = outline.content_json.get("diagram_spec")
         if isinstance(explicit, dict) and explicit.get("kind"):
+            self._validate_semantic_spec(explicit)
             return explicit
         layout = str(outline.layout_json.get("layout") or "").lower()
-        exhibit = outline.content_json.get("exhibit_spec")
-        exhibit = exhibit if isinstance(exhibit, dict) else {}
-        exhibit_type = str(exhibit.get("type") or "").lower().replace("-", "_")
-        if layout == "dependency_map" or exhibit_type == "dependency_map":
-            return self._dependency_spec(outline, exhibit)
-        if layout == "framework_cycle" or exhibit_type in {"cycle", "process"}:
-            return self._cycle_spec(outline, exhibit)
-        raise DiagramRenderError(f"Unsupported diagram layout: {layout or exhibit_type}")
+        raise DiagramRenderError(
+            f"Missing explicit source-backed diagram spec for layout: {layout or 'diagram'}"
+        )
+
+    def _validate_semantic_spec(self, spec: dict[str, Any]) -> None:
+        labels: list[str] = []
+        kind = str(spec.get("kind") or "").lower()
+        if kind == "dependency_flow":
+            labels.extend(str(item) for item in spec.get("middle_nodes", []) if str(item).strip())
+            labels.append(str(spec.get("left_node") or ""))
+            labels.append(str(spec.get("right_outcome") or ""))
+        elif kind == "cycle":
+            for step in spec.get("steps", []):
+                if isinstance(step, dict):
+                    labels.append(str(step.get("label") or step.get("description") or ""))
+        generic = {
+            "frame",
+            "ground",
+            "build",
+            "prime",
+            "generate",
+            "review",
+            "update",
+            "reset",
+            "persist",
+            "source context",
+            "rules",
+            "memory",
+            "reliable output",
+            "operating loop",
+        }
+        normalized = {" ".join(label.casefold().split()) for label in labels if label.strip()}
+        if len(normalized.intersection(generic)) >= 3:
+            raise DiagramRenderError("Diagram spec uses generic fallback labels.")
 
     def svg_for_spec(
         self, spec: dict[str, Any], brand: BrandDNA, dark: bool = False

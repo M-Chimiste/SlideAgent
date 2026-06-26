@@ -40,13 +40,19 @@ class ExhibitSelectionMixin:
             beat = self._story_beat_for_slide(story_map, slide.slide_number) if story_map else None
             section = self._section_for_slide_sources(slide, bundle)
             current_exhibit_type = str((slide.exhibit_spec or {}).get("type") or "")
+            selection_text = self._selection_text(slide, section, beat)
             if (
                 beat is None
                 and archetype
                 and archetype not in {"two_column", "callouts", "icon_rows"}
                 and not self._exhibit_is_incomplete(slide)
+                and not self._fragile_exhibit_needs_reselection(
+                    archetype,
+                    current_exhibit_type,
+                    selection_text,
+                )
                 and not (
-                    self._claim_has_metric_signal(self._selection_text(slide, section, beat))
+                    self._claim_has_metric_signal(selection_text)
                     and bundle.metrics
                 )
                 and not bundle.tables
@@ -142,7 +148,18 @@ class ExhibitSelectionMixin:
                     exhibit_type_counts,
                 )
                 continue
-            self._apply_selected_exhibit(slide, desired, section, bundle, used_metric_ids)
+            repair_section = self._authored_section_for_safe_reselection(
+                slide,
+                desired,
+                section,
+            )
+            self._apply_selected_exhibit(
+                slide,
+                desired,
+                repair_section or section,
+                bundle,
+                used_metric_ids,
+            )
             if str((slide.exhibit_spec or {}).get("type") or "") in {"metric_chart", "line_chart"}:
                 metric_slide_count += 1
             self._register_exhibit_usage(
@@ -214,11 +231,14 @@ class ExhibitSelectionMixin:
             candidates.append("comparison_table")
         if self._claim_has_ordered_signal(text):
             candidates.append("checklist")
-        if self._claim_has_strong_reference_signal(text):
+        if self._claim_has_strong_reference_signal(text) and self._has_reference_catalog_evidence(
+            text,
+            bundle,
+        ):
             candidates.append("table_reference")
-        if self._claim_has_dependency_signal(text):
+        if self._claim_has_strong_dependency_signal(text):
             candidates.append("dependency_map")
-        if self._claim_has_cycle_signal(text):
+        if self._claim_has_strong_cycle_signal(text):
             candidates.append("framework_cycle")
         if self._claim_has_tradeoff_signal(text):
             candidates.append("matrix_2x2")
@@ -231,7 +251,6 @@ class ExhibitSelectionMixin:
                 "comparison_table",
                 "checklist",
                 "quote_sidebar",
-                "matrix_2x2",
                 "icon_rows",
                 "two_column",
                 "callouts",
@@ -293,7 +312,20 @@ class ExhibitSelectionMixin:
             "callouts": 1,
         }
         budget = budgets.get(exhibit_type)
-        return budget is not None and type_counts.get(exhibit_type, 0) >= budget
+        if budget is None:
+            return False
+        # Give non-consulting styles extra headroom for the exhibit types they
+        # emphasize, so e.g. an investor deck can carry more metric/comparison
+        # slides. Consulting keeps the original budgets unchanged.
+        style_key = getattr(self, "_presentation_style", "consulting")
+        if style_key != "consulting":
+            from app.services.presentation_styles import get_style
+
+            alias = {"framework_cycle": "cycle", "table_reference": "reference_table"}
+            emphasized = {alias.get(a, a) for a in get_style(style_key).exhibit_emphasis}
+            if exhibit_type in emphasized:
+                budget += 1
+        return type_counts.get(exhibit_type, 0) >= budget
 
     def _exhibit_fingerprint(self, slide: GeneratedSlideSpec) -> str:
         exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
@@ -401,11 +433,14 @@ class ExhibitSelectionMixin:
             return "callouts"
         if preferred in {"cover", "executive_summary", "closing_recommendation"}:
             return self._normalize_archetype(slide.archetype or "") or "two_column"
-        if self._claim_has_strong_reference_signal(text):
+        if self._claim_has_strong_reference_signal(text) and self._has_reference_catalog_evidence(
+            text,
+            bundle,
+        ):
             return "table_reference"
         if self._claim_has_strong_dependency_signal(text):
             return "dependency_map"
-        if self._claim_has_cycle_signal(text):
+        if self._claim_has_strong_cycle_signal(text):
             return "framework_cycle"
         if self._claim_has_metric_signal(text) and bundle.metrics:
             return "metric_chart"
@@ -416,31 +451,56 @@ class ExhibitSelectionMixin:
                 return "table_reference"
         if preferred in {
             "comparison_table",
-            "dependency_map",
-            "framework_cycle",
             "checklist",
-            "code_panel",
             "anti_patterns",
             "metric_chart",
             "table_reference",
-            "matrix_2x2",
             "callouts",
             "icon_rows",
             "two_column",
         }:
             return preferred
+        if preferred == "dependency_map" and self._claim_has_strong_dependency_signal(text):
+            return "dependency_map"
+        if preferred == "framework_cycle" and self._claim_has_strong_cycle_signal(text):
+            return "framework_cycle"
+        if preferred == "matrix_2x2" and self._claim_has_tradeoff_signal(text):
+            return "matrix_2x2"
         if self._claim_has_ordered_signal(text):
             return "checklist"
         if self._claim_has_tradeoff_signal(text):
             return "matrix_2x2"
-        if self._claim_has_dependency_signal(text):
+        if self._claim_has_strong_dependency_signal(text):
             return "dependency_map"
         if self._claim_has_reference_signal(text):
-            return "code_panel"
+            return "callouts"
         if self._claim_has_mindset_signal(text):
             return "quote_sidebar"
         current = self._normalize_archetype(slide.archetype or "")
         return current if current in {"callouts", "icon_rows", "two_column"} else "callouts"
+
+    def _authored_section_for_safe_reselection(
+        self,
+        slide: GeneratedSlideSpec,
+        desired: str,
+        section: DocumentSection | None,
+    ) -> DocumentSection | None:
+        if desired not in {"callouts", "icon_rows", "two_column", "checklist"}:
+            return None
+        bullets = [
+            bullet
+            for bullet in self._body_to_bullets(slide)
+            if len(str(bullet).split()) >= 3
+        ]
+        if len(bullets) < 2:
+            return None
+        return DocumentSection(
+            title=slide.action_title,
+            level=section.level if section else 1,
+            content="\n".join(bullets[:5]),
+            source_doc_id=section.source_doc_id if section else "generated",
+            source_id=getattr(section, "source_id", ""),
+        )
 
     def _apply_selected_exhibit(
         self,
@@ -588,7 +648,7 @@ class ExhibitSelectionMixin:
         return bool(re.search(r"\b(first|then|next|finally|step|steps|checklist|sequence|timing|implementation plan)\b", text))
 
     def _claim_has_tradeoff_signal(self, text: str) -> bool:
-        return bool(re.search(r"\b(trade[- ]?off|priorit|impact|readiness|matrix|quadrant|low|high)\b", text))
+        return bool(re.search(r"\b(trade[- ]?off|2x2|2 x 2|matrix|quadrant)\b", text))
 
     def _claim_has_dependency_signal(self, text: str) -> bool:
         return bool(re.search(r"\b(depend|driver|flow|feed|constraint|cause|map|relationship|link)\b", text))
@@ -605,11 +665,53 @@ class ExhibitSelectionMixin:
     def _claim_has_cycle_signal(self, text: str) -> bool:
         return bool(re.search(r"\b(cycle|loop|workflow|phase|operating model|cadence|iterate)\b", text))
 
+    def _claim_has_strong_cycle_signal(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(named cycle|operating cycle|lifecycle|feedback loop|closed loop|"
+                r"six[- ]phase loop|four[- ]step loop|workflow loop)\b",
+                text,
+            )
+        )
+
+    def _fragile_exhibit_needs_reselection(
+        self,
+        archetype: str,
+        exhibit_type: str,
+        text: str,
+    ) -> bool:
+        normalized = self._normalize_archetype(archetype)
+        normalized_exhibit = exhibit_type.lower().replace("-", "_")
+        if normalized in {"code_panel", "reference"} or normalized_exhibit == "code_panel":
+            return True
+        if normalized == "matrix_2x2" or normalized_exhibit == "matrix_2x2":
+            return not self._claim_has_tradeoff_signal(text)
+        if normalized == "dependency_map" or normalized_exhibit == "dependency_map":
+            return not self._claim_has_strong_dependency_signal(text)
+        if normalized == "framework_cycle" or normalized_exhibit == "cycle":
+            return not self._claim_has_strong_cycle_signal(text)
+        return False
+
     def _claim_has_strong_reference_signal(self, text: str) -> bool:
         return bool(
             re.search(
                 r"\b(six core files|core files|reference table|rules file|rules files|"
                 r"specification files|memory bank files|file catalog|artifact catalog)\b",
+                text,
+            )
+        )
+
+    def _has_reference_catalog_evidence(
+        self,
+        text: str,
+        bundle: DocumentBundle,
+    ) -> bool:
+        return bool(
+            bundle.tables
+            or bundle.content_inventory
+            or re.search(
+                r"\b(six core files|core files|memory bank files|file catalog|"
+                r"artifact catalog)\b|\.md\b",
                 text,
             )
         )

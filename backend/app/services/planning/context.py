@@ -14,7 +14,9 @@ from app.services.planning.constants import (
     PLANNER_SYSTEM_PROMPT,
     SOURCE_NEEDED_LABEL,
     UPLOADED_SOURCE_LABEL,
+    build_planner_system_prompt,
 )
+from app.services.presentation_styles import get_style
 
 
 class ContextPlanningMixin:
@@ -102,17 +104,6 @@ class ContextPlanningMixin:
         quality_profile: str,
     ) -> StoryMap:
         self._last_story_map_error = None
-        if self._should_use_deterministic_story_map():
-            return self._fallback_story_map(
-                bundle,
-                instructions,
-                blueprint,
-                source_compression,
-                (
-                    "Deterministic story map used for local Qwen planner to avoid "
-                    "an extra pre-planning model call."
-                ),
-            )
         story_map = self._story_map_with_llm(
             instructions,
             blueprint,
@@ -121,10 +112,21 @@ class ContextPlanningMixin:
         )
         if story_map is not None:
             return story_map
+        if self.llm_client is not None:
+            reason = self._last_story_map_error or "LLM story map was unavailable or malformed."
+            return StoryMap(
+                status="unavailable",
+                thesis=blueprint.core_thesis,
+                narrative_arc="Situation -> Complication -> Resolution",
+                recommendation=self._fallback_recommendation(
+                    source_compression.key_claims, instructions
+                ),
+                beats=[],
+                source_refs=source_compression.source_refs,
+                fallback_reason=reason,
+            )
         reason = (
             "LLM story map was not configured."
-            if self.llm_client is None
-            else self._last_story_map_error or "LLM story map was unavailable or malformed."
         )
         return self._fallback_story_map(
             bundle,
@@ -133,10 +135,6 @@ class ContextPlanningMixin:
             source_compression,
             reason,
         )
-
-    def _should_use_deterministic_story_map(self) -> bool:
-        model = str(getattr(self.llm_client, "model", "") or "").lower()
-        return "qwen3.6-35b-a3b-mtp" in model
 
     def _story_map_with_llm(
         self,
@@ -148,7 +146,7 @@ class ContextPlanningMixin:
         if self.llm_client is None:
             return None
         prompt = (
-            "Create a consulting story map as strict JSON. Use this exact shape: "
+            f"Create a {get_style(self._presentation_style).label} story map as strict JSON. Use this exact shape: "
             "{\"thesis\":\"string\",\"narrative_arc\":\"Situation -> Complication -> Resolution\","
             "\"recommendation\":\"string\",\"beats\":[{\"beat_number\":1,\"role\":\"cover|executive_summary|problem|evidence|framework|implementation|reference|decision|closing\","
             "\"claim\":\"complete action-oriented claim\",\"source_refs\":[\"source id\"],"
@@ -163,7 +161,7 @@ class ContextPlanningMixin:
         )
         try:
             payload = self.llm_client.complete_json(
-                system_prompt=PLANNER_SYSTEM_PROMPT,
+                system_prompt=build_planner_system_prompt(quality_profile, self._presentation_style),
                 user_prompt=prompt,
                 max_tokens=self._story_map_max_tokens(quality_profile, blueprint.target_slide_count),
                 temperature=0.1,
@@ -229,6 +227,11 @@ class ContextPlanningMixin:
             else:
                 claim = claim_source
             refs = unit.source_refs if unit else [SOURCE_NEEDED_LABEL]
+            rationale = self._phrase(
+                (unit.summary if unit else "") or claim,
+                "",
+                limit=130,
+            )
             beats.append(
                 StoryBeat(
                     beat_number=index + 1,
@@ -243,7 +246,7 @@ class ContextPlanningMixin:
                         else "",
                         bundle,
                     ),
-                    rationale=f"Deterministic beat for {role}.",
+                    rationale=rationale,
                 )
             )
         return StoryMap(

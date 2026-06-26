@@ -382,6 +382,60 @@ def test_apply_design_selects_icons_from_card_content() -> None:
     ]
 
 
+def test_apply_design_repairs_underfilled_checklist_exhibit() -> None:
+    outline = _outline(layout="checklist")
+    outline.content_json["bullets"] = [
+        "Turn proprietary data into reusable ground-truth evidence.",
+        "Match validation strategy to available enterprise evidence.",
+    ]
+    outline.content_json["exhibit_spec"] = {
+        "type": "checklist",
+        "items": [
+            {"action": "Turn proprietary data into reusable ground-truth evidence."}
+        ],
+    }
+
+    designed = DesignAgent().apply_design([outline])[0]
+    exhibit = designed.content_json["exhibit_spec"]
+
+    assert len(exhibit["items"]) >= 3
+    assert exhibit["items"][0]["action"] == (
+        "Turn proprietary data into reusable ground-truth evidence."
+    )
+    assert designed.content_json["content_blocks"][0]["body"][0] == [
+        "Action",
+        "Owner",
+        "Timing",
+    ]
+    assert designed.layout_json["editing_contract_repair"][
+        "underfilled_checklist_repaired"
+    ] is True
+
+
+def test_apply_design_repairs_underfilled_callout_exhibit() -> None:
+    outline = _outline(layout="two_column")
+    outline.content_json["action_title"] = (
+        "Harness-centric discovery turns enterprise evidence into benchmark cases"
+    )
+    outline.content_json["sources"] = ["Bootstrapping Benchmarks > Executive Summary"]
+    outline.content_json["bullets"] = [
+        "Current benchmarking is constrained by saturation and weak enterprise fit."
+    ]
+    outline.content_json["exhibit_spec"] = {
+        "type": "callouts",
+        "points": ["Current benchmarking is constrained by saturation."],
+    }
+
+    designed = DesignAgent().apply_design([outline])[0]
+    exhibit = designed.content_json["exhibit_spec"]
+
+    assert len(exhibit["points"]) >= 3
+    assert any("enterprise workflows" in point for point in exhibit["points"])
+    assert designed.layout_json["editing_contract_repair"][
+        "underfilled_callouts_repaired"
+    ] is True
+
+
 def test_icon_selection_does_not_match_keywords_inside_words() -> None:
     agent = DesignAgent()
 

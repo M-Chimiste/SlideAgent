@@ -106,6 +106,8 @@ export default function LibraryRail({
                   <span style={{ fontSize: 12.5, fontWeight: 700 }}>
                     {job.status === "done"
                       ? "Review deck"
+                      : job.status === "review_failed"
+                        ? "Needs review"
                       : job.status === "planned"
                         ? "Review plan"
                         : job.status}

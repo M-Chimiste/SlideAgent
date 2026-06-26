@@ -45,6 +45,7 @@ class SpecGateMixin:
             )
             self._gate_repair_content_budget(slide, issues, repairs)
             self._gate_repair_heavy_repetition(slide, bundle, heavy_counts, issues, repairs)
+            self._gate_repair_bad_copy(slide, bundle, issues, repairs)
             self._gate_repair_duplicate(
                 slide,
                 bundle,
@@ -87,7 +88,153 @@ class SpecGateMixin:
                     "estimated_tokens": source_compression.estimated_tokens,
                 },
             },
+            )
+
+    def _gate_repair_bad_copy(
+        self,
+        slide: GeneratedSlideSpec,
+        bundle: DocumentBundle,
+        issues: list[SpecGateIssue],
+        repairs: list[SpecGateRepair],
+    ) -> None:
+        if self._normalize_archetype(slide.archetype or "") in {
+            "cover",
+            "executive_summary",
+            "closing_recommendation",
+        }:
+            return
+        reasons = self._gate_bad_copy_reasons(slide)
+        if not reasons:
+            return
+        before = self._slide_claim_text(slide)[:260]
+        section = self._section_for_slide_sources(slide, bundle)
+        archetype = self._gate_safe_rewrite_archetype(slide)
+        if section is not None:
+            slide.source_refs = [self._source_ref(section, slide.slide_number - 1)]
+            slide.sources = self._source_labels_for_refs(slide.source_refs, bundle) or [
+                UPLOADED_SOURCE_LABEL
+            ]
+            slide.action_title = self._clean_action_title_candidate(
+                self._fallback_action_title(archetype, section.title, section)
+            )
+            slide.subheading = self._clean_section_title(section.title)
+        self._apply_selected_exhibit(slide, archetype, section, bundle)
+        slide.diagram_spec = None
+        issues.append(
+            SpecGateIssue(
+                slide_number=slide.slide_number,
+                category="bad_copy",
+                message=(
+                    "Malformed source-fragment copy was rebuilt from source before rendering: "
+                    + "; ".join(reasons[:3])
+                ),
+                repaired=True,
+            )
         )
+        repairs.append(
+            SpecGateRepair(
+                slide_number=slide.slide_number,
+                action="rebuild_bad_copy",
+                before=before,
+                after=self._slide_claim_text(slide)[:260],
+            )
+        )
+
+    def _gate_bad_copy_reasons(self, slide: GeneratedSlideSpec) -> list[str]:
+        reasons: list[str] = []
+        for text in self._gate_text_values(slide):
+            cleaned = " ".join(str(text).split()).strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if self._gate_has_source_fragment_artifact(lowered):
+                reasons.append(self._truncate_at_word(cleaned, 72))
+            elif (
+                len(cleaned.split()) >= 4
+                and "..." not in cleaned
+                and "…" not in cleaned
+                and (
+                    self._ends_with_dangling_token(cleaned)
+                    or re.match(r"^(?:to|or|and|but)\s+\w", lowered)
+                )
+            ):
+                reasons.append(self._truncate_at_word(cleaned, 72))
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for reason in reasons:
+            key = reason.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(reason)
+        return deduped
+
+    def _gate_text_values(self, slide: GeneratedSlideSpec) -> list[str]:
+        values = [slide.action_title, slide.subheading]
+        for block in slide.content_blocks:
+            values.extend(self._gate_flatten_text(block.body))
+            values.extend(block.annotations)
+            values.extend(block.callouts)
+        values.extend(self._gate_flatten_text(slide.exhibit_spec))
+        values.extend(self._gate_flatten_text(slide.chart_spec))
+        values.extend(self._gate_flatten_text(slide.diagram_spec))
+        return [str(value) for value in values if str(value).strip()]
+
+    def _gate_flatten_text(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            return [
+                item
+                for nested in value.values()
+                for item in self._gate_flatten_text(nested)
+            ]
+        if isinstance(value, list):
+            return [
+                item
+                for nested in value
+                for item in self._gate_flatten_text(nested)
+            ]
+        return [str(value)]
+
+    def _gate_has_source_fragment_artifact(self, lowered: str) -> bool:
+        return any(
+            marker in lowered
+            for marker in (
+                "rather than asking how do we",
+                "instead of looking at using models",
+                "turns existing",
+                "make closing remarks an explicit",
+                "or a human review",
+                "this white paper",
+                "a reframing of",
+                "development of evaluation",
+                "tie the claim to a source-backed evaluation artifact",
+                "name the review gate before expanding the benchmark",
+                "update the benchmark when source evidence changes",
+                "make the next move visible enough",
+                "adopt the operating model through a named pilot and review gate",
+                "confirm owner, scope, and timing",
+                "confirm ownership and timing",
+            )
+        ) or bool(
+            re.search(
+                r"\b(?:rather than|instead of|while this|by shifting|the key|"
+                r"this white paper|a reframing of)\b[^.?!]{0,120}$|"
+                r"\bconnect\b.{0,80}\bto an explicit review gate\b|"
+                r"\bmake\b.{0,80}\bvisible before execution starts\b",
+                lowered,
+            )
+        )
+
+    def _gate_safe_rewrite_archetype(self, slide: GeneratedSlideSpec) -> str:
+        text = self._slide_claim_text(slide).lower()
+        current = self._normalize_archetype(slide.archetype or "")
+        if "question" in text or "checklist" in text:
+            return "checklist"
+        if current in {"metric_chart", "chart"}:
+            return "callouts"
+        return "icon_rows" if slide.slide_number % 2 else "callouts"
 
     def _gate_repair_sources(
         self,
@@ -575,6 +722,12 @@ class SpecGateMixin:
             "shows measurable impact that should guide the decision",
         )
         if any(marker in lowered for marker in meta_markers):
+            return True
+        # Awkward framing openers that read as scaffolding, not an assertion
+        # ("Use the case for X to ...", "Use the X view ...").
+        if re.match(r"^use the (case|need|argument|notion|idea)\b", lowered):
+            return True
+        if re.match(r"^use the .{2,40}\bview\b", lowered):
             return True
         return not self._has_action_verb(cleaned)
 

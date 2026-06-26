@@ -14,8 +14,10 @@ from app.infra.sqlite_store import SQLiteStore
 from app.models.api import JobListResponse, JobStatusResponse
 from app.models.job import FREEFORM_TEMPLATE_ID, JobRecord
 from app.models.qa import QAIssue
+from app.services.design_languages import VALID_LANGUAGES
 from app.services.job_queue import JobQueue
 from app.services.orchestrator import JobOrchestrator
+from app.services.presentation_styles import VALID_STYLES
 
 router = APIRouter()
 
@@ -53,6 +55,8 @@ async def create_job(
     planner_profile: str = Form("fast"),
     quality_profile: str = Form("balanced"),
     length_strategy: str = Form("auto"),
+    presentation_style: str = Form("auto"),
+    design_language: str = Form("auto"),
     run_visual_qa: bool = Form(True),
     plan_only: bool = Form(False),
     instructions: str = Form(""),
@@ -75,6 +79,12 @@ async def create_job(
     length_strategy = _form_value(length_strategy, "auto").strip().lower() or "auto"
     if length_strategy not in {"auto", "concise", "expanded"}:
         raise HTTPException(status_code=422, detail="Invalid length strategy.")
+    presentation_style = _form_value(presentation_style, "auto").strip().lower() or "auto"
+    if presentation_style not in VALID_STYLES:
+        raise HTTPException(status_code=422, detail="Invalid presentation style.")
+    design_language = _form_value(design_language, "auto").strip().lower() or "auto"
+    if design_language not in VALID_LANGUAGES:
+        raise HTTPException(status_code=422, detail="Invalid design language.")
     plan_only_value = _form_bool(plan_only, False)
 
     template = None
@@ -100,6 +110,8 @@ async def create_job(
             "planner_profile": planner_profile,
             "quality_profile": quality_profile,
             "length_strategy": length_strategy,
+            "presentation_style": presentation_style,
+            "design_language": design_language,
             "run_visual_qa": _form_bool(run_visual_qa, True),
             "plan_only": plan_only_value,
         },
@@ -161,14 +173,35 @@ async def get_job_status(
             [image.name for image in preview_dir.glob("slide-*.jpg")]
         )
     qa_payload = _latest_qa_payload(storage, job_id)
+    qa_summary = _qa_summary(qa_payload)
+    audit_summary = _rendered_slide_audit_summary(storage, job_id)
+    planning_summary = _planning_summary(storage, job_id)
+    final_qa_passed = _final_qa_passed(qa_payload)
+    unresolved_editing_contract_count = _editing_contract_issue_count(planning_summary)
     return JobStatusResponse(
         job=job,
         warnings=job.warnings,
         preview_images=preview_images,
-        qa_summary=_qa_summary(qa_payload),
+        qa_summary=qa_summary,
         qa_issues=_qa_issues(qa_payload),
         qa_history=_qa_history(storage, job_id),
-        planning_summary=_planning_summary(storage, job_id),
+        planning_summary=planning_summary,
+        final_qa_passed=final_qa_passed,
+        final_review_passed=_final_review_passed(
+            job.status,
+            final_qa_passed,
+            unresolved_editing_contract_count,
+        ),
+        unresolved_critical_count=qa_summary["critical"],
+        unresolved_actionable_issue_count=_payload_int(
+            qa_payload, "actionable_issue_count"
+        ),
+        unresolved_editing_contract_count=unresolved_editing_contract_count,
+        rendered_slide_audit=audit_summary,
+        visual_review=_visual_review_summary(job, preview_images, audit_summary),
+        template_clone_edit=_template_clone_edit_summary(storage, job_id),
+        template_frame_map=_template_frame_map_summary(storage, job_id),
+        template_deviation_log=_template_deviation_log_summary(storage, job_id),
     )
 
 
@@ -259,7 +292,7 @@ async def get_planning_artifact(
     job = await store.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    if artifact_name not in {"source-compression", "story-map", "spec-gate"}:
+    if artifact_name not in {"source-compression", "story-map", "spec-gate", "editing-contract"}:
         raise HTTPException(status_code=404, detail="Planning artifact not found.")
     path = storage.planning_artifact_path(job_id, artifact_name)
     if not path.exists():
@@ -268,6 +301,24 @@ async def get_planning_artifact(
         return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
     except Exception:
         raise HTTPException(status_code=500, detail="Planning artifact could not be read.")
+
+
+@router.get("/jobs/{job_id}/qa/rendered-slide-audit")
+async def get_rendered_slide_audit(
+    job_id: str,
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+) -> JSONResponse:
+    job = await store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    path = _rendered_slide_audit_path(storage, job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Rendered slide audit not found.")
+    try:
+        return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Rendered slide audit could not be read.")
 
 
 def _latest_qa_payload(storage: LocalStorage, job_id: str) -> dict | None:
@@ -303,14 +354,425 @@ def _qa_history(storage: LocalStorage, job_id: str) -> list[dict]:
                 "round": round_number,
                 "passed": bool(payload.get("passed")) if isinstance(payload, dict) else False,
                 "summary": _qa_summary(payload if isinstance(payload, dict) else None),
+                "actionable_issue_count": _payload_int(
+                    payload, "actionable_issue_count"
+                ),
+                "repair_applied": bool(payload.get("repair_applied"))
+                if isinstance(payload, dict)
+                else False,
+                "stop_reason": payload.get("stop_reason")
+                if isinstance(payload, dict)
+                else None,
             }
         )
     return history
 
 
+def _payload_int(payload: dict | None, key: str) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return int(payload.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _payload_float(payload: dict | None, key: str) -> float:
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return round(float(payload.get(key, 0) or 0), 3)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _final_qa_passed(payload: dict | None) -> bool | None:
+    if not isinstance(payload, dict):
+        return None
+    return bool(payload.get("passed")) and _payload_int(payload, "actionable_issue_count") == 0
+
+
+def _final_review_passed(
+    job_status: str,
+    final_qa_passed: bool | None,
+    editing_issue_count: int,
+) -> bool | None:
+    if job_status not in {"done", "review_failed"}:
+        return None
+    if final_qa_passed is None:
+        return None
+    return bool(final_qa_passed) and editing_issue_count == 0 and job_status == "done"
+
+
+def _editing_contract_issue_count(planning_summary: dict | None) -> int:
+    if not isinstance(planning_summary, dict):
+        return 0
+    editing = planning_summary.get("editing_contract")
+    if not isinstance(editing, dict):
+        return 0
+    return _payload_int(editing, "warning_requirement_count") or _payload_int(
+        editing,
+        "issue_count",
+    )
+
+
+def _rendered_slide_audit_path(storage: LocalStorage, job_id: str) -> Path:
+    return storage.job_dir(job_id) / "qa" / "rendered-slide-audit.json"
+
+
+def _rendered_slide_audit_summary(storage: LocalStorage, job_id: str) -> dict:
+    path = _rendered_slide_audit_path(storage, job_id)
+    if not path.exists():
+        return {"available": False, "artifact": "rendered-slide-audit"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "artifact": "rendered-slide-audit", "error": "unreadable"}
+    visual_rhythm = payload.get("visual_rhythm") if isinstance(payload.get("visual_rhythm"), dict) else {}
+    slides = payload.get("slides") if isinstance(payload.get("slides"), list) else []
+    slide_count = len(slides) or _payload_int(visual_rhythm, "slide_count")
+    family_counts = visual_rhythm.get("family_counts")
+    most_repeated_family = None
+    if isinstance(family_counts, dict) and family_counts:
+        family, count = max(
+            family_counts.items(),
+            key=lambda item: _coerce_int(item[1]),
+        )
+        most_repeated_family = {
+            "family": str(family),
+            "count": _coerce_int(count),
+        }
+    return {
+        "available": True,
+        "artifact": "rendered-slide-audit",
+        "path": "qa/rendered-slide-audit",
+        "passed": bool(payload.get("passed")),
+        "issue_count": _payload_int(payload, "issue_count"),
+        "critical_count": _payload_int(payload, "critical_count"),
+        "warning_count": _payload_int(payload, "warning_count"),
+        "slide_count": slide_count,
+        "rhythm_slide_count": _payload_int(visual_rhythm, "slide_count"),
+        "unique_family_count": _payload_int(visual_rhythm, "unique_family_count"),
+        "card_like_ratio": _payload_float(visual_rhythm, "card_like_ratio"),
+        "most_repeated_family": most_repeated_family,
+        "top_issues": _audit_issue_samples(payload),
+    }
+
+
+def _audit_issue_samples(payload: dict) -> list[dict]:
+    issue_payloads = payload.get("issues")
+    samples: list[dict] = []
+    if isinstance(issue_payloads, list):
+        samples.extend(_normalize_audit_issues(issue_payloads))
+    if not samples:
+        slides = payload.get("slides")
+        if isinstance(slides, list):
+            for slide in slides:
+                if not isinstance(slide, dict):
+                    continue
+                slide_issues = slide.get("issues")
+                if isinstance(slide_issues, list):
+                    samples.extend(
+                        _normalize_audit_issues(
+                            slide_issues,
+                            slide.get("slide_index"),
+                        )
+                    )
+                if len(samples) >= 5:
+                    break
+    samples.sort(key=lambda item: 0 if item.get("severity") == "CRITICAL" else 1)
+    return samples[:5]
+
+
+def _normalize_audit_issues(
+    issues: list[object],
+    fallback_slide_index: object = None,
+) -> list[dict]:
+    normalized: list[dict] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        normalized.append(
+            {
+                "severity": str(issue.get("severity") or "WARNING"),
+                "category": str(issue.get("category") or "rendered_slide_audit"),
+                "message": str(issue.get("message") or "")[:280],
+                "slide_index": issue.get("slide_index", fallback_slide_index),
+            }
+        )
+    return normalized
+
+
+def _template_clone_edit_summary(storage: LocalStorage, job_id: str) -> dict:
+    path = storage.job_dir(job_id) / "template-clone-edit.json"
+    if not path.exists():
+        return {"available": False, "artifact": "template-clone-edit"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "artifact": "template-clone-edit", "error": "unreadable"}
+    mappings = payload.get("mappings") if isinstance(payload.get("mappings"), list) else []
+    cleanup = payload.get("package_cleanup") if isinstance(payload.get("package_cleanup"), dict) else {}
+    edit_target_count = 0
+    deleted_target_count = 0
+    rewritten_target_count = 0
+    rewritten_table_cell_count = 0
+    rewritten_chart_count = 0
+    rewritten_chart_point_count = 0
+    bolded_text_run_count = 0
+    deleted_table_row_count = 0
+    deleted_media_placeholder_count = 0
+    planned_excess_slot_count = 0
+    actual_deleted_slot_count = 0
+    unsatisfied_slot_cleanup_count = 0
+    blocked_mapping_count = 0
+    weak_mapping_count = 0
+    unfilled_placeholder_count = 0
+    closest_candidate_count = 0
+    closest_candidate_samples: list[dict[str, object]] = []
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        if mapping.get("clone_edit_blocked"):
+            blocked_mapping_count += 1
+        method = str(mapping.get("method") or "").strip().lower()
+        confidence = str(mapping.get("match_confidence") or "").strip().lower()
+        if method in {"cyclic_fallback", "low_confidence_match"} or confidence in {"fallback", "low"}:
+            weak_mapping_count += 1
+        unfilled_placeholder_count += _payload_int(mapping, "unfilled_placeholder_count")
+        closest_candidates = (
+            mapping.get("closest_candidates")
+            if isinstance(mapping.get("closest_candidates"), list)
+            else []
+        )
+        closest_candidate_count += len(closest_candidates)
+        if len(closest_candidate_samples) < 3:
+            for candidate in closest_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                closest_candidate_samples.append(
+                    {
+                        "output_slide": mapping.get("output_slide"),
+                        "source_slide": candidate.get("source_slide"),
+                        "label": candidate.get("label") or candidate.get("layout_name"),
+                        "match_score": candidate.get("match_score"),
+                        "match_reason": candidate.get("match_reason"),
+                    }
+                )
+                if len(closest_candidate_samples) >= 3:
+                    break
+        rewritten_table_cell_count += _payload_int(mapping, "rewritten_table_cell_count")
+        rewritten_chart_count += _payload_int(mapping, "rewritten_chart_count")
+        rewritten_chart_point_count += _payload_int(mapping, "rewritten_chart_point_count")
+        bolded_text_run_count += _payload_int(mapping, "bolded_text_run_count")
+        deleted_table_row_count += _payload_int(mapping, "deleted_table_row_count")
+        deleted_media_placeholder_count += _payload_int(mapping, "deleted_media_placeholder_count")
+        slot_cleanup = mapping.get("slot_cleanup")
+        if isinstance(slot_cleanup, dict):
+            planned_excess_slot_count += _payload_int(slot_cleanup, "planned_excess_slot_count")
+            actual_deleted_slot_count += _payload_int(slot_cleanup, "actual_deleted_slot_count")
+            if slot_cleanup.get("cleanup_required") and not slot_cleanup.get("cleanup_satisfied"):
+                unsatisfied_slot_cleanup_count += 1
+        targets = mapping.get("editTargets") if isinstance(mapping.get("editTargets"), list) else []
+        edit_target_count += len(targets)
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            action = target.get("action")
+            if action == "delete":
+                deleted_target_count += 1
+            if action == "rewrite":
+                rewritten_target_count += 1
+    return {
+        "available": True,
+        "artifact": "template-clone-edit",
+        "status": payload.get("status"),
+        "slide_count": _payload_int(payload, "slide_count"),
+        "mapping_count": len(mappings),
+        "blocked_mapping_count": blocked_mapping_count,
+        "weak_mapping_count": weak_mapping_count,
+        "unfilled_placeholder_count": unfilled_placeholder_count,
+        "closest_candidate_count": closest_candidate_count,
+        "closest_candidate_samples": closest_candidate_samples,
+        "edit_target_count": edit_target_count,
+        "rewritten_target_count": rewritten_target_count,
+        "deleted_target_count": deleted_target_count,
+        "rewritten_table_cell_count": rewritten_table_cell_count,
+        "rewritten_chart_count": rewritten_chart_count,
+        "rewritten_chart_point_count": rewritten_chart_point_count,
+        "bolded_text_run_count": bolded_text_run_count,
+        "deleted_table_row_count": deleted_table_row_count,
+        "deleted_media_placeholder_count": deleted_media_placeholder_count,
+        "planned_excess_slot_count": planned_excess_slot_count,
+        "actual_deleted_slot_count": actual_deleted_slot_count,
+        "unsatisfied_slot_cleanup_count": unsatisfied_slot_cleanup_count,
+        "package_cleanup_deleted_part_count": _payload_int(cleanup, "deleted_part_count"),
+        "package_cleanup_deleted_media_part_count": _payload_int(
+            cleanup,
+            "deleted_unreferenced_media_part_count",
+        ),
+        "package_cleanup_removed_override_count": _payload_int(
+            cleanup,
+            "removed_content_type_override_count",
+        ),
+        "warning_count": len(payload.get("warnings") or []),
+    }
+
+
+def _template_deviation_log_summary(storage: LocalStorage, job_id: str) -> dict:
+    path = storage.job_dir(job_id) / "template-deviation-log.json"
+    if not path.exists():
+        return {"available": False, "artifact": "template-deviation-log"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "available": False,
+            "artifact": "template-deviation-log",
+            "error": "unreadable",
+        }
+    deviations = (
+        payload.get("deviations")
+        if isinstance(payload.get("deviations"), list)
+        else []
+    )
+    samples: list[dict[str, object]] = []
+    for deviation in deviations:
+        if not isinstance(deviation, dict):
+            continue
+        samples.append(
+            {
+                "type": deviation.get("type"),
+                "severity": deviation.get("severity"),
+                "output_slide": deviation.get("output_slide"),
+                "source_slide": deviation.get("source_slide"),
+                "reason": str(deviation.get("reason") or "")[:240],
+            }
+        )
+        if len(samples) >= 3:
+            break
+    return {
+        "available": True,
+        "artifact": "template-deviation-log",
+        "status": payload.get("status"),
+        "deviation_count": _payload_int(payload, "deviation_count"),
+        "samples": samples,
+    }
+
+
+def _template_frame_map_summary(storage: LocalStorage, job_id: str) -> dict:
+    path = storage.job_dir(job_id) / "template-frame-map.json"
+    if not path.exists():
+        return {"available": False, "artifact": "template-frame-map"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "available": False,
+            "artifact": "template-frame-map",
+            "error": "unreadable",
+        }
+    output_slides = (
+        payload.get("outputSlides")
+        if isinstance(payload.get("outputSlides"), list)
+        else []
+    )
+    omitted = (
+        payload.get("omittedSourceSlides")
+        if isinstance(payload.get("omittedSourceSlides"), list)
+        else []
+    )
+    blocked = [
+        slide
+        for slide in output_slides
+        if isinstance(slide, dict) and slide.get("reuseMode") == "blocked"
+    ]
+    samples: list[dict[str, object]] = []
+    for slide in output_slides[:3]:
+        if not isinstance(slide, dict):
+            continue
+        samples.append(
+            {
+                "output_slide": slide.get("outputSlide"),
+                "source_slide": slide.get("sourceSlide"),
+                "reuse_mode": slide.get("reuseMode"),
+                "match_confidence": slide.get("matchConfidence"),
+                "match_score": slide.get("matchScore"),
+            }
+        )
+    return {
+        "available": True,
+        "artifact": "template-frame-map",
+        "status": payload.get("status"),
+        "output_slide_count": len(output_slides),
+        "source_slide_count": _payload_int(payload, "sourceSlideCount"),
+        "omitted_source_slide_count": len(omitted),
+        "blocked_output_slide_count": len(blocked),
+        "samples": samples,
+    }
+
+
+def _visual_review_summary(
+    job,
+    preview_images: list[str],
+    audit_summary: dict,
+) -> dict:
+    preview_count = len(preview_images)
+    audit_available = bool(audit_summary.get("available"))
+    audit_slide_count = int(audit_summary.get("slide_count") or 0)
+    expected_slide_count = max(audit_slide_count, preview_count)
+    preview_coverage = bool(
+        expected_slide_count and preview_count == expected_slide_count
+    )
+    audit_preview_match = (
+        not audit_available
+        or audit_slide_count <= 0
+        or audit_slide_count == preview_count
+    )
+    audit_passed = audit_summary.get("passed") if audit_available else None
+    rendered_terminal = job.status in {"done", "review_failed"}
+    if rendered_terminal:
+        status = (
+            "pass"
+            if preview_coverage
+            and audit_available
+            and audit_passed is True
+            and audit_preview_match
+            else "warning"
+        )
+    else:
+        status = "pending"
+    if status == "pass":
+        message = "Full-resolution previews and rendered-slide audit are complete."
+    elif status == "warning":
+        message = "Full-resolution preview coverage or rendered-slide audit needs review."
+    else:
+        message = "Full-resolution visual review runs after rendering."
+    return {
+        "status": status,
+        "preview_count": preview_count,
+        "expected_slide_count": expected_slide_count,
+        "preview_coverage": preview_coverage,
+        "audit_available": audit_available,
+        "audit_slide_count": audit_slide_count,
+        "audit_preview_match": audit_preview_match,
+        "audit_passed": audit_passed,
+        "audit_issue_count": int(audit_summary.get("issue_count") or 0),
+        "audit_critical_count": int(audit_summary.get("critical_count") or 0),
+        "message": message,
+    }
+
+
 def _planning_summary(storage: LocalStorage, job_id: str) -> dict:
     planning_dir = storage.job_dir(job_id) / "planning"
-    artifact_names = ["source-compression", "story-map", "spec-gate"]
+    artifact_names = ["source-compression", "story-map", "spec-gate", "editing-contract"]
     artifacts = [
         name
         for name in artifact_names
@@ -324,6 +786,7 @@ def _planning_summary(storage: LocalStorage, job_id: str) -> dict:
     source = _read_planning_artifact(storage, job_id, "source-compression") or {}
     story = _read_planning_artifact(storage, job_id, "story-map") or {}
     gate = _read_planning_artifact(storage, job_id, "spec-gate") or {}
+    editing = _read_planning_artifact(storage, job_id, "editing-contract") or {}
     return {
         "available": True,
         "artifacts": artifacts,
@@ -341,7 +804,81 @@ def _planning_summary(storage: LocalStorage, job_id: str) -> dict:
             "repaired_count": gate.get("repaired_count", 0),
             "unresolved_count": gate.get("unresolved_count", 0),
         },
+        "editing_contract": {
+            "standard": editing.get("standard"),
+            "source": editing.get("source"),
+            "status": editing.get("status"),
+            "phase": editing.get("phase"),
+            "issue_count": editing.get("issue_count", 0),
+            "requirement_count": len(
+                editing.get("requirements")
+                if isinstance(editing.get("requirements"), list)
+                else []
+            ),
+            "passed_requirement_count": _requirement_status_count(editing, "pass"),
+            "warning_requirement_count": _requirement_status_count(editing, "warning"),
+            "slide_count": editing.get("slide_count", 0),
+            "unique_layout_count": editing.get("unique_layout_count", 0),
+            "unique_composition_family_count": editing.get(
+                "unique_composition_family_count",
+                0,
+            ),
+            "bullet_card_ratio": editing.get("bullet_card_ratio", 0),
+            "composition_card_ratio": editing.get("composition_card_ratio", 0),
+            "diagram_count": editing.get("diagram_count", 0),
+            "template_mapped_count": editing.get("template_mapped_count", 0),
+            "slot_risk_count": editing.get("slot_risk_count", 0),
+            "structural_operation_count": editing.get("structural_operation_count", 0),
+            "structural_warning_count": editing.get("structural_warning_count", 0),
+            "formatting_fix_count": editing.get("formatting_fix_count", 0),
+            "formatting_warning_count": editing.get("formatting_warning_count", 0),
+            "requirements": _editing_requirement_summary(editing),
+            "warnings": _string_list(editing.get("warnings"), limit=6),
+        },
     }
+
+
+def _requirement_status_count(payload: dict, status: str) -> int:
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        return 0
+    return sum(
+        1
+        for item in requirements
+        if isinstance(item, dict) and item.get("status") == status
+    )
+
+
+def _editing_requirement_summary(payload: dict) -> list[dict]:
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        return []
+    summary: list[dict] = []
+    for item in requirements:
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or item.get("id") or "Requirement"),
+                "status": str(item.get("status") or "unknown"),
+                "message": str(item.get("message") or "")[:280],
+            }
+        )
+    return summary
+
+
+def _string_list(value: object, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text[:240])
+        if len(items) >= limit:
+            break
+    return items
 
 
 def _read_planning_artifact(
@@ -384,6 +921,7 @@ def _outline_payload(outline) -> dict:
     content = outline.content_json or {}
     layout = outline.layout_json or {}
     exhibit = content.get("exhibit_spec")
+    template_frame = _safe_template_frame(layout.get("template_frame") or content.get("template_frame"))
     issues = []
     if isinstance(outline.qa_issues_json, dict):
         raw_issues = outline.qa_issues_json.get("issues", [])
@@ -398,6 +936,13 @@ def _outline_payload(outline) -> dict:
         "narrative_role": content.get("narrative_role") or layout.get("narrative_role"),
         "layout": layout.get("layout"),
         "archetype": content.get("archetype") or layout.get("archetype"),
+        "composition_family": layout.get("composition_family")
+        or content.get("composition_family"),
+        "composition_signature": layout.get("composition_signature")
+        or content.get("composition_signature"),
+        "template_frame": template_frame,
+        "visual_intent": content.get("visual_intent") or {},
+        "visual_degradation": content.get("visual_degradation") or {},
         "exhibit_type": exhibit.get("type") if isinstance(exhibit, dict) else None,
         "sources": content.get("sources") or [],
         "source_refs": content.get("source_refs") or [],
@@ -405,6 +950,36 @@ def _outline_payload(outline) -> dict:
         "qa_status": outline.qa_status,
         "qa_issues": issues,
     }
+
+
+def _safe_template_frame(frame) -> dict | None:
+    if not isinstance(frame, dict):
+        return None
+    allowed = {
+        "index",
+        "source_slide",
+        "label",
+        "layout_name",
+        "mode",
+        "method",
+        "match_score",
+        "match_confidence",
+        "match_reason",
+        "intent",
+        "content_category",
+        "visual_guidance",
+        "schema_field_count",
+        "item_slot_count",
+        "reuse_mode",
+        "chrome_shape_count",
+        "chrome_applied",
+        "clone_edit_applied",
+        "edit_target_count",
+        "rewritten_text_shape_count",
+        "rewritten_table_cell_count",
+        "closest_candidates",
+    }
+    return {key: value for key, value in frame.items() if key in allowed}
 
 
 @router.get("/jobs/{job_id}/preview")

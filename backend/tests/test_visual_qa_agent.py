@@ -1,13 +1,15 @@
 from app.services.visual_qa_agent import VisualQAAgent
 from app.models.outline import SlideOutline
+from app.services.rendered_slide_audit import RenderedSlideAudit
 from app.services.rendering import RenderingError
 
 import zipfile
 from io import BytesIO
 
 from PIL import Image
+from pptx.dml.color import RGBColor
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Inches, Pt
 
 
 def test_extract_json_from_fenced_block() -> None:
@@ -63,6 +65,201 @@ def test_rule_checks_ignore_stale_source_placeholder_when_refs_are_valid() -> No
     assert "source_placeholder" not in {issue.category for issue in issues}
 
 
+def test_pptx_structure_checks_flag_empty_inherited_placeholders(tmp_path) -> None:
+    pptx_path = tmp_path / "empty-placeholder.pptx"
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[1])
+    prs.save(pptx_path.as_posix())
+
+    issues = VisualQAAgent()._pptx_structure_checks(pptx_path, [])
+
+    assert "unfilled_placeholder" in {issue.category for issue in issues}
+    assert any("fill or delete" in issue.message for issue in issues)
+
+
+def test_rendered_slide_audit_flags_bad_copy_and_generic_diagram(tmp_path) -> None:
+    pptx_path = tmp_path / "output.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(8), Inches(1))
+    box.text = "Convert the framework consists of five layers into an owned action."
+    placeholder = slide.shapes.add_textbox(Inches(0.5), Inches(1.6), Inches(8), Inches(1))
+    placeholder.text = "The proliferation of AI models has outpaced the development of (Owner / Next)"
+    raw = slide.shapes.add_textbox(Inches(0.5), Inches(2.7), Inches(8), Inches(1))
+    raw.text = "Artifact | Purpose | Update trigger"
+    filler = slide.shapes.add_textbox(Inches(0.5), Inches(3.8), Inches(8), Inches(1))
+    filler.text = "Review evidence for what goes in? When conditions change. When conditions change. When conditions change."
+    dangling = slide.shapes.add_textbox(Inches(0.5), Inches(4.9), Inches(8), Inches(1))
+    dangling.text = "The proliferation of AI models has outpaced the development of"
+    meta = slide.shapes.add_textbox(Inches(0.5), Inches(5.8), Inches(3), Inches(0.4))
+    meta.text = "Cover Slide"
+    generic = slide.shapes.add_textbox(Inches(3.8), Inches(5.8), Inches(5), Inches(0.4))
+    generic.text = "Current readout. Source claim. Operating implication."
+    bullet = slide.shapes.add_textbox(Inches(0.5), Inches(6.25), Inches(5), Inches(0.4))
+    bullet.text = "\u2022 A unicode bullet slipped into rendered text"
+    renderer_filler = slide.shapes.add_textbox(Inches(5.6), Inches(6.25), Inches(5), Inches(0.4))
+    renderer_filler.text = "Tie the claim to a source-backed evaluation artifact."
+    soft_renderer_filler = slide.shapes.add_textbox(Inches(5.6), Inches(6.65), Inches(5), Inches(0.4))
+    soft_renderer_filler.text = "Connect the source evidence to the decision before scaling."
+    prs.save(pptx_path.as_posix())
+    diagram_dir = tmp_path / "output-diagrams"
+    diagram_dir.mkdir()
+    (diagram_dir / "01-framework_cycle.svg").write_text(
+        """
+        <svg xmlns="http://www.w3.org/2000/svg">
+          <text>Frame</text><text>Ground</text><text>Build</text><text>Review</text>
+        </svg>
+        """,
+        encoding="utf-8",
+    )
+
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    categories = {issue.category for issue in issues}
+    severities = {issue.category: issue.severity for issue in issues}
+    assert payload["passed"] is False
+    assert payload["issues"]
+    assert "content_quality" in categories
+    assert "placeholder_text" in categories
+    assert "raw_artifact" in categories
+    assert "meta_copy" in categories
+    assert "generic_comparison_copy" in categories
+    assert "diagram_semantic_fit" in categories
+    assert "repeated_placeholder" in categories
+    assert "unicode_bullets" in categories
+    assert "renderer_filler_copy" in categories
+    assert severities["raw_artifact"] == "CRITICAL"
+    assert severities["incomplete_content"] == "CRITICAL"
+    assert (tmp_path / "qa" / "rendered-slide-audit.json").exists()
+
+
+def test_rendered_slide_audit_flags_wrapped_renderer_filler(tmp_path) -> None:
+    pptx_path = tmp_path / "wrapped-filler.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    lead = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(4), Inches(0.4))
+    lead.text = "Tie the claim"
+    detail = slide.shapes.add_textbox(Inches(0.5), Inches(1.0), Inches(5), Inches(0.4))
+    detail.text = "source-backed evaluation artifact."
+    prs.save(pptx_path.as_posix())
+
+    _payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    assert any(
+        issue.category == "renderer_filler_copy" and issue.severity == "CRITICAL"
+        for issue in issues
+    )
+
+
+def test_rendered_slide_audit_flags_dangling_adjective_endings(tmp_path) -> None:
+    pptx_path = tmp_path / "dangling-adjective.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    bad = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(5), Inches(0.4))
+    bad.text = "Bootstrapped benchmarks carry varying"
+    source_slice = slide.shapes.add_textbox(Inches(0.5), Inches(1.1), Inches(7), Inches(0.4))
+    source_slice.text = "The proliferation of AI models has outpaced the development of evaluation"
+    prs.save(pptx_path.as_posix())
+
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    assert payload["passed"] is False
+    assert any(
+        issue.category == "incomplete_content" and issue.severity == "CRITICAL"
+        for issue in issues
+    )
+
+
+def test_rendered_slide_audit_flags_modal_heading_fragments(tmp_path) -> None:
+    pptx_path = tmp_path / "modal-heading-fragment.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    bad = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(5), Inches(0.4))
+    bad.text = "Synthetic benchmarks can"
+    prs.save(pptx_path.as_posix())
+
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    assert payload["passed"] is False
+    assert any(
+        issue.category == "incomplete_content" and issue.severity == "CRITICAL"
+        for issue in issues
+    )
+
+
+def test_rendered_slide_audit_flags_nonsensical_title_fragments(tmp_path) -> None:
+    pptx_path = tmp_path / "nonsense-fragments.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    bad = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(5), Inches(0.4))
+    bad.text = "Synthetic benchmarks cannot is"
+    meta_one = slide.shapes.add_textbox(Inches(0.5), Inches(1.1), Inches(4), Inches(0.4))
+    meta_one.text = "Executive Summary"
+    meta_two = slide.shapes.add_textbox(Inches(0.5), Inches(1.7), Inches(4), Inches(0.4))
+    meta_two.text = "Executive Summary"
+    prs.save(pptx_path.as_posix())
+
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    categories = {issue.category for issue in issues}
+    assert payload["passed"] is False
+    assert "nonsensical_copy" in categories
+    assert "meta_copy" in categories
+
+
+def test_rendered_slide_audit_flags_layout_overflow_and_overlap(tmp_path) -> None:
+    pptx_path = tmp_path / "layout-risk.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    tight = slide.shapes.add_textbox(Inches(0.7), Inches(0.7), Inches(1.1), Inches(0.28))
+    tight.text = (
+        "This text is intentionally too long for a tiny text box and should "
+        "be treated as a cut-off risk."
+    )
+    left = slide.shapes.add_textbox(Inches(2.0), Inches(1.5), Inches(3.0), Inches(1.0))
+    left.text = "First visible text region"
+    right = slide.shapes.add_textbox(Inches(2.4), Inches(1.65), Inches(3.0), Inches(1.0))
+    right.text = "Second visible text region"
+    title = slide.shapes.add_textbox(Inches(0.7), Inches(3.1), Inches(3.5), Inches(0.7))
+    title.text = "This title is partially covered by the following card"
+    blocker = slide.shapes.add_shape(1, Inches(3.25), Inches(3.1), Inches(2.2), Inches(0.9))
+    blocker.fill.solid()
+    blocker.fill.fore_color.rgb = RGBColor(60, 80, 96)
+    prs.save(pptx_path.as_posix())
+
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    categories = {issue.category for issue in issues}
+    assert "cut-off-text" in categories
+    assert "overlap" in categories
+    assert "occluded_text" in categories
+    diagnostics = payload["slides"][0]["layout_diagnostics"]
+    assert diagnostics["overflow_risk_count"] == 1
+    assert diagnostics["overlap_pair_count"] >= 1
+    assert diagnostics["occlusion_pair_count"] >= 1
+
+
+def test_rendered_slide_audit_flags_small_body_text(tmp_path) -> None:
+    pptx_path = tmp_path / "small-text-risk.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = slide.shapes.add_textbox(Inches(1.0), Inches(1.0), Inches(5.0), Inches(0.5))
+    frame = box.text_frame
+    frame.clear()
+    run = frame.paragraphs[0].add_run()
+    run.text = "This support statement is intentionally too small to read comfortably."
+    run.font.size = Pt(8)
+    prs.save(pptx_path.as_posix())
+
+    payload, issues = RenderedSlideAudit().inspect(pptx_path, [], tmp_path / "qa")
+
+    categories = {issue.category for issue in issues}
+    assert "small_text" in categories
+    diagnostics = payload["slides"][0]["layout_diagnostics"]
+    assert diagnostics["small_text_risk_count"] == 1
+    assert diagnostics["small_text_risks"][0]["font_size"] == 8.0
+
+
 class DummyVisionClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -82,6 +279,32 @@ def test_openai_vision_client_is_used_for_image_inspection(tmp_path) -> None:
 
     assert client.calls == 1
     assert "Looks clean" in report
+
+
+def test_vision_qa_is_bounded_for_large_decks(tmp_path, monkeypatch) -> None:
+    images = []
+    for index in range(10):
+        image_path = tmp_path / f"slide-{index + 1}.jpg"
+        image_path.write_bytes(b"fake-image")
+        images.append(image_path)
+    pptx_path = tmp_path / "deck.pptx"
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.save(pptx_path.as_posix())
+    monkeypatch.setattr(
+        "app.services.visual_qa_agent.render_pptx_to_images",
+        lambda *args, **kwargs: images,
+    )
+    client = DummyVisionClient()
+
+    result, rendered = VisualQAAgent(
+        openai_client=client,
+        vision_max_slides=4,
+    ).inspect_deck(pptx_path, tmp_path / "preview", [])
+
+    assert rendered == images
+    assert client.calls == 4
+    assert any(issue.category == "vision_sampling" for issue in result.issues)
 
 
 class CapturingVisionClient:
@@ -135,7 +358,7 @@ def test_vision_failure_warns_without_crashing(tmp_path, monkeypatch) -> None:
     assert any(issue.category == "vision_unavailable" for issue in result.issues)
 
 
-def test_render_unavailable_warns_without_blocking(tmp_path) -> None:
+def test_render_unavailable_blocks_final_qa(tmp_path) -> None:
     outline = SlideOutline(
         id="outline-1",
         job_id="job-1",
@@ -186,7 +409,7 @@ def test_render_unavailable_uses_pptx_preview_fallback(tmp_path, monkeypatch) ->
 
     assert images
     assert images[0].exists()
-    assert result.passed is True
+    assert result.passed is False
     assert {issue.category for issue in result.issues} >= {
         "render_unavailable",
         "render_fallback",
@@ -220,8 +443,8 @@ def test_fallback_preview_vision_criticals_are_non_blocking(tmp_path, monkeypatc
     )
 
     assert images
-    assert result.passed is True
-    assert not any(issue.severity == "CRITICAL" for issue in result.issues)
+    assert result.passed is False
+    assert any(issue.severity == "CRITICAL" and issue.category == "render_unavailable" for issue in result.issues)
     assert any(issue.category == "cut-off-text" for issue in result.issues)
     assert any(
         issue.message.startswith("Approximate preview finding:")
