@@ -432,35 +432,25 @@ class ExhibitCompiler:
         ][index % 4]
 
     def _matrix_from_bullets(self, bullets: list[str]) -> dict[str, Any]:
-        items = self._ensure_items(bullets, 4)
-        labels = [self._short_label(item) for item in items[:4]]
+        items = self._ensure_items(bullets, 4)[:4]
         return {
             "type": "matrix_2x2",
             "x_axis": "Operational clarity",
             "y_axis": "Evidence strength",
             "quadrants": [
                 {
-                    "label": labels[index],
-                    "description": self._complete_fragment(self._truncate(items[index], 78)),
+                    "label": self._short_label(item),
+                    "description": self._complete_fragment(self._truncate(item, 78)),
                 }
-                for index in range(4)
+                for item in items
             ],
         }
 
     def _ensure_items(self, items: list[str], count: int) -> list[str]:
-        cleaned = [self._clean_source_item(item) for item in items if self._clean_source_item(item)]
-        while len(cleaned) < count:
-            subject = cleaned[0] if cleaned else "Source claim"
-            subject = self._short_label(subject)
-            cleaned.append(
-                [
-                    f"{subject} evidence to inspect.",
-                    f"{subject} condition to validate.",
-                    f"{subject} implication to resolve.",
-                    f"{subject} change to track.",
-                ][len(cleaned) % 4]
-            )
-        return cleaned[: max(count, len(cleaned))]
+        # Return the real source items only — no canned "evidence to inspect" filler.
+        # A sparse exhibit renders with the items it genuinely has (the planner's
+        # drop/merge handles too-thin slides; downstream filters any empties).
+        return [self._clean_source_item(item) for item in items if self._clean_source_item(item)]
 
     def _clean_source_item(self, text: str) -> str:
         cleaned = re.sub(

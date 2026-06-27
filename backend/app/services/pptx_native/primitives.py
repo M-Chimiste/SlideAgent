@@ -257,16 +257,30 @@ def callout_list(slide, content, theme, pal, body):
             ], anchor=MSO_ANCHOR.MIDDLE)
 
 
+def _metric_value_display(value: str) -> str:
+    """Compact a large bare integer for the metric tile (200000 -> 200K, 3500000 ->
+    3.5M). Leaves values with units/decimals/percent untouched."""
+    raw = str(value or "").strip()
+    if not raw.isdigit():
+        return raw
+    n = int(raw)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if n >= 10_000:
+        return f"{round(n / 1000)}K"
+    return raw
+
+
 def metrics(slide, content, theme, pal, body):
     data = []
     for m in content.get("metrics") or []:
         if isinstance(m, dict):
-            data.append((str(m.get("value", "")), str(m.get("label") or m.get("name") or ""), str(m.get("description") or "")))
+            data.append((_metric_value_display(m.get("value", "")), str(m.get("label") or m.get("name") or ""), str(m.get("description") or "")))
     if not data:
         chart = content.get("chart_spec") or {}
         for p in chart.get("data_points") or []:
             if isinstance(p, dict):
-                data.append((str(p.get("value", "")), str(p.get("label", "")), ""))
+                data.append((_metric_value_display(p.get("value", "")), str(p.get("label", "")), ""))
     if not data:
         return cards(slide, content, theme, pal, body)
     data = data[:4]

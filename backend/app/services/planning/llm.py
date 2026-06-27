@@ -78,6 +78,7 @@ class LLMPlanningMixin:
             "Every non-cover slide should have exactly one primary exhibit_spec. "
             "Rewrite source headings and subtitles into grammatical action titles; do not concatenate them. "
             "Comparison exhibits need clear columns and row labels. "
+            "For list exhibits, fill exhibit_spec.points as objects {title, body}: title an optional 2-5 word bold lead, body ONE complete sentence (not a fragment). "
             "Dependency, cycle, checklist, code, anti-pattern, and quote exhibits need structured arrays, not prose blobs. "
             "Every content point must be a complete thought grounded in the source — no sentence fragments, trailing clauses, placeholder text, or generic filler; "
             "a slide with one finished idea beats a slide padded with thin bullets. "
@@ -329,6 +330,7 @@ class LLMPlanningMixin:
             "and must not repeat any prior slide title. "
             "Every non-cover slide needs exactly one primary exhibit_spec matching the beat's preferred_exhibit. "
             "Comparison exhibits need clear columns and row labels; checklist, cycle, and dependency exhibits need structured arrays, not prose. "
+            "For list exhibits (callouts, icon_rows, two_column, checklist) fill exhibit_spec.points as objects {title, body}: title is an optional 2-5 word bold lead, body is ONE complete sentence of evidence (not a fragment). "
             "Honor each beat's authoring_contract: produce at least its min_points substantive content points (never fewer) and at most max_points; "
             "keep each bold lead within lead_chars characters and each supporting line within body_chars characters. "
             "Write complete thoughts grounded in the beat's evidence — no sentence fragments, trailing clauses, placeholder text, or generic filler. "
@@ -343,7 +345,9 @@ class LLMPlanningMixin:
             f"Source sections: {json.dumps(section_context, ensure_ascii=True)}"
         )
         system_prompt = build_planner_system_prompt(quality_profile, self._presentation_style)
-        max_tokens = min(9000, 1800 + count * 1200)
+        # Headroom so a batch of dense {title, body} slides rarely truncates mid-JSON
+        # on a local model (truncation was the root of mid-sentence body fragments).
+        max_tokens = min(16000, 3000 + count * 1800)
         try:
             payload = self.llm_client.complete_json(
                 system_prompt=system_prompt,
@@ -450,11 +454,12 @@ class LLMPlanningMixin:
             '{"slide_number":1,"slide_type":"cover|executive_summary|content|chart|comparison|process|framework|reference|checklist|anti_pattern|quote|decision|closing",'
             '"action_title":"complete sentence with a verb, 15 words or fewer",'
             '"subheading":"evidence context",'
-            '"content_blocks":[{"type":"bullets|chart|table|callout|text","body":["short evidence point"],"annotations":[],"callouts":[]}],'
+            '"content_blocks":[{"type":"bullets|chart|table|callout|text","body":["one complete evidence sentence"],"annotations":[],"callouts":[]}],'
             '"chart_spec":null,"sources":["Uploaded source"],'
             '"archetype":"cover|section_divider|comparison_table|dependency_map|cycle|code_panel|checklist|quote_sidebar|anti_patterns|metric_chart|executive_summary|table_reference|matrix_2x2|callouts|icon_rows|two_column|closing_recommendation",'
             '"narrative_role":"cover|executive_summary|problem|evidence|framework|implementation|reference|decision|closing",'
-            '"exhibit_spec":{"type":"comparison_table|dependency_map|cycle|checklist|code_panel|anti_patterns|quote_sidebar|metric_chart|reference_table|matrix_2x2|callouts|icon_rows|two_column|recommendation"},'
+            '"exhibit_spec":{"type":"comparison_table|dependency_map|cycle|checklist|code_panel|anti_patterns|quote_sidebar|metric_chart|reference_table|matrix_2x2|callouts|icon_rows|two_column|recommendation",'
+            '"points":[{"title":"2-5 word bold lead","body":"one complete supporting sentence"}]},'
             '"diagram_spec":null,"design_intent":"short renderer guidance",'
             '"source_refs":["a source id or [source needed]"],'
             '"speaker_notes":"short presenter note","qa":{"consulting_status":"pending","visual_status":"pending","issues":[]}}'
@@ -496,7 +501,9 @@ class LLMPlanningMixin:
         return bool(model)
 
     def _should_skip_schema_repair_retry(self) -> bool:
-        return self._uses_small_model_harness()
+        # Small local models DO get one schema-repair retry now — a truncated/invalid
+        # first response is re-prompted rather than dropped to the deterministic deck.
+        return False
 
     def _uses_small_model_harness(self) -> bool:
         model = str(getattr(self.llm_client, "model", "") or "").lower()
@@ -836,21 +843,28 @@ class LLMPlanningMixin:
         }
 
     def _source_excerpt(self, content: str, char_limit: int) -> str:
+        """Excerpt whole sentences up to ``char_limit`` — never start or end on a
+        mid-sentence fragment. If the first sentence alone exceeds the budget, keep
+        it whole (a complete long sentence beats a truncated one for LLM context)."""
         cleaned = " ".join(str(content).split())
         if len(cleaned) <= char_limit:
             return cleaned
-        excerpt = cleaned[:char_limit].rsplit(" ", 1)[0].rstrip(" ,;:")
-        sentence_end = max(excerpt.rfind("."), excerpt.rfind("!"), excerpt.rfind("?"))
-        if sentence_end >= max(240, int(char_limit * 0.55)):
-            excerpt = excerpt[: sentence_end + 1]
-        return self._repair_dangling_fragment(excerpt)
+        out = ""
+        for sentence in self._split_sentences(cleaned):
+            if out and len(out) + 1 + len(sentence) > char_limit:
+                break
+            out = f"{out} {sentence}".strip()
+        if not out:
+            sentences = self._split_sentences(cleaned)
+            out = sentences[0] if sentences else cleaned
+        return out
 
     def _source_key_points(self, content: str) -> list[str]:
         points: list[str] = []
         for item in self._to_bullets(content):
-            phrase = self._phrase(item, "", limit=135)
+            phrase = self._repair_dangling_fragment(" ".join(str(item).split()))
             if phrase and phrase not in points:
                 points.append(phrase)
-            if len(points) >= 4:
+            if len(points) >= 6:
                 break
         return points

@@ -858,13 +858,44 @@ class SourceGroundingMixin:
         cleaned = " ".join(text.split())
         if len(cleaned) <= limit:
             return cleaned
+        # Prefer trimming to the last COMPLETE sentence that fits — keep finished
+        # thoughts rather than hard-cutting mid-sentence. Only fall back to a
+        # word-boundary ellipsis when even the first sentence overflows the box.
+        out = ""
+        for sentence in self._split_sentences(cleaned):
+            candidate = f"{out} {sentence}".strip()
+            if len(candidate) > limit:
+                break
+            out = candidate
+        if out:
+            return out
         truncated = cleaned[: limit - 3].rsplit(" ", 1)[0].rstrip(".,;:")
         return f"{truncated}..."
 
+    def _split_sentences(self, content: str) -> list[str]:
+        """Split text into complete sentences (terminator-aware). Used so source
+        extraction yields whole thoughts instead of line- or char-chopped fragments."""
+        text = " ".join(str(content or "").split())
+        if not text:
+            return []
+        parts = re.split(r"(?<=[.!?])\s+", text)
+        return [p.strip() for p in parts if p.strip()]
+
     def _to_bullets(self, content: str) -> list[str]:
-        lines = [line.strip("-• ") for line in content.splitlines() if line.strip()]
-        bullets = [line for line in lines if len(line.split()) >= 3]
-        return bullets[:4] if bullets else lines[:4]
+        """Extract up to 6 complete-thought bullets. Short lines are treated as an
+        existing bullet list; long prose lines are broken into whole sentences
+        (never one truncated paragraph), so evidence reads as finished thoughts."""
+        out: list[str] = []
+        for line in str(content or "").splitlines():
+            line = line.strip("-•* \t")
+            if not line:
+                continue
+            if len(line.split()) > 18:
+                out.extend(self._split_sentences(line))
+            else:
+                out.append(line)
+        bullets = [b for b in out if len(b.split()) >= 3]
+        return bullets[:6] if bullets else out[:6]
 
     def _pick_metrics(
         self,

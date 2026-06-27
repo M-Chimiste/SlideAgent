@@ -27,10 +27,19 @@ def test_short_truncates_at_word_boundary_without_dangling():
     assert out == "ProductContext.md Captures user problem, experience goals"
 
 
-def test_lead_body_splits_subject_phrase():
+def test_lead_body_keeps_plain_sentence_whole_no_verb_split():
+    # No explicit delimiter -> we no longer GUESS a lead by verb-splitting prose
+    # (that produced "Memory Bank" / "Is a folder..."). Keep the sentence whole.
     title, body = _lead_body("Synthetic benchmarks can create circular validation loops without grounding.")
-    assert title == "Synthetic benchmarks"
-    assert body.startswith("Can create")
+    assert title == ""
+    assert body == "Synthetic benchmarks can create circular validation loops without grounding."
+
+
+def test_lead_body_splits_on_explicit_delimiter():
+    # An explicit "Term: definition" still splits into a clean lead + body.
+    title, body = _lead_body("Memory Bank: a persistent external brain for AI agents")
+    assert title == "Memory Bank"
+    assert body == "A persistent external brain for AI agents"
 
 
 def test_lead_body_idiomatic_verb_keeps_whole_sentence():
@@ -58,11 +67,21 @@ def test_fit_trims_to_first_sentence_when_long():
     assert _fit("Short body.", 40) == "Short body."
 
 
-def test_normalize_items_from_callouts():
+def test_normalize_items_keeps_plain_string_points_whole():
+    # Plain-string points are kept whole as the body (no verb-split lead); the LLM
+    # supplies {title, body} dicts when it wants a lead.
     items = _normalize_items({"exhibit_spec": {"type": "callouts", "points": [
         "Data catalogs make discovery easier.", "Schema discovery determines reliability."]}})
     assert len(items) == 2
-    assert items[0]["title"] == "Data catalogs"
+    assert items[0]["title"] == ""
+    assert items[0]["body"] == "Data catalogs make discovery easier."
+
+
+def test_normalize_items_preserves_llm_title_body_dicts():
+    items = _normalize_items({"exhibit_spec": {"type": "callouts", "points": [
+        {"title": "Project brief", "body": "Defines scope, goals, and constraints up front."}]}})
+    assert items[0]["title"] == "Project brief"
+    assert items[0]["body"] == "Defines scope, goals, and constraints up front."
 
 
 def test_resolve_modes_rhythm():

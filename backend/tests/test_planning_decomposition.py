@@ -371,3 +371,238 @@ def test_reassign_picks_stat_when_metrics_present():
                                 exhibit_spec={"type": "metric_chart", "metrics": [{"label": "Lift", "value": "30%"}]})
     planner._reassign_to_non_list_type(metric)
     assert metric.slide_type == "stat"
+
+
+# --------------------------------------------------------------------------- #
+# Step A: sentence-aware source extraction (no mid-sentence fragments)
+# --------------------------------------------------------------------------- #
+def test_source_excerpt_keeps_whole_sentences():
+    p = ContentPlanner()
+    prose = ("Agentic Coding introduces a disciplined operating model for AI work. "
+             "It replaces ephemeral chat context with a persistent memory bank. "
+             "Teams gain reproducible, reviewable software outcomes as a result.")
+    out = p._source_excerpt(prose, 120)
+    assert out  # non-empty
+    assert out.rstrip().endswith((".", "!", "?"))  # never ends mid-sentence
+    assert "introduces a disciplined" not in out or out.count(".") >= 1
+
+
+def test_to_bullets_splits_prose_into_complete_sentences():
+    p = ContentPlanner()
+    prose = ("Synthetic benchmarks create circular validation loops without grounding. "
+             "Source-grounded harnesses evaluate models against real organizational evidence. "
+             "Benchmark quality improves when test cases come from validated workflows.")
+    bullets = p._to_bullets(prose)
+    assert len(bullets) >= 3
+    assert all(b.rstrip().endswith((".", "!", "?")) for b in bullets)  # complete thoughts
+
+
+def test_to_bullets_preserves_short_bullet_lines():
+    p = ContentPlanner()
+    listed = "Shared source of truth\nExplicit operating rules\nBuilt-in quality gates"
+    bullets = p._to_bullets(listed)
+    assert "Shared source of truth" in bullets
+
+
+# --------------------------------------------------------------------------- #
+# Step C: grammar/completeness title gate (not first-word-verb whitelist)
+# --------------------------------------------------------------------------- #
+def test_gate_accepts_clean_declarative_titles():
+    p = ContentPlanner()
+    # Clean declarative claims must NOT be flagged weak (the old gate rejected
+    # anything not starting with a whitelisted imperative verb).
+    assert not p._gate_title_is_weak("Memory rot compounds across long-running sessions")
+    assert not p._gate_title_is_weak("Model contracts make evaluation expectations explicit")
+    assert not p._gate_title_is_weak("Shift the developer mental model from coder to manager")
+
+
+def test_gate_flags_verb_prefix_grafts_and_scaffolding():
+    p = ContentPlanner()
+    # Imperative opener glued onto a clause with its own finite verb (the verb-graft).
+    assert p._gate_title_is_weak("Adopt specifications must precede all AI coding prompts")
+    assert p._gate_title_is_weak("Prioritize developers must shift their mental model")
+    # Scaffolding frames and too-short titles stay weak.
+    assert p._gate_title_is_weak("Use the case for implicit ground truth discovery")
+    assert p._gate_title_is_weak("Market overview")
+
+
+def test_consulting_qa_accepts_declarative_claim_titles():
+    from app.services.consulting_qa import ConsultingQA
+    qa = ConsultingQA()
+    assert qa._has_action_signal("Memory rot compounds across long-running sessions")
+    assert qa._has_action_signal("Contracts make expectations explicit")
+    # A bare noun phrase still reads as missing a conclusion.
+    assert not qa._has_action_signal("Vibe coding operating patterns")
+
+
+# --------------------------------------------------------------------------- #
+# Step D: critique-and-refine pass (LLM enhance + defensive apply + backstop)
+# --------------------------------------------------------------------------- #
+def _content_deck(title="A weak placeholder", slide_type="content"):
+    return DeckSpec(
+        deck_title="Deck", audience="Execs",
+        slides=[
+            GeneratedSlideSpec(slide_number=1, slide_type="cover", action_title="Deck cover title",
+                               archetype="cover", narrative_role="cover"),
+            GeneratedSlideSpec(slide_number=2, slide_type=slide_type, action_title=title,
+                               archetype="callouts", narrative_role="evidence", subheading="ctx",
+                               exhibit_spec={"type": "callouts", "points": [{"title": "Old", "body": "Old point here now."}]}),
+        ],
+    )
+
+
+def test_refine_pass_noops_without_client():
+    p = ContentPlanner()  # no llm_client
+    deck = _content_deck("Memory bank holds persistent project context for agents")
+    before = [s.action_title for s in deck.slides]
+    p._refine_slides(deck, _story_map(2), None, None, _bundle())
+    assert [s.action_title for s in deck.slides] == before
+    assert p.last_planning_artifacts.get("refine-pass", {}).get("status") == "skipped"
+
+
+def test_refine_pass_enhances_slide_from_llm():
+    class _RefineLLM:
+        model = "test-model"
+        def complete_json(self, **kwargs):
+            return {"slides": [{"n": 2,
+                "action_title": "Persistent memory keeps agents reliable across sessions",
+                "subheading": "Durable context replaces ephemeral chat history",
+                "items": [{"title": "Memory bank", "body": "A persistent external brain holds project context."}],
+                "changed": True}]}
+
+    p = ContentPlanner(llm_client=_RefineLLM())
+    deck = _content_deck("A weak placeholder")
+    p._refine_slides(deck, _story_map(2), None, None, _bundle())
+    assert deck.slides[1].action_title == "Persistent memory keeps agents reliable across sessions"
+    assert "external brain" in deck.slides[1].exhibit_spec["points"][0]["body"].lower()
+    assert p.last_planning_artifacts["refine-pass"]["refined"] >= 1
+
+
+def test_refine_rejects_weak_refinement():
+    class _WeakRefineLLM:
+        model = "test-model"
+        def complete_json(self, **kwargs):
+            return {"slides": [{"n": 2, "action_title": "Bad", "changed": True}]}  # too short -> weak
+
+    p = ContentPlanner(llm_client=_WeakRefineLLM())
+    deck = _content_deck("Persistent memory keeps agents reliable across sessions")
+    p._refine_slides(deck, _story_map(2), None, None, _bundle())
+    # Defensive apply: a weak refinement never degrades the slide.
+    assert deck.slides[1].action_title == "Persistent memory keeps agents reliable across sessions"
+
+
+def test_backstop_repairs_weak_title_as_last_resort():
+    p = ContentPlanner()  # no client -> deterministic backstop active
+    deck = _content_deck("Memory rot")  # 2 words -> weak
+    p._backstop_weak_titles(deck, _bundle())
+    assert not p._gate_title_is_weak(deck.slides[1].action_title)
+
+
+# --------------------------------------------------------------------------- #
+# Step F: closing decision-ask grounded in recommendation; metric K/M display
+# --------------------------------------------------------------------------- #
+def test_ground_closing_ask_uses_recommendation_not_canned():
+    from app.models.generation import GeneratedSlideSpec
+    p = ContentPlanner()
+    deck = DeckSpec(deck_title="D", audience="X", slides=[
+        GeneratedSlideSpec(slide_number=1, slide_type="closing", action_title="Commit to the path forward",
+                           archetype="closing_recommendation", narrative_role="closing",
+                           exhibit_spec={"type": "recommendation",
+                                         "decision_ask": "Approve the recommended pilot with named owners and a review date.",
+                                         "next_steps": ["Step one here.", "Step two here."]}),
+    ])
+    p._ground_closing_ask(deck, _story_map(1).model_copy(update={"recommendation": "Approve the first governed harness pilot this quarter."}))
+    assert deck.slides[0].exhibit_spec["decision_ask"] == "Approve the first governed harness pilot this quarter."
+
+
+def test_metric_value_display_compacts_large_numbers():
+    from app.services.pptx_native.primitives import _metric_value_display
+    assert _metric_value_display("200000") == "200K"
+    assert _metric_value_display("3500000") == "3.5M"
+    assert _metric_value_display("95") == "95"
+    assert _metric_value_display("30%") == "30%"
+
+
+# --------------------------------------------------------------------------- #
+# Step G: regression guard — no canned 'BS' strings on the LLM authoring path
+# --------------------------------------------------------------------------- #
+_CANNED_STRINGS = (
+    "ground the next decision in",
+    "anchor the recommendation in the source evidence",
+    "approve the recommended pilot with named owners and a review date",
+    "approve a time-boxed pilot with named owners",
+    "evidence to inspect", "condition to validate", "implication to resolve",
+    "make the key decision explicit", "use the source evidence to choose the next step",
+)
+
+
+def _assert_no_canned_strings(outlines):
+    blob = " ".join(json.dumps(o.content_json, ensure_ascii=True).lower() for o in outlines)
+    hits = [phrase for phrase in _CANNED_STRINGS if phrase in blob]
+    assert not hits, f"canned strings leaked onto the LLM path: {hits}"
+
+
+class _CleanFullLLM:
+    """Fake planner client that authors clean, complete slides end-to-end, so the
+    full plan() pipeline never needs canned fallback content."""
+
+    model = "test-model"
+
+    def complete_json(self, **kwargs):
+        prompt = kwargs.get("user_prompt", "")
+        low = prompt.lower()
+        if "story map" in low:
+            roles_claims = [
+                ("cover", "Ground benchmark creation in validated organizational evidence"),
+                ("problem", "Synthetic benchmarks create circular validation loops without grounding"),
+                ("evidence", "Source-grounded harnesses evaluate models against real workflows"),
+                ("framework", "Harness design turns existing workflows into evaluation evidence"),
+                ("implementation", "Model contracts make evaluation expectations explicit and testable"),
+                ("closing", "Adopt source-grounded harnesses to make benchmark quality observable"),
+            ]
+            return {
+                "thesis": "Ground benchmark creation in validated evidence.",
+                "narrative_arc": "Situation -> Complication -> Resolution",
+                "recommendation": "Adopt source-grounded harnesses for benchmark creation this quarter.",
+                "beats": [
+                    {"beat_number": i + 1, "role": r, "claim": c, "source_refs": [],
+                     "preferred_exhibit": "callouts", "rationale": "Advance the argument."}
+                    for i, (r, c) in enumerate(roles_claims)
+                ],
+            }
+        if "one slide object" in low or "beats:" in low:
+            match = re.search(r"Beats: (\[.*?\])\nAllowed", prompt, re.DOTALL)
+            beats = json.loads(match.group(1)) if match else []
+            return {"slides": [
+                {
+                    "slide_number": b["slide_number"], "slide_type": "content",
+                    "action_title": b["claim"], "subheading": "Evidence drawn from validated workflows",
+                    "archetype": "callouts", "narrative_role": b["role"],
+                    "exhibit_spec": {"type": "callouts", "points": [
+                        {"title": "Validated evidence", "body": "Source-grounded harnesses test models against real organizational workflows."},
+                        {"title": "Reproducible cases", "body": "Benchmark cases derive from validated workflows rather than generated examples."},
+                        {"title": "Operational proof", "body": "Contracts define exactly what each benchmark must prove before scaling."},
+                    ]},
+                    "sources": ["Uploaded source"], "source_refs": ["doc-1:Solution"],
+                }
+                for b in beats
+            ]}
+        # narrative + refine passes: clean no-ops (titles already strong).
+        return {"titles": [], "slides": []}
+
+
+def test_llm_path_deck_has_no_canned_strings():
+    from app.models.brand import BrandDNA
+    from app.models.template import TemplateProfile
+    template = TemplateProfile(
+        id="t", name="t", type="freeform", brand=BrandDNA(), slides=[],
+        source_file="", created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
+    )
+    planner = ContentPlanner(llm_client=_CleanFullLLM(), slide_generation_strategy="batched")
+    outlines, _ = planner.plan(
+        template, _bundle(),
+        instructions="Create a deck about grounding benchmarks in evidence.",
+        generation_mode="freeform", quality_profile="fast",
+    )
+    assert outlines
+    _assert_no_canned_strings(outlines)

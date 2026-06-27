@@ -264,7 +264,11 @@ class PlanningRepairMixin:
                 title = title.split(" and ", 1)[0]
             if len(title.split()) > 16:
                 title = " ".join(title.split()[:16]).rstrip(".,;:")
-            title = self._repair_weak_action_title(slide, title)
+            # Canned weak-title rewriting is no-LLM-fallback-only now; on the LLM
+            # path titles are owned by the author + narrative + refine passes (with
+            # a final deterministic backstop), never grafted from canned banks here.
+            if self.llm_client is None:
+                title = self._repair_weak_action_title(slide, title)
             slide.action_title = self._clean_action_title_candidate(title)
 
     def _repair_cover_title(self, title: str, deck_title: str) -> str:
