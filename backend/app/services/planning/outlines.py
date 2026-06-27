@@ -20,12 +20,22 @@ class OutlinePlanningMixin:
     def _deck_to_outlines(
         self, deck: DeckSpec, job_id: str, mode: str
     ) -> list[SlideOutline]:
+        from app.services.slide_types import LIST_TYPES, get_slide_type
+
+        bullet_layouts = {"two_column", "icon_rows", "icon_grid", "callouts"}
+
         outlines = []
         last_layout: str | None = None
         section_number = 0
         prev_section_label: str | None = None
         for slide in deck.slides:
             content = slide.model_dump()
+            # Pin the planned slide-type's render primitive + composition family so
+            # the build/render layers honor the planned *kind* instead of
+            # re-deriving it from already-uniform content.
+            stype = get_slide_type(slide.slide_type)
+            content["pinned_primitive"] = stype.primitive
+            content["pinned_family"] = stype.composition_family
             is_cover = self._normalize_archetype(slide.archetype or "") == "cover"
             display_title = deck.deck_title if is_cover else slide.action_title
             content["action_title"] = display_title
@@ -38,8 +48,18 @@ class OutlinePlanningMixin:
             layout = self._layout_with_variety(
                 slide, preferred_layout, last_layout, len(outlines)
             )
+            # Keep the QA-visible layout/archetype consistent with the pinned
+            # non-list primitive: a slide the renderer draws as a statement/stat
+            # (density gate or variety controller) must not still report a
+            # bullet-card layout, which would misreport variety and trip
+            # bullet_card_usage / narrative_rhythm against what was rendered.
+            non_list_override = (
+                slide.slide_type not in LIST_TYPES and layout in bullet_layouts
+            )
+            if non_list_override:
+                layout = "chart" if self._metrics_from_slide(slide) else "quote_sidebar"
             last_layout = layout
-            archetype = slide.archetype or layout
+            archetype = layout if non_list_override else (slide.archetype or layout)
             # Assign a monotonic section number that only advances when the section
             # label changes, so kickers read 01 -> 0N in order instead of jumping
             # around by per-slide archetype (the cover carries no section kicker).

@@ -795,19 +795,14 @@ def _write_strict_template(path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_freeform_job_with_html_engine(tmp_path: Path) -> None:
-    """Full pipeline (ingest -> plan -> design -> build -> QA) with the polished
-    HTML renderer as the engine produces a terminal, image-based deck."""
-    from app.services.html_rendering import find_chrome
-
-    if find_chrome() is None:
-        pytest.skip("headless Chrome not available")
-
+async def test_orchestrator_freeform_job_with_native_engine(tmp_path: Path) -> None:
+    """Full pipeline (ingest -> plan -> design -> build -> QA) with the default
+    native renderer produces a terminal, EDITABLE deck (real shapes, no images)."""
     settings = _settings(tmp_path)
     store = SQLiteStore(settings)
     storage = LocalStorage(settings)
     await store.init()
-    await store.create_job(_job("html-job", FREEFORM_TEMPLATE_ID, "freeform"))
+    await store.create_job(_job("native-job", FREEFORM_TEMPLATE_ID, "freeform"))
 
     orchestrator = JobOrchestrator(
         settings=settings,
@@ -816,18 +811,19 @@ async def test_orchestrator_freeform_job_with_html_engine(tmp_path: Path) -> Non
         ingester=StaticIngester(),
         planner=ContentPlanner(),
         designer=DesignAgent(),
-        builder=PptxBuilder(node_runner=object(), renderer_engine="html"),
+        builder=PptxBuilder(node_runner=object(), renderer_engine="native"),
         qa_agent=CleanQAAgent(),
     )
-    await orchestrator.run_job("html-job")
+    await orchestrator.run_job("native-job")
 
-    job = await store.get_job("html-job")
-    outlines = await store.list_slide_outlines("html-job")
+    job = await store.get_job("native-job")
+    outlines = await store.list_slide_outlines("native-job")
     assert job is not None
     assert job.status in {"done", "review_failed"}
     assert job.result_file and Path(job.result_file).exists()
     prs = Presentation(job.result_file)
     assert len(prs.slides) == len(outlines)
-    # HTML engine embeds each slide as a full-bleed picture
+    # native engine emits editable shapes/text, never a full-bleed picture
     for slide in prs.slides:
-        assert any(shape.shape_type == 13 for shape in slide.shapes), "slide missing picture"
+        assert all(shape.shape_type != 13 for shape in slide.shapes), "slide is an image"
+        assert any(shape.has_text_frame and shape.text_frame.text.strip() for shape in slide.shapes)

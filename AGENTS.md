@@ -207,13 +207,14 @@ smoke flags, generated PPTX semantics, and strict-mode preserve-first behavior.
 ### PPTX Build Paths
 
 - `PptxBuilder.build_deck(...)` owns build-path selection; `RENDERER_ENGINE`
-  (default `html`) picks the generated-slide engine.
+  (default `native`) picks the generated-slide engine.
 - **freeform / brand (generated slides)** use one of three engines:
-  - `html` (default): `HtmlSlideRenderer` (`app.services.html_rendering`) turns
-    outlines into a single CSS design system, prints it to PDF with headless
-    Chrome, converts pages to images with `pdftoppm`, and embeds them full-bleed
-    in the PPTX (speaker notes preserved as text). Falls back to `authored` with
-    a warning when Chrome/poppler is missing.
+  - `native` (default): `NativePptxRenderer` (`app.services.pptx_native`) builds
+    real, editable python-pptx shapes/text reproducing the design-system look
+    (rounded cards, shadows, gradient backgrounds, motifs, dark/light rhythm),
+    driven by the planning `pinned_primitive` + `fit` budgets. No external tools.
+    The legacy headless-Chrome image renderer (`html_rendering`) has been removed;
+    renderer-agnostic modules now live in `app.services.slide_design`.
   - `authored`: `AuthoredPptxRenderer`, a content-aware composition facade over
     the deterministic renderer that keeps editable PPTX text and the native
     drawing layer and degrades weak diagram requests to safer compositions.

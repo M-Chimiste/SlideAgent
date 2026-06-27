@@ -8,7 +8,7 @@ from app.services.authored_pptx_renderer import AuthoredPptxRenderer
 from app.services.brand_layout_renderer import BrandLayoutInstantiationRenderer
 from app.services.brand_template_renderer import BrandTemplateCloneRenderer
 from app.services.generation_editing_contract import GenerationEditingContract
-from app.services.html_rendering import HtmlRenderError, HtmlSlideRenderer
+from app.services.pptx_native.renderer import NativePptxRenderer
 from app.services.hybrid_assembler import HybridAssembler, SlideReplacement
 from app.services.pptx_renderer import DeterministicPptxRenderer
 from app.services.strict_injector import StrictSlideInjector
@@ -27,7 +27,7 @@ class PptxBuilder:
         self.strict_injector = StrictSlideInjector()
         self.legacy_renderer = DeterministicPptxRenderer()
         self.authored_renderer = AuthoredPptxRenderer(self.legacy_renderer)
-        self.html_renderer = HtmlSlideRenderer()
+        self.native_renderer = NativePptxRenderer()
         self.brand_template_renderer = BrandTemplateCloneRenderer()
         self.brand_layout_renderer = BrandLayoutInstantiationRenderer()
         self.editing_contract = GenerationEditingContract()
@@ -111,8 +111,8 @@ class PptxBuilder:
     def _renderer(self):
         if self.renderer_engine == "legacy":
             return self.legacy_renderer
-        if self.renderer_engine == "html":
-            return self.html_renderer
+        if self.renderer_engine == "native":
+            return self.native_renderer
         return self.authored_renderer
 
     def _render_generated(
@@ -121,24 +121,7 @@ class PptxBuilder:
         brand,
         output_path: Path,
     ) -> list[dict[str, str | int]]:
-        """Render generated freeform/brand decks, falling back from the HTML
-        engine to the authored renderer if the headless-Chrome toolchain is
-        unavailable, so the pipeline never hard-fails on a missing dependency.
-        """
-        if self.renderer_engine == "html":
-            try:
-                return self.html_renderer.render(outlines, brand, output_path)
-            except HtmlRenderError as exc:
-                fallback = self.authored_renderer.render(outlines, brand, output_path)
-                return [
-                    {
-                        "slide_index": -1,
-                        "field": "render_engine",
-                        "severity": "warning",
-                        "message": f"html renderer unavailable, used authored fallback: {exc}",
-                    },
-                    *fallback,
-                ]
+        """Render generated freeform/brand decks with the selected native engine."""
         return self._renderer().render(outlines, brand, output_path)
 
     def prepare_outlines(

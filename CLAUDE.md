@@ -34,12 +34,11 @@ source ~/miniforge3/etc/profile.d/conda.sh && conda activate slideagent
 # Use `python`, not `python3`, inside the env
 ```
 
-External runtime tools (installed via Homebrew on this machine) are required for the full pipeline:
-- **headless Chrome/Chromium** — the default `html` renderer prints slide HTML → PDF (binary auto-discovered;
-  override with `SLIDEFORGE_CHROME_BINARY`). If absent, rendering degrades to the `authored` python-pptx renderer.
+External runtime tools (installed via Homebrew on this machine) are required for the full pipeline. The default
+`native` renderer needs **no** external tools (the legacy headless-Chrome image renderer has been removed):
 - `node` — rasterizes diagrams/icons (Sharp + react-icons) for the `authored`/`legacy` renderers; deterministic Pillow fallback if Node deps are absent.
 - `soffice` (LibreOffice) — renders PPTX → PDF for visual QA and the `/download?format=pdf` export.
-- `pdftoppm` (Poppler) — PDF → slide preview images (also the HTML renderer's PDF → slide-image step).
+- `pdftoppm` (Poppler) — PDF → slide preview images.
 
 ## Common Commands
 
@@ -132,21 +131,26 @@ In Docker/production a single uvicorn process serves both the API and the built 
 Three large services are stable public facades that delegate to internal packages (behavior-preserving refactors —
 keep the facade's public shape stable; `tests/test_refactor_boundaries.py` guards the facade imports + behavior):
 
-- `services/content_planner.py` (`ContentPlanner`) → `services/planning/` (`context`, `exhibit_selection`, `spec_gate`, `llm`, `narrative`, `blueprint`, `specs`, `outlines`, `repairs`, `grounding`, `exhibits`, `constants`). `ContentPlanner` *subclasses* one `*Mixin` per module (not delegation). The newer layers — `context` (source compression → story map), `exhibit_selection`, `spec_gate` (post-plan spec validation/repair), and `narrative` (one LLM pass rewriting the action-title ladder into a single Situation→Complication→Resolution story, gated so a bad rewrite can't degrade the deck) — operate on the story-map/evidence types in `models/planning.py` (`StoryMap`, `StoryBeat`, `EvidenceUnit`, `SourceCompression`, `SpecGateReport`). `PLANNER_DECOMPOSE=true` (default) splits planning into smaller batched per-section LLM calls.
+- `services/content_planner.py` (`ContentPlanner`) → `services/planning/` (`context`, `exhibit_selection`, `spec_gate`, `llm`, `narrative`, `blueprint`, `specs`, `outlines`, `repairs`, `grounding`, `exhibits`, `constants`). `ContentPlanner` *subclasses* one `*Mixin` per module (not delegation). The newer layers — `context` (source compression → story map), `exhibit_selection`, `spec_gate` (post-plan spec validation/repair), and `narrative` (one LLM pass rewriting the action-title ladder into a single Situation→Complication→Resolution story, gated so a bad rewrite can't degrade the deck) — operate on the story-map/evidence types in `models/planning.py` (`StoryMap`, `StoryBeat`, `EvidenceUnit`, `SourceCompression`, `SpecGateReport`). `PLANNER_DECOMPOSE=true` (default) splits planning into smaller batched per-section LLM calls. Content-finish layers keep sparse-source slides from reading half-baked: `StoryBeat.evidence` is bound from the source compression and rides the per-slide prompt with a type+density+char-budget authoring contract (`llm._beat_authoring_contract`); `spec_gate._gate_repair_sparse_slide` enriches/converts/merges slides under their slide-type density floor; and `content_planner._ensure_structural_variety` breaks runs of >2 consecutive list-shaped slides and guarantees a non-list anchor (reassigning `slide_type`, reflected in the outline `layout` by `_deck_to_outlines`).
 - `services/pptx_renderer.py` (`DeterministicPptxRenderer`) → `services/pptx_rendering/` (`assets`, `chrome`, `core_layouts`, `table_layouts`, `immersive_layouts`, `exhibit_layouts`, `drawing`, `constants`)
 - `services/visual_qa_agent.py` (`VisualQAAgent`) → `services/visual_qa/` (`checks`, `preview`, `vision`, `constants`)
 
 ### PPTX build paths (`PptxBuilder.build_deck`)
 
-`PptxBuilder` selects a renderer engine via `RENDERER_ENGINE` (default `html`). For generated (freeform/brand) slides:
+`PptxBuilder` selects a renderer engine via `RENDERER_ENGINE` (default `native`). For generated (freeform/brand) slides:
 
-- **`html`** (default) → `HtmlSlideRenderer` (`services/html_rendering/`: `design_system`, `css`, `icons`,
-  `templates`, `renderer`): outlines → one cohesive CSS design system → headless-Chrome print-to-PDF → `pdftoppm`
-  images → full-bleed images embedded in the PPTX (speaker notes kept as real text). Auto-falls back to `authored`
-  (with a warning) when Chrome/poppler is unavailable.
+- **`native`** (default) → `NativePptxRenderer` (`services/pptx_native/`: `geometry`, `theme`, `components`,
+  `primitives`, `renderer`): builds **real, editable** python-pptx shapes/text that reproduce the design-system look
+  (rounded cards, `effectLst` shadows, `gradFill` backgrounds, motifs, dark/light rhythm, design-language
+  typography). Computed auto-layout (`geometry.grid/column_split/stack`) replaces hardcoded EMU. Consumes the
+  planning `pinned_primitive` + `fit.CAPACITIES` budgets. Reuses the renderer-agnostic
+  `slide_design/{design_system,fit,content}` modules (`_normalize_items` etc.) but emits native shapes. Header text
+  boxes are sized to their estimated height (no title/subhead overlap), decorative motifs stay in-bounds, and the
+  `rendered_slide_audit` geometry checks (overlap/occlusion/bounds/unicode-bullets/small-text) are guarded by
+  `tests/test_native_renderer_audit.py`.
 - **`authored`** → `AuthoredPptxRenderer`: content-aware composition facade over the deterministic renderer that
   keeps **editable** PPTX text + the native drawing layer and degrades weak diagram requests into safer
-  card/editorial compositions. The resilient fallback and the most-editable output.
+  card/editorial compositions. The resilient flat-native fallback.
 - **`legacy`** → `DeterministicPptxRenderer.render(...)` directly — the original pure-Python renderer (positioning,
   fonts, colors, charts, icons, tables, diagrams, footers, brand layout-profile placement). Diagram/icon PNGs are
   rasterized by the Node workers (Pillow fallback) into `<output_stem>-diagrams/`.

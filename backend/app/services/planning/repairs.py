@@ -357,7 +357,7 @@ class PlanningRepairMixin:
         archetype = self._normalize_archetype(slide.archetype or "")
         role = (slide.narrative_role or archetype or "decision").replace("_", " ")
         return self._clean_action_title_candidate(
-            f"Use {role} evidence to choose the next operating move"
+            f"Use {role} evidence to choose the next step"
         )
 
     def _action_title_candidates(self, slide: GeneratedSlideSpec) -> list[str]:
@@ -449,7 +449,7 @@ class PlanningRepairMixin:
             candidates.append(
                 f"Ground the next decision in {self._clean_title_subject(context)}"
             )
-        candidates.append("Ground the next operating move in source evidence")
+        candidates.append("Anchor the recommendation in the source evidence")
         return candidates
 
     def _acceptance_criteria_titles(self, archetype: str) -> list[str]:
@@ -562,7 +562,7 @@ class PlanningRepairMixin:
             return "Quantify the operating signal before scaling AI work"
         if context:
             return f"Ground the next decision in {self._clean_title_subject(context)}"
-        return "Ground the next operating move in source evidence"
+        return "Anchor the recommendation in the source evidence"
 
     def _clean_title_subject(self, text: str) -> str:
         """Trim leading framing ('the case for ...', bare articles) so the subject
@@ -616,6 +616,22 @@ class PlanningRepairMixin:
 
     def _slide_context_label(self, slide: GeneratedSlideSpec) -> str:
         candidates = [slide.subheading, slide.design_intent or ""]
+        # Fall back to the lead exhibit item so the subject stays grounded in the
+        # slide's own content instead of dropping to a generic last-resort title.
+        exhibit = slide.exhibit_spec or {}
+        if isinstance(exhibit, dict):
+            for key in ("points", "items", "cards", "rows", "steps"):
+                seq = exhibit.get(key)
+                if isinstance(seq, list) and seq:
+                    first = seq[0]
+                    label = (
+                        (first.get("title") or first.get("label") or first.get("name") or "")
+                        if isinstance(first, dict)
+                        else str(first)
+                    )
+                    if label:
+                        candidates.append(str(label))
+                    break
         for candidate in candidates:
             cleaned = re.sub(r"^evidence\s+from\s+", "", candidate, flags=re.IGNORECASE)
             cleaned = self._clean_section_title(cleaned)
@@ -773,7 +789,7 @@ class PlanningRepairMixin:
         replacement = self._distinct_action_title(slide)
         if replacement.casefold() != normalized.casefold():
             return self._truncate_title(replacement)
-        return "Use source evidence to choose the next operating move"
+        return "Use the source evidence to choose the next step"
 
     def _benchmark_title_repair(self, intent: str) -> str:
         if (

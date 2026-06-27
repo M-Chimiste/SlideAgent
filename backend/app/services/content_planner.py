@@ -206,6 +206,7 @@ class ContentPlanner(
         self._enrich_deck_specs(deck, blueprint, bundle)
         self._apply_exhibit_selection(deck, bundle, selection_story_map)
         self._ensure_core_exhibit_mix(deck, bundle)
+        self._ensure_structural_variety(deck, bundle)
         self._repair_model_titles(deck)
         self._repair_repeated_action_titles(deck)
         warnings.extend(self._normalize_source_labels(deck, bundle))
@@ -225,9 +226,51 @@ class ContentPlanner(
         self._repair_weak_source_claims(deck, bundle)
         self._rewrite_title_ladder_for_narrative(deck, story_map, bundle)
         self._finalize_action_titles(deck)
+        self._clean_dangling_content(deck)
         deck, qa_warnings = self.qa.inspect(deck)
         warnings.extend(qa_warnings)
         return deck, warnings
+
+    def _clean_dangling_content(self, deck: DeckSpec) -> None:
+        """Trim dangling sentence fragments from every slide's rendered text
+        (exhibit items, content blocks, subheading). Salvaged-truncated model
+        strings can end mid-fragment ("...experience goals, a"); cleaning them in
+        the deck spec fixes all render paths at once (native, brand clone, strict)
+        rather than only the native one."""
+        from app.services.slide_design.content import _trim_dangling
+
+        text_keys = {
+            "title", "body", "text", "label", "name", "description", "action",
+            "detail", "heading", "claim", "key_idea", "point", "summary",
+        }
+
+        def fix(value: str) -> str:
+            # Repair complex dangling clauses first, then trim any trailing bare
+            # connective down to a finished thought (the audit + smoke both flag a
+            # 4-word phrase ending in "and"/"to"/..., which _repair_ leaves intact).
+            return _trim_dangling(self._repair_dangling_fragment(value) or value) or value
+
+        def clean_obj(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, str) and key in text_keys:
+                        obj[key] = fix(value)
+                    elif isinstance(value, (dict, list)):
+                        clean_obj(value)
+            elif isinstance(obj, list):
+                for index, value in enumerate(obj):
+                    if isinstance(value, str):
+                        obj[index] = fix(value)
+                    elif isinstance(value, (dict, list)):
+                        clean_obj(value)
+
+        for slide in deck.slides:
+            if isinstance(slide.exhibit_spec, dict):
+                clean_obj(slide.exhibit_spec)
+            for block in slide.content_blocks:
+                block.body = [fix(item) if isinstance(item, str) else item for item in block.body]
+            if slide.subheading:
+                slide.subheading = fix(slide.subheading)
 
     def _ensure_core_exhibit_mix(self, deck: DeckSpec, bundle: DocumentBundle) -> None:
         if len(deck.slides) < 6 or not bundle.sections:
@@ -274,6 +317,49 @@ class ContentPlanner(
                 slide.action_title = self._clean_action_title_candidate(
                     self._fallback_action_title(required_archetype, section.title, section)
                 )
+
+    def _ensure_structural_variety(self, deck: DeckSpec, bundle: DocumentBundle) -> None:
+        """Deck-level rhythm guard: break long runs of list-shaped slides and
+        guarantee at least one non-list "anchor" so the deck reads with cadence
+        instead of the same card grid repeated. This *reassigns* ``slide_type``
+        only — the ``statement``/``stat`` native primitives reframe the slide's
+        existing items (a big idea + supporting ticks, or a metric callout), so
+        no content is invented and nothing is padded with filler.
+        """
+        from app.services import slide_types
+
+        n = len(deck.slides)
+        if n < 6:
+            return
+        interior = list(range(1, n - 1))  # never touch the cover or the closing
+
+        def is_list(slide: GeneratedSlideSpec) -> bool:
+            return slide_types.is_list_type(slide.slide_type)
+
+        # 1. Break runs of more than two consecutive list-shaped slides.
+        run = 0
+        for index in interior:
+            slide = deck.slides[index]
+            if is_list(slide):
+                run += 1
+                if run > 2:
+                    self._reassign_to_non_list_type(slide)
+                    run = 0
+            else:
+                run = 0
+
+        # 2. Guarantee at least one non-list anchor exists in the interior.
+        interior_slides = [deck.slides[i] for i in interior]
+        if interior_slides and all(is_list(s) for s in interior_slides):
+            self._reassign_to_non_list_type(
+                interior_slides[len(interior_slides) // 2]
+            )
+
+    def _reassign_to_non_list_type(self, slide: GeneratedSlideSpec) -> None:
+        """Convert a list-shaped slide into a finished single-idea slide: a
+        ``stat`` when it already carries metrics, otherwise a ``statement`` that
+        reframes its points as a headline plus supporting ticks."""
+        slide.slide_type = "stat" if self._slide_has_metrics(slide) else "statement"
 
     def _polish_source_action_titles(
         self,
@@ -345,7 +431,7 @@ class ContentPlanner(
         alternatives.extend(
             [
                 self._benchmark_title_repair(context),
-                "Use source evidence to choose the next operating move",
+                "Use the source evidence to choose the next step",
             ]
         )
         return [item for item in alternatives if item]

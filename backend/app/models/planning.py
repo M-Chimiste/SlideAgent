@@ -36,6 +36,9 @@ class StoryBeat(BaseModel):
     source_refs: list[str] = Field(default_factory=list)
     preferred_exhibit: str = "callouts"
     rationale: str = ""
+    # Substantive source points bound from the matching EvidenceUnit(s), used to
+    # generate dense content and to enrich/repair thin slides.
+    evidence: list[str] = Field(default_factory=list)
 
 
 class StoryMap(BaseModel):

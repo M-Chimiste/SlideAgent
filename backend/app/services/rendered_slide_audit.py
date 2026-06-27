@@ -1,14 +1,15 @@
 from collections import Counter
 import json
-import math
 import re
 from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
+from pptx.enum.dml import MSO_FILL
 
 from app.models.outline import SlideOutline
 from app.models.qa import QAIssue
+from app.services.slide_design import fit
 
 
 TRAILING_FRAGMENT_RE = re.compile(
@@ -591,7 +592,16 @@ class RenderedSlideAudit:
             fill_type = fill.type
         except Exception:
             return False
-        return fill_type is not None
+        # Only shapes with an actual visible fill can occlude text behind them.
+        # A no-fill / background-fill outline (e.g. a decorative ring) is
+        # transparent — text shows through it, so it is not an occluder.
+        return fill_type in {
+            MSO_FILL.SOLID,
+            MSO_FILL.GRADIENT,
+            MSO_FILL.PATTERNED,
+            MSO_FILL.PICTURE,
+            MSO_FILL.TEXTURED,
+        }
 
     def _shape_font_size(self, shape) -> float:
         sizes: list[float] = []
@@ -628,15 +638,11 @@ class RenderedSlideAudit:
         font_size = float(box["font_size"])
         width_points = float(box["w"]) * 72
         height_points = float(box["h"]) * 72
-        chars_per_line = max(8, int(width_points / max(font_size * 0.52, 1)))
-        estimated_lines = sum(
-            max(1, math.ceil(len(paragraph) / chars_per_line))
-            for paragraph in box["paragraphs"]
-        )
-        capacity_lines = max(1.0, height_points / max(font_size * 1.18, 1))
+        estimated_lines = fit.estimate_lines(box["paragraphs"], width_points, font_size)
+        capacity_lines = fit.capacity_lines(height_points, font_size)
         box["estimated_lines"] = estimated_lines
         box["capacity_lines"] = round(capacity_lines, 2)
-        box["chars_per_line"] = chars_per_line
+        box["chars_per_line"] = fit.chars_per_line(width_points, font_size)
         return estimated_lines > capacity_lines + 0.8
 
     def _text_box_has_small_text_risk(self, box: dict[str, Any]) -> bool:
