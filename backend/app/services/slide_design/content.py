@@ -30,25 +30,6 @@ _ROLE_EYEBROW = {
     "section": "",
 }
 
-_VERBS = {
-    "is", "are", "was", "were", "can", "could", "should", "must", "will", "would",
-    "make", "makes", "made", "turn", "turns", "create", "creates", "evaluate",
-    "evaluates", "improve", "improves", "improved", "determine", "determines",
-    "matter", "matters", "exist", "exists", "scale", "scales", "discover",
-    "discovers", "enable", "enables", "reduce", "reduces", "drive", "drives",
-    "come", "comes", "give", "gives", "help", "helps", "let", "lets", "need",
-    "needs", "require", "requires", "provide", "provides", "reflect", "reflects",
-    "move", "moves", "shift", "shifts", "remain", "remains", "become", "becomes",
-    "bind", "binds", "ground", "grounds", "treat", "treats", "answer", "answers",
-}
-_STOP_LEAD = {"the", "a", "an", "this", "these", "those", "that", "our", "your", "its"}
-_TRAIL_ADV = {"already", "often", "also", "still", "now", "typically", "usually", "always"}
-# Connectives/prepositions that signal an idiomatic verb ("in turn", "to make")
-# rather than the sentence's main verb — splitting there yields dangling leads.
-_CONNECTIVE = {
-    "in", "on", "of", "to", "for", "with", "and", "or", "but", "as", "at", "by",
-    "from", "into", "than", "then",
-}
 
 
 def _as_text(value: Any) -> str:
@@ -115,53 +96,23 @@ def _cap(text: str) -> str:
 
 
 def _lead_body(text: str) -> tuple[str, str]:
-    """Derive a short bold lead + supporting body from one sentence."""
+    """Split a string into a bold lead + body ONLY on an explicit delimiter
+    (— – - :). With no delimiter, keep the whole sentence as the body (no lead).
+
+    The model authors real ``{title, body}`` pairs when it wants a lead; we no
+    longer GUESS a lead by verb-splitting prose, which produced awkward fragments
+    like "Memory Bank" / "Is a folder…". This keeps short "Term: definition"
+    points readable while leaving full sentences intact.
+    """
     s = _clean_sentence(text)
     if not s:
         return "", ""
-    # explicit delimiter wins
     for delim in (" — ", " – ", " - ", ": "):
         if delim in s:
             head, _, tail = s.partition(delim)
             if 1 <= len(head.split()) <= 7 and tail.strip():
                 return _cap(head.strip()), _cap(tail.strip())
-    tokens = s.split()
-    lead_words = list(tokens)
-    if tokens and tokens[0].lower() in _STOP_LEAD:
-        lead_words = tokens[1:]
-    cut = None
-    for i, tok in enumerate(lead_words):
-        if tok.lower().strip(",.;:") in _VERBS:
-            cut = i
-            break
-    if cut is None or cut < 1 or cut > 5:
-        # no clean verb boundary: keep the sentence whole as body, no lead
-        return "", _cap(s)
-    # The "verb" is idiomatic (e.g. "in turn", "to make") when the word right
-    # before it is a connective/preposition — splitting there dangles the lead
-    # ("Three files, in"). Keep the sentence whole instead.
-    if lead_words[cut - 1].lower().strip(",.;:") in _CONNECTIVE:
-        return "", _cap(s)
-    lead = lead_words[:cut]
-    while lead and lead[-1].lower().strip(",.;:") in (_TRAIL_ADV | _CONNECTIVE):
-        lead = lead[:-1]
-    if not (1 <= len(lead) <= 5):
-        return "", _cap(s)
-    lead_str = " ".join(lead)
-    # Never split inside an unbalanced bracket/quote — that mangles the sentence
-    # ("Tests pass (or there" | "are no tests)"). Keep it whole instead.
-    if (
-        lead_str.count("(") != lead_str.count(")")
-        or lead_str.count("[") != lead_str.count("]")
-        or lead_str.count('"') % 2
-    ):
-        return "", _cap(s)
-    rest = lead_words[cut:]
-    title = _cap(lead_str.strip(" ,.;:"))
-    body = _cap(" ".join(rest).strip())
-    if len(body.split()) < 3:
-        return "", _cap(s)
-    return title, body
+    return "", _cap(s)
 
 
 def _content(outline) -> dict:
@@ -185,6 +136,11 @@ def _normalize_items(content: dict) -> list[dict]:
             title = entry.get("title") or entry.get("heading") or entry.get("label") or entry.get("name") or ""
             body = entry.get("body") or entry.get("text") or entry.get("description") or entry.get("action") or ""
             icon_hint = entry.get("icon")
+            # Reference-table row {label, values:[desc, trigger]}: map label->title,
+            # first value->body, drop the trailing trigger column (don't concatenate
+            # the whole row, which produced "In Cursor these In Cursor, these...").
+            if not body and isinstance(entry.get("values"), list) and entry["values"]:
+                body = _clean_sentence(_as_text(entry["values"][0]))
             if not body and not title:
                 body = _as_text(entry)
             if title and not body:
@@ -193,6 +149,12 @@ def _normalize_items(content: dict) -> list[dict]:
                 title, body = _lead_body(body)
             else:
                 title, body = _cap(_clean_sentence(title)), _cap(_clean_sentence(body))
+        elif isinstance(entry, (list, tuple)):
+            # Bare table row [cell0, cell1, ...]: cell0->title, cell1->body, drop rest.
+            cells = [_clean_sentence(_as_text(c)) for c in entry if _as_text(c).strip()]
+            title = _cap(cells[0]) if cells else ""
+            body = _cap(cells[1]) if len(cells) > 1 else ""
+            icon_hint = None
         else:
             title, body = _lead_body(_as_text(entry))
             icon_hint = None

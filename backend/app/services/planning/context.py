@@ -418,6 +418,12 @@ class ContextPlanningMixin:
         return refs
 
     def _claim_to_action_title(self, claim: str, role: str) -> str:
+        # LLM path: trust the model's claim wording — never graft a verb prefix onto
+        # a clause that already has its own subject+verb ("Adopt specifications must
+        # precede"). Verb-grafting survives only for the no-LLM fallback deck.
+        if self.llm_client is not None:
+            cleaned = " ".join(str(claim or "").split())
+            return cleaned or "Clarify the recommendation."
         cleaned = self._phrase(claim, "Clarify the recommendation.", limit=120)
         if self._has_action_verb(cleaned):
             return cleaned

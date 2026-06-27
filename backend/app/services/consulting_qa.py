@@ -350,9 +350,27 @@ class ConsultingQA:
         return str(slide.archetype or "").strip().lower().replace("-", "_") == "cover"
 
     def _has_action_signal(self, title: str) -> bool:
-        words = {re.sub(r"[^a-z]", "", word.lower()) for word in title.split()}
-        if words & ACTION_VERBS:
+        tokens = [re.sub(r"[^a-z]", "", word.lower()) for word in title.split()]
+        wset = set(tokens)
+        if wset & ACTION_VERBS:
             return True
+        # Accept any finite-verb signal so clean declarative claims
+        # ("Memory rot compounds across handoffs", "Contracts make expectations
+        # explicit") read as conclusions — not only whitelisted imperative openers.
+        copulas = {
+            "is", "are", "was", "were", "be", "can", "cannot", "could", "must",
+            "should", "will", "would", "needs", "need", "has", "have", "makes",
+            "make", "creates", "turns", "drives", "replaces", "requires", "enables",
+        }
+        if wset & copulas:
+            return True
+        # A present/past-tense verb in a NON-final position signals a finite clause;
+        # a plural noun at the END ("operating patterns") is a noun phrase, not a verb.
+        for word in tokens[1:-1]:
+            if len(word) > 3 and (
+                word.endswith(("ed", "ies")) or (word.endswith("s") and not word.endswith("ss"))
+            ):
+                return True
         return False
 
     def _outline_title_issues(

@@ -32,7 +32,7 @@ class SpecGateMixin:
         seen_source_refs: set[str] = set()
         seen_metric_keys: set[str] = set()
         heavy_counts: dict[str, int] = {}
-        converted_thin: set[int] = set()
+        thin_to_drop: set[int] = set()
         for slide in deck.slides:
             self._gate_repair_sources(slide, bundle, issues, repairs)
             self._gate_repair_title(slide, seen_titles, issues, repairs)
@@ -46,7 +46,7 @@ class SpecGateMixin:
             )
             # Density gate runs BEFORE the budget gate so a converted slide gets
             # the right per-primitive budget.
-            self._gate_repair_sparse_slide(slide, story_map, converted_thin, issues, repairs)
+            self._gate_repair_sparse_slide(slide, story_map, thin_to_drop, issues, repairs)
             self._gate_repair_content_budget(slide, issues, repairs)
             self._gate_repair_heavy_repetition(slide, bundle, heavy_counts, issues, repairs)
             self._gate_repair_bad_copy(slide, bundle, issues, repairs)
@@ -68,9 +68,9 @@ class SpecGateMixin:
                     self._gate_exhibit_signature(slide),
                 )
             )
-        # Fold runs of adjacent thin slides that had to be converted into one
-        # denser statement, so a thin source yields fewer finished slides.
-        self._merge_thin_statements(deck, converted_thin, repairs)
+        # Drop slides that stayed below their density floor after enrichment, so a
+        # thin source yields fewer, denser, finished slides (down to a floor).
+        self._drop_thin_slides(deck, thin_to_drop, repairs)
         issues.extend(self._gate_unresolved_issues(deck, bundle))
         repaired_count = sum(1 for issue in issues if issue.repaired)
         unresolved_count = sum(1 for issue in issues if not issue.repaired)
@@ -101,13 +101,13 @@ class SpecGateMixin:
         self,
         slide: GeneratedSlideSpec,
         story_map: StoryMap,
-        converted_thin: set[int],
+        thin_to_drop: set[int],
         issues: list[SpecGateIssue],
         repairs: list[SpecGateRepair],
     ) -> None:
         """Ensure each slide meets its slide-type density floor: enrich from the
-        beat's bound evidence, else convert a thin slide to a finished single-idea
-        type so it never renders as a half-empty grid."""
+        beat's bound evidence, else mark the slide to be dropped/merged so the deck
+        has fewer, denser, finished slides instead of half-empty grids or filler."""
         from app.services.slide_types import get_slide_type
 
         # Statement-shaped / title kinds are intentionally sparse — leave them.
@@ -125,18 +125,15 @@ class SpecGateMixin:
             self._enrich_slide_from_evidence(slide, beat.evidence, stype.min_points - count)
             count = self._substantive_item_count(slide)
         if count < stype.min_points:
-            new_type = "stat" if self._slide_has_metrics(slide) else "statement"
-            before = slide.slide_type
-            slide.slide_type = new_type
-            converted_thin.add(slide.slide_number)
+            thin_to_drop.add(slide.slide_number)
             issues.append(SpecGateIssue(
                 slide_number=slide.slide_number, category="sparse_content",
-                message=f"Thin slide ({before_count} pts) converted {before} -> {new_type}.",
+                message=f"Thin slide ({before_count} pts) below density floor; dropped for a denser deck.",
                 repaired=True,
             ))
             repairs.append(SpecGateRepair(
-                slide_number=slide.slide_number, action="convert_sparse_type",
-                before=before, after=new_type,
+                slide_number=slide.slide_number, action="drop_thin_slide",
+                before=str(before_count), after="dropped",
             ))
         elif count > before_count:
             issues.append(SpecGateIssue(
@@ -210,42 +207,38 @@ class SpecGateMixin:
                 return True
         return False
 
-    def _merge_thin_statements(
-        self, deck: DeckSpec, converted_thin: set[int], repairs: list[SpecGateRepair]
+    # Keep at least this many slides even if several are thin, so a sparse source
+    # still yields a real deck rather than a stub.
+    _MIN_DECK_SLIDES = 5
+
+    def _drop_thin_slides(
+        self, deck: DeckSpec, thin_to_drop: set[int], repairs: list[SpecGateRepair]
     ) -> None:
-        if len(converted_thin) < 2:
+        """Drop slides that stayed below their density floor after enrichment, down
+        to a floor — fewer, denser, finished slides instead of half-empty ones.
+        Cover and closing slides are never dropped."""
+        if not thin_to_drop:
             return
-        slides = deck.slides
-        merged: list[GeneratedSlideSpec] = []
-        i = 0
-        while i < len(slides):
-            cur = slides[i]
-            if (
-                i + 1 < len(slides)
-                and cur.slide_number in converted_thin
-                and slides[i + 1].slide_number in converted_thin
-                and cur.slide_type == "statement"
-                and slides[i + 1].slide_type == "statement"
-            ):
-                nxt = slides[i + 1]
-                block = next((b for b in cur.content_blocks if b.type == "bullets"), None)
-                if block is None:
-                    block = ContentBlock(type="bullets", body=[])
-                    cur.content_blocks.append(block)
-                if nxt.action_title:
-                    block.body.append(nxt.action_title)
-                repairs.append(SpecGateRepair(
-                    slide_number=cur.slide_number, action="merge_thin_statements",
-                    before=str(nxt.slide_number), after=str(cur.slide_number),
-                ))
-                merged.append(cur)
-                i += 2
-            else:
-                merged.append(cur)
-                i += 1
-        for number, slide in enumerate(merged, 1):
+        protected = {"cover", "closing_recommendation"}
+        droppable = [
+            slide.slide_number
+            for slide in deck.slides
+            if slide.slide_number in thin_to_drop
+            and self._normalize_archetype(slide.archetype or "") not in protected
+        ]
+        max_drop = max(0, len(deck.slides) - self._MIN_DECK_SLIDES)
+        drop_ids = set(droppable[:max_drop])
+        if not drop_ids:
+            return
+        before_count = len(deck.slides)
+        kept = [slide for slide in deck.slides if slide.slide_number not in drop_ids]
+        for number, slide in enumerate(kept, 1):
             slide.slide_number = number
-        deck.slides = merged
+        deck.slides = kept
+        repairs.append(SpecGateRepair(
+            slide_number=None, action="drop_thin_slides",
+            before=str(before_count), after=str(len(kept)),
+        ))
 
     def _gate_repair_bad_copy(
         self,
@@ -447,11 +440,18 @@ class SpecGateMixin:
         if not weak and not repeated:
             seen_titles.add(title_key)
             return
-        repaired = self._clean_action_title_candidate(
-            self._repair_weak_action_title(slide, before)
-        )
+        # On the LLM path, weak (non-repeated) titles are deferred to the narrative +
+        # refine passes (and a final deterministic backstop); the gate only dedups
+        # repeated titles here. Deterministic weak-rewrite stays for the no-LLM path.
+        if weak and not repeated and self.llm_client is not None:
+            seen_titles.add(title_key)
+            return
         if repeated:
             repaired = self._unique_action_title(slide, seen_titles)
+        else:
+            repaired = self._clean_action_title_candidate(
+                self._repair_weak_action_title(slide, before)
+            )
         slide.action_title = repaired
         issues.append(
             SpecGateIssue(
@@ -871,28 +871,45 @@ class SpecGateMixin:
                 )
         return issues
 
+    # Imperative openers that, glued onto a clause with its own finite verb, read as
+    # an ungrammatical graft ("Adopt specifications must precede", "Prioritize
+    # developers must shift") — the fingerprint of the old verb-prefix rewriter.
+    _GRAFT_OPENERS = frozenset({
+        "adopt", "prioritize", "ground", "codify", "standardize", "map", "build",
+        "commit", "define", "quantify", "reduce", "reframe", "run", "structure",
+        "translate", "focus", "use", "implement", "diagnose", "compare",
+    })
+    _FINITE_FOLLOWERS = frozenset({
+        "is", "are", "was", "were", "must", "should", "can", "could", "will",
+        "would", "needs", "need", "has", "have",
+    })
+
     def _gate_title_is_weak(self, title: str) -> bool:
+        """Weak == not a finished, grammatical claim. Tests grammar/completeness,
+        NOT 'starts with a whitelisted verb' — so a clean declarative
+        ('Memory rot compounds across handoffs') passes and the LLM narrative pass
+        is no longer rejected, while verb-grafts and scaffolding are caught."""
         cleaned = " ".join(str(title).split())
-        if len(cleaned.split()) < 3 or len(cleaned.split()) > 16:
+        words = cleaned.split()
+        if len(words) < 4 or len(words) > 16:
             return True
         lowered = cleaned.lower()
-        if " and " in lowered:
-            return True
-        # Generic planner-template artifacts that read as meta-instructions
-        # rather than a slide's actual message.
         meta_markers = (
             "to strengthen the recommendation",
             "shows measurable impact that should guide the decision",
         )
         if any(marker in lowered for marker in meta_markers):
             return True
-        # Awkward framing openers that read as scaffolding, not an assertion
-        # ("Use the case for X to ...", "Use the X view ...").
         if re.match(r"^use the (case|need|argument|notion|idea)\b", lowered):
             return True
         if re.match(r"^use the .{2,40}\bview\b", lowered):
             return True
-        return not self._has_action_verb(cleaned)
+        # verb-prefix graft: imperative opener + a later finite verb/modal.
+        if words[0].lower() in self._GRAFT_OPENERS and any(
+            w.lower().strip(",.;:") in self._FINITE_FOLLOWERS for w in words[1:]
+        ):
+            return True
+        return False
 
     def _gate_trim_table(self, body: list[Any]) -> list[Any]:
         trimmed: list[Any] = []

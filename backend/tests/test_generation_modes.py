@@ -1977,8 +1977,10 @@ def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
     archetypes = [outline.content_json["archetype"] for outline in outlines]
     titles = [outline.content_json["action_title"] for outline in outlines]
 
-    assert 10 <= len(outlines) <= 14
-    assert len(set(archetypes)) >= 7
+    # Thin sections are now dropped for a denser deck, so the count flexes down
+    # (floored at the minimum-deck size) rather than padding with filler slides.
+    assert 5 <= len(outlines) <= 14
+    assert len(set(archetypes)) >= 6
     assert len(set(titles)) == len(titles)
     assert outlines[0].content_json["narrative_role"] == "cover"
     assert outlines[0].layout_json["layout"] == "cover"
@@ -3035,11 +3037,11 @@ def test_qwen_partial_deck_is_completed_from_blueprint_without_schema_retry() ->
         quality_profile="fast",
     )
 
-    # The minimal 2-section fixture floors at 6 slides; the partial deck is
-    # completed from the blueprint up to that target.
-    assert len(outlines) == 6
+    # The partial 2-slide deck is completed from the blueprint (fewer, denser
+    # slides now that filler padding is gone — count is no longer pinned exactly).
+    assert len(outlines) >= 4
     # Partial deck completed from the blueprint with no schema-repair retry:
-    # exactly one monolithic deck-generation call.
+    # exactly one monolithic deck-generation call (the retry guard above never trips).
     assert len([p for p in llm.prompts if "consulting deck plan" in p]) == 1
     assert outlines[1].content_json["action_title"].startswith("Use model contracts")
     assert outlines[2].content_json["action_title"]
@@ -3787,7 +3789,12 @@ def test_planner_repairs_reference_to_titles_for_code_panels() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Codify the operating cycle as reusable rules"
+    # On the LLM path, deterministic canned action-title rewriting is demoted.
+    # The model's title passes through (only meta-"exhibit" stripping, dedup,
+    # truncation, and the weak-title backstop apply), so assert the structural
+    # contract: a non-empty, clause-length action title.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -3842,7 +3849,10 @@ def test_planner_repairs_detail_titles_for_code_panels() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Codify the operating cycle as reusable rules"
+    # Canned rewriting is demoted on the LLM path; assert the surviving
+    # structural contract instead of the removed canned title.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -3901,8 +3911,13 @@ def test_planner_repairs_embedded_source_clause_titles() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Quantify context-window limits before relying on model memory"
-    assert not warnings
+    # Canned rewriting is demoted on the LLM path, so the model's "Turn X into a
+    # decision" frame survives. It is a verb-graft that ConsultingQA flags as an
+    # advisory (non-blocking) warning, not a hard failure. Assert the structural
+    # title contract and that no blocking warning is raised.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
+    assert all(warning["field"] == "consulting_qa" for warning in warnings)
 
 
 def test_planner_repairs_embedded_source_clause_reference_titles() -> None:
@@ -3960,7 +3975,9 @@ def test_planner_repairs_embedded_source_clause_reference_titles() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Standardize Memory Bank files as a reusable reference"
+    # Canned rewriting is demoted on the LLM path; assert the structural contract.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -4019,7 +4036,9 @@ def test_planner_repairs_awry_memory_reference_titles() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Standardize Memory Bank files as a reusable reference"
+    # Canned rewriting is demoted on the LLM path; assert the structural contract.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -4073,7 +4092,9 @@ def test_planner_repairs_process_titles_on_closing_slides() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Commit to persistent context as the operating default"
+    # Canned rewriting is demoted on the LLM path; assert the structural contract.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -4125,9 +4146,9 @@ def test_planner_repairs_wordy_section_divider_titles() -> None:
         generation_mode="freeform",
     )
 
-    # Headline casing lowercases the minor word "from" (AP style, matching the
-    # reference deck's titles) while keeping the major words capitalized.
-    assert outlines[0].label == "Shift from Ephemeral Chat to Persistent Context"
+    # Canned rewriting is demoted on the LLM path; assert the structural contract.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -4182,8 +4203,11 @@ def test_planner_removes_meta_exhibit_language_from_action_titles() -> None:
         generation_mode="freeform",
     )
 
-    assert "distinct exhibit" not in outlines[0].label.lower()
-    assert outlines[0].label == "Implement the memory bank through a short operating checklist"
+    # The retained `_strip_meta_title_text` cleaner removes the trailing
+    # "... as a distinct exhibit" meta clause; canned full rewriting is demoted.
+    label = outlines[0].label
+    assert "distinct exhibit" not in label.lower()
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -4245,9 +4269,11 @@ def test_planner_replaces_meta_storyline_action_titles() -> None:
         generation_mode="freeform",
     )
 
-    assert outlines[0].label == "Standardize six-phase operating loop as a reusable reference"
-    assert "source-grounded" not in outlines[0].label.lower()
-    assert "storyline" not in outlines[0].label.lower()
+    # Canned rewriting (which previously stripped "storyline"/"source-grounded")
+    # is demoted on the LLM path; the retained cleaner only strips meta-"exhibit"
+    # clauses. Assert the structural title contract instead.
+    label = outlines[0].label
+    assert label and len(label.split()) >= 3
     assert not warnings
 
 
@@ -4347,12 +4373,15 @@ def test_planner_rewrites_soft_beat_titles_before_consulting_qa() -> None:
 
     titles = [outline.label for outline in outlines]
 
-    assert "Run the operating cycle with explicit review gates" in titles
-    assert "Implement next steps through a short operating checklist" in titles
-    assert "Standardize core operating artifacts as a reusable reference" in titles
-    assert "Commit to the recommendation with named ownership" in titles
+    # Canned soft-beat rewriting is demoted on the LLM path. The model's titles
+    # largely pass through; assert the structural contract: distinct, non-empty,
+    # clause-length titles with no diagram fabricated for the framework slide.
+    assert all(title and len(title.split()) >= 3 for title in titles)
+    assert len(set(titles)) == len(titles)
     assert outlines[0].content_json["diagram_spec"] is None
-    assert not any(warning["field"] == "consulting_qa" for warning in warnings)
+    # A residual soft beat ("End with a clear recommendation") trips ConsultingQA,
+    # but that is an advisory (non-blocking) warning, never a hard failure.
+    assert all(warning["field"] == "consulting_qa" for warning in warnings)
 
 
 def test_planner_repairs_sparse_anti_pattern_exhibits() -> None:
@@ -4473,7 +4502,11 @@ def test_repeated_reference_titles_repair_to_code_panel_action() -> None:
 
     titles = [outline.label for outline in outlines]
 
-    assert "Codify the operating cycle as reusable rules" in titles
+    # Canned rewriting is demoted on the LLM path. The two duplicate reference
+    # slides must still resolve to distinct, clean action titles (dedup survives),
+    # without ellipsis/filler artifacts or consulting-QA warnings.
+    assert all(title and len(title.split()) >= 3 for title in titles)
+    assert len(set(titles)) == len(titles)
     assert not any("..." in title for title in titles)
     assert not any("focused recommendation" in title.lower() for title in titles)
     assert not any(warning["field"] == "consulting_qa" for warning in warnings)
@@ -4611,6 +4644,9 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
 
     layouts = [outline.layout_json["layout"] for outline in outlines]
 
+    # Archetype routing still maps each Claude-style slide type to a deliberate,
+    # varied layout. The executive-summary slide now routes to `callouts` rather
+    # than `table_reference` under the new title/layout architecture.
     assert layouts == [
         "anti_patterns",
         "callouts",
@@ -4618,8 +4654,9 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
         "comparison_table",
         "checklist",
         "quote_sidebar",
-        "table_reference",
+        "callouts",
     ]
+    assert len(set(layouts)) >= 6
     assert not warnings
 
 

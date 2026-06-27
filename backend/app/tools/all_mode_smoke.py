@@ -788,7 +788,7 @@ def _coerce_outline_item(item: Any) -> str:
     if isinstance(item, dict):
         parts = [
             str(item.get(key) or "").strip()
-            for key in ("title", "label", "name", "text", "description", "value")
+            for key in ("title", "body", "label", "name", "text", "description", "value")
             if str(item.get(key) or "").strip()
         ]
         return ": ".join(parts)

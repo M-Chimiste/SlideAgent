@@ -156,6 +156,43 @@ What exists today:
   numeric claims, strict placeholders, strict table cells, strict chart caches,
   warning-aware QA repair, and visual QA fallback behavior.
 
+### LLM-authored content + critique-and-refine pass; less deterministic rewriting (2026-06-26)
+
+A 5-critic content-quality diagnosis found freeform decks were **not consultant-shippable**, but ~85% of
+the damage was **deterministic Python mangling content the model produced correctly** (ungrammatical
+verb-grafts like "Adopt specifications must precede…", copula splits "Memory Bank / Is a folder…", canned
+strings repeated across unrelated decks, mid-sentence truncations), not the model or the prompt. The planner
+was re-architected to **lean on the LLM and strip deterministic content rewriting**:
+
+- **Context** is sentence-aware (`_source_excerpt`/`_to_bullets`/`_source_key_points` select whole
+  sentences, never mid-sentence fragments); small models now get one schema-repair retry; bigger batch
+  token budget so JSON stops truncating.
+- **Author** emits `{title, body}` point objects; `_lead_body` is demoted to explicit-delimiter-only (no
+  verb-splitting of prose); the canned `_ensure_items` filler is gone; content-budget truncation is
+  sentence-complete; the reference-table 3-cell stutter is fixed.
+- **Title gates** (`spec_gate._gate_title_is_weak`, `consulting_qa._has_action_signal`) test
+  grammar/completeness, not a first-word-verb whitelist — clean declaratives pass and the LLM narrative pass
+  is no longer neutered.
+- **Critique-and-refine pass** (`planning/refine.py:RefineMixin`) is the centerpiece: per slide the model is
+  shown what it produced + the intent (beat claim), bound source evidence, the slide-type contract, and any
+  spec-gate-detected defects, and returns an enhanced slide. Defensively applied (a refinement that is weak
+  or introduces an ungrounded number is rejected); a graceful no-op without a client. Numerics are re-grounded
+  after refine.
+- **Thin slides drop** (fewer, denser slides) instead of converting to filler/statements; a deterministic
+  **backstop** is the only remaining title rewrite on the LLM path and fires rarely.
+- **Demote not delete:** the canned title banks survive only for the no-LLM fallback + the last-resort
+  backstop (the user's "deterministic only as last resort"). `test_llm_path_deck_has_no_canned_strings`
+  guards LLM-path output; closing `decision_ask` is grounded in the deck's recommendation; metric tiles
+  render K/M.
+
+**Result:** backend suite **465 passed**, ruff + tsc clean. metis `qwen3.6-35b-a3b-mtp` showcase e2e (no
+`--allow-generic-output`): Bootstrapping (freeform+brand) and the Theseus brand template all pass with **zero
+canned strings** and sharp, specific, grammatical titles ("Synthetic benchmarks create circular validation
+loops that measure agreement not accuracy", "Vibe coding adoption hit 85% but fails at production scale due
+to context limits") — a clear lift over the prior verb-graft/canned titles. Thin-slide dropping yields
+12–14 slide decks. (One brand run flagged an LLM-variance ungrounded number that grounding correctly
+removed — a strict-gate edge case, not a content regression.)
+
 ### Image-path excision, content-finish phases & native polish (2026-06-26)
 
 The polished **native (editable) renderer** is the only generated-deck path now; the

@@ -5,6 +5,7 @@ from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.models.document import DocumentBundle, DocumentSection
 from app.models.generation import ContentBlock, DeckSpec, GeneratedSlideSpec, GenerationMode
 from app.models.outline import SlideOutline
+from app.models.planning import StoryMap
 from app.models.qa import QAIssue
 from app.models.template import TemplateProfile
 from app.services.consulting_qa import ConsultingQA
@@ -17,6 +18,7 @@ from app.services.planning.grounding import SourceGroundingMixin
 from app.services.planning.llm import LLMPlanningMixin
 from app.services.planning.narrative import NarrativeEditorMixin
 from app.services.planning.outlines import OutlinePlanningMixin
+from app.services.planning.refine import RefineMixin
 from app.services.planning.repairs import PlanningRepairMixin
 from app.services.planning.specs import SlideSpecPlanningMixin
 from app.services.planning.spec_gate import SpecGateMixin
@@ -40,6 +42,7 @@ class ContentPlanner(
     BlueprintPlanningMixin,
     SlideSpecPlanningMixin,
     OutlinePlanningMixin,
+    RefineMixin,
     PlanningRepairMixin,
     SourceGroundingMixin,
 ):
@@ -225,6 +228,13 @@ class ContentPlanner(
         self._polish_source_action_titles(deck, bundle)
         self._repair_weak_source_claims(deck, bundle)
         self._rewrite_title_ladder_for_narrative(deck, story_map, bundle)
+        # Critique-and-refine: the LLM enhances/repairs its own slides against the
+        # intent + evidence + contract + detected defects. Re-ground numerics after,
+        # so a refinement can never introduce an unsupported number.
+        self._refine_slides(deck, story_map, source_compression, spec_gate_report, bundle)
+        warnings.extend(self._ground_numeric_claims(deck, bundle))
+        self._ground_closing_ask(deck, story_map)
+        self._backstop_weak_titles(deck, bundle)
         self._finalize_action_titles(deck)
         self._clean_dangling_content(deck)
         deck, qa_warnings = self.qa.inspect(deck)
@@ -360,6 +370,43 @@ class ContentPlanner(
         ``stat`` when it already carries metrics, otherwise a ``statement`` that
         reframes its points as a headline plus supporting ticks."""
         slide.slide_type = "stat" if self._slide_has_metrics(slide) else "statement"
+
+    def _ground_closing_ask(self, deck: DeckSpec, story_map: StoryMap | None) -> None:
+        """Replace the canned cross-deck decision ask with the deck's own
+        recommendation, so the closing slide isn't the same verbatim sentence on
+        every unrelated deck."""
+        recommendation = " ".join(str((story_map.recommendation if story_map else "") or "").split())
+        if not recommendation:
+            return
+        canned = {
+            "approve the recommended pilot with named owners and a review date.",
+            "approve a time-boxed pilot with named owners.",
+        }
+        for slide in deck.slides:
+            exhibit = slide.exhibit_spec
+            if not isinstance(exhibit, dict) or exhibit.get("type") != "recommendation":
+                continue
+            ask = " ".join(str(exhibit.get("decision_ask") or "").split())
+            if not ask or ask.lower() in canned:
+                exhibit["decision_ask"] = recommendation
+
+    def _backstop_weak_titles(self, deck: DeckSpec, bundle: DocumentBundle) -> None:
+        """Last-resort deterministic repair for any slide still weak after the LLM
+        author + narrative + refine passes — so nothing ships ungrammatical even
+        when the model leaves a weak title behind. This is the only remaining
+        deterministic title rewrite on the LLM path, and it fires rarely."""
+        for slide in deck.slides:
+            if self._normalize_archetype(slide.archetype or "") == "cover":
+                continue
+            title = slide.action_title
+            # Catch both grammatically-weak titles and meta-frame scaffolding that
+            # the LLM passes left behind, so nothing ungrammatical or meta ships.
+            if self._gate_title_is_weak(title) or self.qa._has_meta_title_frame(title):
+                repaired = self._clean_action_title_candidate(
+                    self._repair_weak_action_title(slide, title)
+                )
+                if repaired and repaired != title:
+                    slide.action_title = repaired
 
     def _polish_source_action_titles(
         self,
