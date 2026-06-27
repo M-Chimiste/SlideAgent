@@ -109,7 +109,7 @@ class ExhibitCompiler:
         if normalized == "quote_sidebar":
             return {
                 "type": "quote_sidebar",
-                "key_idea": bullets[0] if bullets else "Make the operating choice explicit.",
+                "key_idea": bullets[0] if bullets else "Make the key decision explicit.",
                 "supporting_points": self._ensure_items(bullets, 3),
             }
         if normalized == "closing_recommendation":

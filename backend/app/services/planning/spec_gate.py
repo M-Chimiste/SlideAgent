@@ -32,6 +32,7 @@ class SpecGateMixin:
         seen_source_refs: set[str] = set()
         seen_metric_keys: set[str] = set()
         heavy_counts: dict[str, int] = {}
+        converted_thin: set[int] = set()
         for slide in deck.slides:
             self._gate_repair_sources(slide, bundle, issues, repairs)
             self._gate_repair_title(slide, seen_titles, issues, repairs)
@@ -43,6 +44,9 @@ class SpecGateMixin:
                 issues,
                 repairs,
             )
+            # Density gate runs BEFORE the budget gate so a converted slide gets
+            # the right per-primitive budget.
+            self._gate_repair_sparse_slide(slide, story_map, converted_thin, issues, repairs)
             self._gate_repair_content_budget(slide, issues, repairs)
             self._gate_repair_heavy_repetition(slide, bundle, heavy_counts, issues, repairs)
             self._gate_repair_bad_copy(slide, bundle, issues, repairs)
@@ -64,6 +68,9 @@ class SpecGateMixin:
                     self._gate_exhibit_signature(slide),
                 )
             )
+        # Fold runs of adjacent thin slides that had to be converted into one
+        # denser statement, so a thin source yields fewer finished slides.
+        self._merge_thin_statements(deck, converted_thin, repairs)
         issues.extend(self._gate_unresolved_issues(deck, bundle))
         repaired_count = sum(1 for issue in issues if issue.repaired)
         unresolved_count = sum(1 for issue in issues if not issue.repaired)
@@ -89,6 +96,156 @@ class SpecGateMixin:
                 },
             },
             )
+
+    def _gate_repair_sparse_slide(
+        self,
+        slide: GeneratedSlideSpec,
+        story_map: StoryMap,
+        converted_thin: set[int],
+        issues: list[SpecGateIssue],
+        repairs: list[SpecGateRepair],
+    ) -> None:
+        """Ensure each slide meets its slide-type density floor: enrich from the
+        beat's bound evidence, else convert a thin slide to a finished single-idea
+        type so it never renders as a half-empty grid."""
+        from app.services.slide_types import get_slide_type
+
+        # Statement-shaped / title kinds are intentionally sparse — leave them.
+        if slide.slide_type in {
+            "cover", "section", "closing", "quote", "stat", "statement", "decision",
+        }:
+            return
+        stype = get_slide_type(slide.slide_type)
+        count = self._substantive_item_count(slide)
+        if count >= stype.min_points:
+            return
+        before_count = count
+        beat = self._beat_for_slide(slide, story_map)
+        if beat and beat.evidence:
+            self._enrich_slide_from_evidence(slide, beat.evidence, stype.min_points - count)
+            count = self._substantive_item_count(slide)
+        if count < stype.min_points:
+            new_type = "stat" if self._slide_has_metrics(slide) else "statement"
+            before = slide.slide_type
+            slide.slide_type = new_type
+            converted_thin.add(slide.slide_number)
+            issues.append(SpecGateIssue(
+                slide_number=slide.slide_number, category="sparse_content",
+                message=f"Thin slide ({before_count} pts) converted {before} -> {new_type}.",
+                repaired=True,
+            ))
+            repairs.append(SpecGateRepair(
+                slide_number=slide.slide_number, action="convert_sparse_type",
+                before=before, after=new_type,
+            ))
+        elif count > before_count:
+            issues.append(SpecGateIssue(
+                slide_number=slide.slide_number, category="sparse_content",
+                message=f"Thin slide enriched from source evidence ({before_count} -> {count} pts).",
+                repaired=True,
+            ))
+            repairs.append(SpecGateRepair(
+                slide_number=slide.slide_number, action="enrich_from_evidence",
+                before=str(before_count), after=str(count),
+            ))
+
+    def _substantive_item_count(self, slide: GeneratedSlideSpec) -> int:
+        count = 0
+        for block in slide.content_blocks:
+            for item in block.body:
+                if isinstance(item, str) and len(item.split()) >= 3:
+                    count += 1
+        ex = slide.exhibit_spec or {}
+        if isinstance(ex, dict):
+            for key in ("points", "items", "rows", "steps", "cards", "metrics"):
+                value = ex.get(key)
+                if isinstance(value, list):
+                    count = max(count, len([x for x in value if x]))
+        return count
+
+    def _beat_for_slide(self, slide: GeneratedSlideSpec, story_map: StoryMap):
+        beats = story_map.beats or []
+        idx = slide.slide_number - 1
+        if 0 <= idx < len(beats):
+            return beats[idx]
+        refs = set(slide.source_refs or [])
+        for beat in beats:
+            if refs & set(beat.source_refs or []):
+                return beat
+        return None
+
+    def _enrich_slide_from_evidence(
+        self, slide: GeneratedSlideSpec, evidence: list[str], need: int
+    ) -> None:
+        if need <= 0:
+            return
+        existing = {
+            " ".join(str(b).lower().split())
+            for block in slide.content_blocks for b in block.body if isinstance(b, str)
+        }
+        additions = [
+            e for e in evidence
+            if " ".join(str(e).lower().split()) not in existing and len(str(e).split()) >= 3
+        ][:need]
+        if not additions:
+            return
+        block = next((b for b in slide.content_blocks if b.type == "bullets"), None)
+        if block is None:
+            block = ContentBlock(type="bullets", body=[])
+            slide.content_blocks.append(block)
+        block.body.extend(additions)
+        ex = slide.exhibit_spec
+        if isinstance(ex, dict) and isinstance(ex.get("points"), list):
+            ex["points"].extend(additions)
+
+    def _slide_has_metrics(self, slide: GeneratedSlideSpec) -> bool:
+        chart = slide.chart_spec if isinstance(slide.chart_spec, dict) else None
+        if chart and chart.get("data_points"):
+            return True
+        ex = slide.exhibit_spec or {}
+        if isinstance(ex, dict):
+            if ex.get("type") in {"metric_chart", "chart", "kpi"}:
+                return True
+            if isinstance(ex.get("metrics"), list) and ex["metrics"]:
+                return True
+        return False
+
+    def _merge_thin_statements(
+        self, deck: DeckSpec, converted_thin: set[int], repairs: list[SpecGateRepair]
+    ) -> None:
+        if len(converted_thin) < 2:
+            return
+        slides = deck.slides
+        merged: list[GeneratedSlideSpec] = []
+        i = 0
+        while i < len(slides):
+            cur = slides[i]
+            if (
+                i + 1 < len(slides)
+                and cur.slide_number in converted_thin
+                and slides[i + 1].slide_number in converted_thin
+                and cur.slide_type == "statement"
+                and slides[i + 1].slide_type == "statement"
+            ):
+                nxt = slides[i + 1]
+                block = next((b for b in cur.content_blocks if b.type == "bullets"), None)
+                if block is None:
+                    block = ContentBlock(type="bullets", body=[])
+                    cur.content_blocks.append(block)
+                if nxt.action_title:
+                    block.body.append(nxt.action_title)
+                repairs.append(SpecGateRepair(
+                    slide_number=cur.slide_number, action="merge_thin_statements",
+                    before=str(nxt.slide_number), after=str(cur.slide_number),
+                ))
+                merged.append(cur)
+                i += 2
+            else:
+                merged.append(cur)
+                i += 1
+        for number, slide in enumerate(merged, 1):
+            slide.slide_number = number
+        deck.slides = merged
 
     def _gate_repair_bad_copy(
         self,
@@ -412,10 +569,16 @@ class SpecGateMixin:
         issues: list[SpecGateIssue],
         repairs: list[SpecGateRepair],
     ) -> None:
-        changed = False
+        # Budget the content to the slide's pinned render primitive (its real
+        # capacity) instead of a blind one-size 145-char trim. Fitting content in
+        # roomy primitives survives untouched; tight ones stay bounded.
+        from app.services.slide_types import get_slide_type
+
+        cap = get_slide_type(slide.slide_type).budget()
+        body_cap = cap.body.max_chars
         before = json.dumps([block.model_dump() for block in slide.content_blocks], ensure_ascii=True)
         for block in slide.content_blocks:
-            limit = 5
+            limit = cap.max_items
             if block.type in {"table", "chart"}:
                 # Table rows are lists and chart bodies are metric dicts; never
                 # coerce these to ``str`` here or a dict reaches the slide as its
@@ -424,7 +587,7 @@ class SpecGateMixin:
                     block.body = self._gate_trim_table(block.body)
             else:
                 block.body = [
-                    self._truncate_at_word(str(item), 145)
+                    self._truncate_at_word(str(item), body_cap)
                     for item in block.body[:limit]
                     if isinstance(item, str) and item.strip()
                 ]

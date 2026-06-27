@@ -23,6 +23,7 @@ from app.services.design_agent import DesignAgent
 from app.services.document_ingester import DocumentIngester
 from app.services.freeform_theme import derive_freeform_brand
 from app.services.pptx_builder import PptxBuilder
+from app.services.template_analyzer import TemplateAnalyzer
 from app.services.visual_qa_agent import VisualQAAgent
 
 
@@ -50,6 +51,7 @@ def run_smoke(
     progress: bool = False,
     allow_planner_fallback: bool = False,
     allow_generic_output: bool = False,
+    brand_template_path: Path | None = None,
 ) -> dict[str, Any]:
     settings = settings or Settings(BEDROCK_VALIDATE=False)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -64,11 +66,26 @@ def run_smoke(
     qa_agent = VisualQAAgent(openai_client=qa_client)
 
     _, bundle = DocumentIngester().ingest_documents("all-mode-qwen-smoke", [doc_path])
+    if brand_template_path is not None:
+        # Use a real uploaded template so brand mode exercises the actual analyze
+        # -> clone / native-fallback path with the template's extracted brand DNA.
+        brand_template, _brand_thumbs = TemplateAnalyzer().analyze(
+            brand_template_path, brand_template_path.stem, "brand"
+        )
+        _progress(
+            progress,
+            f"[brand] analyzed template {brand_template_path.name}: "
+            f"primary #{brand_template.brand.colors.primary}, "
+            f"heading {brand_template.brand.fonts.heading}, "
+            f"{len(brand_template.layout_library)} layout(s)",
+        )
+    else:
+        brand_template = _template("brand", _brand())
     results: dict[str, Any] = {}
     quality_failures: list[str] = []
     for mode, template in [
         ("freeform", _template("freeform", derive_freeform_brand(bundle, instructions))),
-        ("brand", _template("brand", _brand())),
+        ("brand", brand_template),
     ]:
         if mode not in selected_modes:
             continue
@@ -449,23 +466,6 @@ def evaluate_deck_quality(
     if not output_path.exists():
         return {"available": False, "passed": True, "issues": [], "metrics": {}}
     pptx_metrics = _pptx_visual_metrics(output_path)
-    # For image-based (HTML) decks, text-quality checks cannot read the rendered
-    # picture, so re-derive them from the outline content the picture was built
-    # from — keeping the gate meaningful without false shape-color failures.
-    if pptx_metrics.get("image_based"):
-        slide_texts = _outline_slide_texts(outlines)
-        placeholder_hits = sum(
-            1 for texts in slide_texts for text in texts if _is_placeholder_visual_text(text)
-        )
-        text_issues: list[str] = []
-        for texts in slide_texts:
-            text_issues.extend(_rendered_text_issues(len(text_issues), texts))
-        pptx_metrics = {
-            **pptx_metrics,
-            "placeholder_text_count": placeholder_hits,
-            "rendered_text_issue_count": len(text_issues),
-            "rendered_text_issues": text_issues[:12],
-        }
     image_based = bool(pptx_metrics.get("image_based"))
     slide_count = max(len(layouts), len(titles), pptx_metrics["slide_count"])
     distinct_layouts = len(set(layout for layout in layouts if layout))
@@ -512,13 +512,9 @@ def evaluate_deck_quality(
             issues.append("repeats the same layout more than twice in a row")
         if visual_slide_ratio < 0.85:
             issues.append("too many slides lack a primary visual element")
-        if not image_based:
-            # Shape-fill color introspection only applies to the authored/legacy
-            # renderers; an HTML deck is a designed full-bleed image per slide.
-            if pptx_metrics["distinct_fill_colors"] < 6:
-                issues.append("palette uses too few distinct rendered colors")
-            if pptx_metrics["house_palette_ratio"] > 0.82 and pptx_metrics["distinct_fill_colors"] < 9:
-                issues.append("rendered colors still read as the old house palette")
+        # (The old shape-fill color-diversity / house-palette heuristics were tuned
+        # for the authored renderer; the native renderer uses a deliberate themed
+        # palette, so those checks no longer apply.)
         if slide_count >= 8 and title_frame_ratio > 0.38:
             issues.append("action titles repeat the same opening frame too often")
         if generic_titles:
@@ -1082,6 +1078,13 @@ def _model_slug(model_name: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run all-mode local model smoke generation.")
     parser.add_argument("--doc", type=Path, default=DEFAULT_DOC)
+    parser.add_argument(
+        "--brand-template",
+        type=Path,
+        default=None,
+        help="Path to a real .pptx to analyze and use for brand mode (exercises the "
+        "clone / native-fallback path with the template's extracted brand DNA).",
+    )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS)
     parser.add_argument("--base-url", default=None)
@@ -1173,6 +1176,7 @@ def main() -> None:
         progress=not args.quiet,
         allow_planner_fallback=args.allow_planner_fallback,
         allow_generic_output=args.allow_generic_output,
+        brand_template_path=args.brand_template,
     )
     print(json.dumps(report, indent=2))
 

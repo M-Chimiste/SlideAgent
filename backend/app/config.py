@@ -87,10 +87,11 @@ class Settings(BaseSettings):
 
     qa_max_rounds: int = Field(default=2, alias="QA_MAX_ROUNDS")
     job_worker_concurrency: int = Field(default=1, alias="JOB_WORKER_CONCURRENCY")
-    # Default to the polished HTML/design-system renderer. It degrades to the
-    # authored python-pptx renderer automatically when headless Chrome/poppler
-    # are unavailable (e.g. a minimal container), so this is safe everywhere.
-    renderer_engine: str = Field(default="html", alias="RENDERER_ENGINE")
+    # Default to the polished *native* (editable) renderer — real python-pptx
+    # shapes/text reproducing the design-system look, so generated decks can be
+    # tweaked in PowerPoint. (`html` = the legacy image-based renderer; `authored`
+    # / `legacy` = the older flat native renderers.)
+    renderer_engine: str = Field(default="native", alias="RENDERER_ENGINE")
 
     # Decompose deck planning into smaller LLM calls (batched for the fast
     # profile, per-slide for the deep profile) instead of one monolithic

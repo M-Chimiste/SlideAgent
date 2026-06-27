@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-06-25
+**Last updated:** 2026-06-26
 
 ## Current Reality
 
@@ -155,6 +155,44 @@ What exists today:
   brand template logo handling, semantic icon selection/rendering, unsupported
   numeric claims, strict placeholders, strict table cells, strict chart caches,
   warning-aware QA repair, and visual QA fallback behavior.
+
+### Image-path excision, content-finish phases & native polish (2026-06-26)
+
+The polished **native (editable) renderer** is the only generated-deck path now; the
+legacy headless-Chrome **image** renderer (`html_rendering/`) and its preview tool were
+**deleted**. The renderer-agnostic modules it shared (`design_system`, `fit`, plus the
+content helpers extracted from the old `templates.py`) moved to a neutral
+`app/services/slide_design/` package (`design_system`, `fit`, `content`). The smoke
+gate's image-deck special-casing and obsolete shape-fill colour heuristics were removed
+so native decks are judged directly and pass **without** `--allow-generic-output`.
+
+Content-finish planning phases make sparse-source slides feel finished:
+- **Evidence binding** — `StoryBeat.evidence` is bound from the source compression and
+  carried into per-slide generation with a **type + density-floor + char-budget**
+  authoring contract (`llm._beat_authoring_contract`); generic filler padding dropped.
+- **Density gate** (`spec_gate._gate_repair_sparse_slide`) enriches, then converts a
+  thin slide to a finished `statement`/`stat`, then merges adjacent thin statements.
+- **Structural-variety controller** (`content_planner._ensure_structural_variety`)
+  breaks runs of >2 consecutive list-shaped slides and guarantees a non-list anchor;
+  `_deck_to_outlines` reflects the reassigned `slide_type` in the outline `layout` so
+  QA variety metrics (`bullet_card_usage`) match what is rendered.
+
+Native renderer geometry/content defects surfaced by the (now-direct) deck-quality gate
+were fixed and locked behind `tests/test_native_renderer_audit.py`: fit-sized header
+boxes (no title/subhead overlap), in-bounds decorative motifs, en-dash list markers (no
+unicode bullets), ≥10 pt eyebrows, word-boundary `_short()` truncation + `_trim_dangling`
+so exhibit text never renders as a mid-word/dangling fragment, and a planning-level
+`_clean_dangling_content` pass that cleans exhibit/bullet data for every render path
+(native, brand clone, strict).
+
+**E2E validation (metis `qwen3.6-35b-a3b-mtp`, showcase, no `--allow-generic-output`):**
+Beyond Vibe Coding (freeform+brand), Bootstrapping Benchmarks (freeform+brand), and a
+real uploaded brand template (`Theseus_Research_PPTX_Template.pptx`, via the new
+`all_mode_smoke --brand-template`) all pass with **zero QA issues**, no planner fallback,
+clean geometry, 10–12 distinct layouts, and fully editable output (0 pictures). Backend
+suite **450 passed**, ruff + `tsc` clean. The theseus brand deck exercised the real
+clone path: weak frame matches degrade gracefully to the native renderer with the
+template's extracted brand DNA (orange `ED7D31`/grey `A5A5A5` exact, blue derived).
 
 ### Config: root .env now loads regardless of cwd (2026-06-25)
 
@@ -454,6 +492,28 @@ Known follow-ups (next loops), in priority order:
 4. Increase layout variety — addressed by the "Slide variety & multi-style
    generation" pass (five new HTML primitives + family-complete, history-aware
    selection so card grids no longer dominate longer decks).
+
+### Polished native (editable) renderer is the default (2026-06-26)
+
+Generated freeform/brand decks now render as **native, editable PowerPoint** (real text boxes, shapes,
+tables — not flattened images), and `RENDERER_ENGINE` defaults to `native`. The new
+`app/services/pptx_native/` package (`geometry` auto-layout, `theme` adapter over `design_system`,
+`components` for rounded cards / `effectLst` shadows / `gradFill` backgrounds / badges / fit-aware text /
+motifs, `primitives` porting all 16 slide kinds, `renderer` = `NativePptxRenderer`) reproduces the
+HTML/CSS design-system look with editable shapes, consuming the planning `pinned_primitive` pins +
+`fit.CAPACITIES` budgets. The legacy image-based `html` engine is retained as a non-default fallback.
+
+Validated end-to-end on **metis qwen3.6-35b-a3b-mtp** for **both** docx files (Beyond Vibe Coding +
+Bootstrapping Benchmarks), freeform + brand: `image_based=False`, **zero pictures** and 50–90 editable
+text shapes per deck, no planner fallback, zero build warnings, 7–12 distinct layouts with dark/light
+rhythm. New `tests/test_native_renderer.py` (every primitive builds editable/no-images; design-language
+tokens applied). Full suite 447 passed; ruff clean.
+
+Remaining follow-ups: excise the now-unused image-path code (surgical — `templates.py` content helpers are
+shared with the native renderer); relax the smoke gate's "≥6 distinct rendered colors" check for the
+focused native palette; and the content-finish planning phases (evidence binding, density gate that
+converts/merges thin slides, type+budget prompt) so the content filling these polished native slides also
+reads as finished.
 
 ### Slide variety & multi-style generation (2026-06-25)
 

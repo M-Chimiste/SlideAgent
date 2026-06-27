@@ -1985,7 +1985,9 @@ def test_source_rich_fallback_uses_adaptive_blueprint_and_archetypes() -> None:
     assert all(outline.content_json.get("exhibit_spec") for outline in outlines)
     assert any(archetype == "comparison_table" for archetype in archetypes)
     assert any(archetype == "callouts" for archetype in archetypes)
-    assert any(archetype == "icon_rows" for archetype in archetypes)
+    assert any(archetype in {"icon_rows", "two_column", "checklist"} for archetype in archetypes)
+    # thin sections become finished statements rather than generic filler grids
+    assert any(o.content_json.get("slide_type") == "statement" for o in outlines)
     assert "code_panel" not in archetypes
     assert "matrix_2x2" not in archetypes
     assert sum(
@@ -3226,7 +3228,8 @@ def test_spec_gate_repairs_duplicate_and_over_budget_slide_specs() -> None:
     assert "duplicate_slide" in categories
     assert report.repaired_count >= 3
     assert deck.slides[1].source_refs != ["doc-1:Developer Productivity"]
-    assert len(deck.slides[0].content_blocks[0].body) <= 5
+    # content -> cards primitive, budgeted to its real capacity (MAX_CARDS=6)
+    assert len(deck.slides[0].content_blocks[0].body) <= 6
 
 
 def test_spec_gate_removes_supported_model_source_placeholder() -> None:

@@ -741,28 +741,10 @@ class SlideSpecPlanningMixin:
         ]
         if not phrases:
             phrases = [self._phrase(section.content or section.title, section.title)]
-        if len(phrases) < count:
-            for filler in self._filler_phrases(section, count - len(phrases)):
-                if filler not in phrases:
-                    phrases.append(filler)
-                if len(phrases) >= count:
-                    break
+        # No generic filler — a thin section yields fewer real points; the
+        # spec-gate density pass converts the resulting thin slide into a finished
+        # statement (or merges it) rather than padding with template phrases.
         return phrases[:count]
-
-    def _filler_phrases(self, section: DocumentSection, needed: int) -> list[str]:
-        subject = self._clean_section_title(section.title) or "the source evidence"
-        subject = self._truncate_at_word(subject.lower(), 44).removesuffix("...")
-        subject_title = subject[:1].upper() + subject[1:]
-        pool = (
-            f"{subject_title} defines the evidence to inspect.",
-            f"{subject_title} sets the benchmark condition to validate.",
-            f"{subject_title} names the workflow signal to preserve.",
-            f"{subject_title} clarifies what must change before scaling.",
-            f"{subject_title} gives the slide its operating context.",
-            f"{subject_title} explains why the decision needs source grounding.",
-        )
-        seed = sum(ord(char) for char in (section.title or "section")) % len(pool)
-        return [pool[(seed + index) % len(pool)] for index in range(needed)]
 
     def _phrase(self, text: str, fallback: str, limit: int = 105) -> str:
         cleaned = self._clean_generated_visual_placeholder(text or fallback)

@@ -34,7 +34,7 @@ class ContextPlanningMixin:
                 title=section.title,
                 source_doc_id=section.source_doc_id,
                 summary=self._source_excerpt(section.content, summary_limit),
-                key_points=self._source_key_points(section.content)[:3],
+                key_points=self._source_key_points(section.content)[:6],
                 source_refs=[self._source_ref(section, index)],
             )
             for index, section in enumerate(representative)
@@ -288,6 +288,12 @@ class ContextPlanningMixin:
         }
         fallback_refs = source_compression.source_refs or [SOURCE_NEEDED_LABEL]
         roles = self._narrative_roles_for_sequence(blueprint.archetype_sequence)
+        # source_ref -> substantive key points, so each beat can carry its evidence
+        evidence_by_ref: dict[str, list[str]] = {}
+        for unit in source_compression.evidence_units:
+            points = [p for p in (unit.key_points or ([unit.summary] if unit.summary else [])) if p]
+            for ref in unit.source_refs:
+                evidence_by_ref[str(ref)] = points
         for index in range(max(1, blueprint.target_slide_count)):
             beat = beats[index] if index < len(beats) else None
             role = (
@@ -311,6 +317,10 @@ class ContextPlanningMixin:
             )
             if exhibit == "cycle":
                 exhibit = "framework_cycle"
+            evidence: list[str] = list(beat.evidence) if beat and beat.evidence else []
+            for ref in refs:
+                evidence.extend(evidence_by_ref.get(str(ref), []))
+            evidence = list(dict.fromkeys(e for e in evidence if e))[:6]
             normalized.append(
                 StoryBeat(
                     beat_number=index + 1,
@@ -324,6 +334,7 @@ class ContextPlanningMixin:
                     source_refs=refs,
                     preferred_exhibit=exhibit,
                     rationale=beat.rationale if beat else "Filled from blueprint.",
+                    evidence=evidence,
                 )
             )
         return normalized

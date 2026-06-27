@@ -79,6 +79,8 @@ class LLMPlanningMixin:
             "Rewrite source headings and subtitles into grammatical action titles; do not concatenate them. "
             "Comparison exhibits need clear columns and row labels. "
             "Dependency, cycle, checklist, code, anti-pattern, and quote exhibits need structured arrays, not prose blobs. "
+            "Every content point must be a complete thought grounded in the source — no sentence fragments, trailing clauses, placeholder text, or generic filler; "
+            "a slide with one finished idea beats a slide padded with thin bullets. "
             "For dependency_map and framework/cycle slides, include diagram_spec with kind dependency_flow or cycle when useful; otherwise use null. "
             "Action titles must avoid the word 'and'; split the idea instead. "
             "Only use numeric claims that appear in the allowed numeric tokens. "
@@ -308,6 +310,11 @@ class LLMPlanningMixin:
                 "preferred_exhibit": beat.preferred_exhibit,
                 "source_refs": beat.source_refs,
                 "rationale": beat.rationale,
+                # Bound substantive source points + the per-slide authoring contract
+                # (density floor + per-element char budget) so the model writes
+                # finished, on-budget content instead of sparse fragments.
+                "evidence": list(beat.evidence)[:6] if getattr(beat, "evidence", None) else [],
+                "authoring_contract": self._beat_authoring_contract(beat),
             }
             for offset, beat in enumerate(subset)
         ]
@@ -322,6 +329,9 @@ class LLMPlanningMixin:
             "and must not repeat any prior slide title. "
             "Every non-cover slide needs exactly one primary exhibit_spec matching the beat's preferred_exhibit. "
             "Comparison exhibits need clear columns and row labels; checklist, cycle, and dependency exhibits need structured arrays, not prose. "
+            "Honor each beat's authoring_contract: produce at least its min_points substantive content points (never fewer) and at most max_points; "
+            "keep each bold lead within lead_chars characters and each supporting line within body_chars characters. "
+            "Write complete thoughts grounded in the beat's evidence — no sentence fragments, trailing clauses, placeholder text, or generic filler. "
             "Only use numbers that appear in the allowed numeric tokens; otherwise write [source needed] beside the number. "
             "Use the beat's source_refs as source_refs. Sources may only be 'Uploaded source', a label copied from source_refs, or '[source needed]'. "
             "Do not invent document names, people, companies, dates, or URLs. No markdown, comments, reasoning, or text outside the JSON.\n"
@@ -363,6 +373,28 @@ class LLMPlanningMixin:
             spec.slide_number = start_number + offset
             specs.append(spec)
         return specs
+
+    def _beat_authoring_contract(self, beat: Any) -> dict[str, Any]:
+        """The per-slide density floor + per-element char budget the model must hit,
+        derived from the beat's preferred exhibit via the slide-type catalog and the
+        single fit-budget table (so the prompt, the spec gate, and the renderer all
+        target the same numbers)."""
+        from app.services import slide_types
+        from app.services.slide_design import fit
+
+        stype = slide_types.get_slide_type(
+            slide_types.slide_type_for_archetype(getattr(beat, "preferred_exhibit", "") or "")
+        )
+        cap = fit.budget_for(
+            stype.primitive, getattr(self, "_design_language", "editorial_serif")
+        )
+        return {
+            "slide_type": stype.key,
+            "min_points": stype.min_points,
+            "max_points": stype.max_points,
+            "lead_chars": cap.lead.authoring_chars(),
+            "body_chars": cap.body.authoring_chars(),
+        }
 
     def _beat_source_context(
         self, subset: list[Any], bundle: DocumentBundle, char_limit: int = 900

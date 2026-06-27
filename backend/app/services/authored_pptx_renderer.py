@@ -96,6 +96,10 @@ class AuthoredPptxRenderer:
             history=history or [],
             family_counts=family_counts or {},
         )
+        # Honor a planning-pinned composition family (the planned slide kind).
+        pinned_family = str(content.get("pinned_family") or "").strip()
+        if pinned_family:
+            family = pinned_family
         layout["layout"] = chosen_layout
         layout["composition_family"] = family
         variant = f"{family}-{index % 4}"

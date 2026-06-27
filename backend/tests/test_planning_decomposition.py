@@ -274,3 +274,100 @@ def test_awkward_use_the_case_for_opener_is_flagged_weak():
     legit = "Use the harness to standardize evaluation across domains"
     assert not p._gate_title_is_weak(legit)
     assert not p.qa._has_meta_title_frame(legit)
+
+
+# --------------------------------------------------------------------------- #
+# Type+budget per-slide prompt (3d) + structural-variety controller (3e)
+# --------------------------------------------------------------------------- #
+def test_beat_authoring_contract_carries_type_and_budget():
+    planner = ContentPlanner()
+    beat = StoryBeat(
+        beat_number=2, role="evidence", claim="Compare the two operating models",
+        source_refs=[], preferred_exhibit="comparison_table", rationale="r",
+    )
+    contract = planner._beat_authoring_contract(beat)
+    # comparison_table -> "comparison" slide type with a density floor and budgets.
+    assert contract["slide_type"] == "comparison"
+    assert contract["min_points"] >= 3
+    assert contract["min_points"] <= contract["max_points"]
+    assert contract["lead_chars"] > 0 and contract["body_chars"] > 0
+
+
+def test_batched_prompt_injects_contract_and_evidence():
+    captured: dict[str, str] = {}
+
+    class _RecordLLM:
+        def complete_json(self, **kwargs):
+            captured["prompt"] = kwargs.get("user_prompt", "")
+            return {"slides": []}
+
+    planner = ContentPlanner(llm_client=_RecordLLM(), slide_generation_strategy="batched")
+    beat = StoryBeat(
+        beat_number=1, role="evidence", claim="Ground the model in proprietary data",
+        source_refs=[], preferred_exhibit="callouts", rationale="r",
+        evidence=["Proprietary logs reveal true failure modes", "Synthetic data hides them"],
+    )
+    planner._generate_slide_batch(
+        [beat], [], _bundle(), _blueprint(1), "fast", _story_map(1), [],
+        start_number=1,
+    )
+    prompt = captured["prompt"]
+    assert "authoring_contract" in prompt
+    assert "min_points" in prompt and "lead_chars" in prompt
+    assert "Proprietary logs reveal true failure modes" in prompt  # bound evidence
+    assert "complete thoughts" in prompt.lower()
+
+
+def _list_deck(n_list: int) -> DeckSpec:
+    slides = [GeneratedSlideSpec(slide_number=1, slide_type="cover",
+                                 action_title="Deck cover title", archetype="cover",
+                                 narrative_role="cover")]
+    for i in range(n_list):
+        slides.append(GeneratedSlideSpec(
+            slide_number=i + 2, slide_type="content",
+            action_title=f"List slide number {i + 2} grounded in evidence",
+            archetype="callouts", narrative_role="evidence",
+            exhibit_spec={"type": "callouts", "points": ["one point here", "two point here", "three point here"]},
+        ))
+    slides.append(GeneratedSlideSpec(slide_number=n_list + 2, slide_type="closing",
+                                     action_title="Closing recommendation slide",
+                                     archetype="closing_recommendation", narrative_role="closing"))
+    return DeckSpec(deck_title="Deck", audience="Execs", slides=slides)
+
+
+def test_variety_controller_breaks_consecutive_list_runs():
+    from app.services import slide_types
+
+    planner = ContentPlanner()
+    deck = _list_deck(7)  # 7 consecutive list-type interior slides
+    planner._ensure_structural_variety(deck, _bundle())
+    flags = [slide_types.is_list_type(s.slide_type) for s in deck.slides]
+    longest = run = 0
+    for f in flags:
+        run = run + 1 if f else 0
+        longest = max(longest, run)
+    assert longest <= 2  # no run of three or more list slides
+
+
+def test_variety_controller_guarantees_non_list_anchor():
+    from app.services import slide_types
+
+    planner = ContentPlanner()
+    deck = _list_deck(5)
+    planner._ensure_structural_variety(deck, _bundle())
+    interior = deck.slides[1:-1]
+    assert any(not slide_types.is_list_type(s.slide_type) for s in interior)
+
+
+def test_reassign_picks_stat_when_metrics_present():
+    planner = ContentPlanner()
+    plain = GeneratedSlideSpec(slide_number=2, slide_type="content",
+                               action_title="A grounded list slide title", archetype="callouts")
+    planner._reassign_to_non_list_type(plain)
+    assert plain.slide_type == "statement"
+
+    metric = GeneratedSlideSpec(slide_number=3, slide_type="content",
+                                action_title="A grounded metric slide title", archetype="metric_chart",
+                                exhibit_spec={"type": "metric_chart", "metrics": [{"label": "Lift", "value": "30%"}]})
+    planner._reassign_to_non_list_type(metric)
+    assert metric.slide_type == "stat"
