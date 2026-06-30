@@ -99,6 +99,7 @@ class LocalStorage:
                 "spec-gate",
                 "editing-contract",
                 "narrative-pass",
+                "refine-pass",
             }:
                 continue
             target = planning_dir / f"{name}.json"

@@ -650,9 +650,6 @@ class ExhibitSelectionMixin:
     def _claim_has_tradeoff_signal(self, text: str) -> bool:
         return bool(re.search(r"\b(trade[- ]?off|2x2|2 x 2|matrix|quadrant)\b", text))
 
-    def _claim_has_dependency_signal(self, text: str) -> bool:
-        return bool(re.search(r"\b(depend|driver|flow|feed|constraint|cause|map|relationship|link)\b", text))
-
     def _claim_has_strong_dependency_signal(self, text: str) -> bool:
         return bool(
             re.search(
@@ -661,9 +658,6 @@ class ExhibitSelectionMixin:
                 text,
             )
         )
-
-    def _claim_has_cycle_signal(self, text: str) -> bool:
-        return bool(re.search(r"\b(cycle|loop|workflow|phase|operating model|cadence|iterate)\b", text))
 
     def _claim_has_strong_cycle_signal(self, text: str) -> bool:
         return bool(

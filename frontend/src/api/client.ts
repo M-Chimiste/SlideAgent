@@ -414,7 +414,13 @@ export type OutlineEdit = {
   subheading?: string;
 };
 
-export type PlanningArtifactName = "source-compression" | "story-map" | "spec-gate" | "editing-contract";
+export type PlanningArtifactName =
+  | "source-compression"
+  | "story-map"
+  | "spec-gate"
+  | "editing-contract"
+  | "narrative-pass"
+  | "refine-pass";
 
 export type TemplateAssets = {
   template_id: string;

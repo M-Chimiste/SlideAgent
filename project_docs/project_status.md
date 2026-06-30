@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-06-26
+**Last updated:** 2026-06-27
 
 ## Current Reality
 
@@ -184,14 +184,20 @@ was re-architected to **lean on the LLM and strip deterministic content rewritin
   backstop (the user's "deterministic only as last resort"). `test_llm_path_deck_has_no_canned_strings`
   guards LLM-path output; closing `decision_ask` is grounded in the deck's recommendation; metric tiles
   render K/M.
+- **Two fixes surfaced during e2e verification:** (1) the refine pass now **defensively rejects any
+  refinement that introduces a number not in the source's supported tokens** (refine can never invent a
+  statistic); (2) the smoke tool's `_coerce_outline_item` learned the new `{title, body}` point shape — it
+  previously read only `title`, so dense slides were mis-counted as "sparse".
 
-**Result:** backend suite **465 passed**, ruff + tsc clean. metis `qwen3.6-35b-a3b-mtp` showcase e2e (no
-`--allow-generic-output`): Bootstrapping (freeform+brand) and the Theseus brand template all pass with **zero
-canned strings** and sharp, specific, grammatical titles ("Synthetic benchmarks create circular validation
-loops that measure agreement not accuracy", "Vibe coding adoption hit 85% but fails at production scale due
-to context limits") — a clear lift over the prior verb-graft/canned titles. Thin-slide dropping yields
-12–14 slide decks. (One brand run flagged an LLM-variance ungrounded number that grounding correctly
-removed — a strict-gate edge case, not a content regression.)
+**Result:** backend suite **465 passed**, ruff + tsc clean. **metis `qwen3.6-35b-a3b-mtp` showcase e2e (no
+`--allow-generic-output`): 5/5 mode-runs pass** — Beyond Vibe Coding (freeform + brand), Bootstrapping
+Benchmarks (freeform + brand), and the Theseus brand template — every deck with **zero canned strings** and
+sharp, specific, grammatical titles ("Synthetic benchmarks create circular validation loops that measure
+agreement not accuracy", "Vibe coding adoption hit 85% but fails at production scale due to context limits")
+— a clear lift over the prior verb-graft/canned titles. Thin-slide dropping yields fewer, denser 12–14 slide
+decks. Known strict-gate edge (LLM variance, not a content regression): when the model authors an ungrounded
+number, grounding correctly removes it from the deck but the smoke gate still counts the grounding warning —
+a candidate follow-up is to treat grounding-repaired claims as resolved.
 
 ### Image-path excision, content-finish phases & native polish (2026-06-26)
 

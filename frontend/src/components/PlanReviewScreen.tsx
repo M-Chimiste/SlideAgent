@@ -9,6 +9,8 @@ type PlanningArtifacts = {
   story?: any;
   gate?: any;
   editing?: any;
+  narrative?: any;
+  refine?: any;
 };
 
 type Props = {
@@ -254,6 +256,18 @@ export default function PlanReviewScreen({
             />
             <Metric label="Diagrams" value={editing ? String(editing.diagram_count || 0) : "-"} />
             <Metric label="Slot fit risks" value={editing ? String(editing.slot_risk_count || 0) : "-"} />
+            <Metric
+              label="Narrative pass"
+              value={artifacts.narrative?.status || "-"}
+            />
+            <Metric
+              label="Refine pass"
+              value={
+                artifacts.refine && artifacts.refine.status !== "skipped"
+                  ? `${artifacts.refine.refined ?? 0}/${artifacts.refine.slide_count ?? "-"} refined`
+                  : artifacts.refine?.status || "-"
+              }
+            />
             <Metric
               label="Structural ops"
               value={editing ? `${editing.structural_operation_count || 0} / ${editing.structural_warning_count || 0} warnings` : "-"}
