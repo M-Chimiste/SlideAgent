@@ -35,7 +35,7 @@ import LibraryRail from "./components/LibraryRail";
 import StrictSchemaEditor from "./components/StrictSchemaEditor";
 
 const TERMINAL = new Set(["planned", "done", "review_failed", "error"]);
-type PlanningArtifacts = { source?: any; story?: any; gate?: any; editing?: any };
+type PlanningArtifacts = { source?: any; story?: any; gate?: any; editing?: any; narrative?: any; refine?: any };
 
 export default function App() {
   // ── presentation ──
@@ -162,7 +162,17 @@ export default function App() {
         "story-map",
         "spec-gate",
         "editing-contract",
+        "narrative-pass",
+        "refine-pass",
       ];
+      const artifactKeyByName: Record<PlanningArtifactName, keyof PlanningArtifacts> = {
+        "source-compression": "source",
+        "story-map": "story",
+        "spec-gate": "gate",
+        "editing-contract": "editing",
+        "narrative-pass": "narrative",
+        "refine-pass": "refine",
+      };
       const [outlineResult, ...artifactResults] = await Promise.allSettled([
         getJobOutline(targetJobId),
         ...artifactNames.map((artifact) => getPlanningArtifact(targetJobId, artifact)),
@@ -176,14 +186,7 @@ export default function App() {
       const nextArtifacts: PlanningArtifacts = {};
       artifactResults.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
-        const key = artifactNames[index] === "source-compression"
-          ? "source"
-          : artifactNames[index] === "story-map"
-            ? "story"
-            : artifactNames[index] === "spec-gate"
-              ? "gate"
-              : "editing";
-        nextArtifacts[key] = result.value;
+        nextArtifacts[artifactKeyByName[artifactNames[index]]] = result.value;
       });
       setPlanningArtifacts(nextArtifacts);
       if (screen === "review" && status?.rendered_slide_audit?.available) {

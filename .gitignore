@@ -214,6 +214,8 @@ __marimo__/
 /data/
 /outputs/
 /backend/data/
+# stray generated deck at repo root (never a source artifact)
+/output.pptx
 
 # Node
 node_modules/

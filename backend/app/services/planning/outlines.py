@@ -147,38 +147,6 @@ class OutlinePlanningMixin:
         ]
         return primary[:12] if primary else sections[:8]
 
-    def _outline_for_section(
-        self,
-        template: TemplateProfile,
-        bundle: DocumentBundle,
-        slide_index: int,
-        section: DocumentSection,
-        layout: str,
-    ) -> SlideOutline:
-        metrics = self._pick_metrics(bundle.metrics, count=3)
-        content = {
-            "title": section.title,
-            "summary": self._summarize(section.content),
-            "bullets": self._to_bullets(section.content),
-            "metrics": metrics,
-        }
-        if metrics and layout == "chart":
-            layout_json = {"layout": "chart", "visual_elements": ["charts"]}
-        elif metrics and layout == "callouts":
-            layout_json = {"layout": "callouts", "visual_elements": ["callouts"]}
-        else:
-            layout_json = {"layout": layout, "visual_elements": ["icons"]}
-        return SlideOutline(
-            id=str(uuid.uuid4()),
-            job_id=bundle.job_id,
-            slide_index=slide_index,
-            mode="flexible",
-            label=section.title,
-            content_json=content,
-            layout_json=layout_json,
-            created_at=self._timestamp(),
-        )
-
     def _outline_for_flexible_slide(
         self,
         template: TemplateProfile,

@@ -292,7 +292,10 @@ async def get_planning_artifact(
     job = await store.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    if artifact_name not in {"source-compression", "story-map", "spec-gate", "editing-contract"}:
+    if artifact_name not in {
+        "source-compression", "story-map", "spec-gate", "editing-contract",
+        "narrative-pass", "refine-pass",
+    }:
         raise HTTPException(status_code=404, detail="Planning artifact not found.")
     path = storage.planning_artifact_path(job_id, artifact_name)
     if not path.exists():
