@@ -156,6 +156,24 @@ What exists today:
   numeric claims, strict placeholders, strict table cells, strict chart caches,
   warning-aware QA repair, and visual QA fallback behavior.
 
+### Background control: deck-level style + per-slide pinning (2026-07-02)
+
+The dark/light rhythm is now user-controllable at both levels:
+
+- **Renderer**: `pptx_native/theme.slide_modes` honors an explicit
+  `content_json["background_mode"]` ("dark"/"light") per outline; unpinned slides keep the shared rhythm.
+- **Deck level**: new job knob `background_style=auto|light|dark` (Brief screen "SLIDE BACKGROUNDS"
+  dropdown, validated + persisted in config_json). `orchestrator._apply_background_style` stamps outlines
+  after prepare: "light" pins every slide EXCEPT the cover to the light background (a light template wants
+  white working slides); "dark" pins the whole deck; explicit per-slide pins always win.
+- **Per slide**: the review-cockpit slide editor gained a Background select (deck rhythm / light / dark) —
+  `PATCH /jobs/{id}/slides/{i}` accepts `background` ("auto" clears the pin), threaded through
+  `_apply_slide_fields` and the Save-&-regenerate edits path; the outline payload exposes
+  `background_mode`.
+
+Verified: backend **493 passed**, ruff clean, tsc + build clean; rendered demonstration deck confirms
+cover-keeps-brand + light working slides + a per-slide dark pin overriding the deck preference.
+
 ### Brand extraction truthfulness: used-color palette + honest logo detection (2026-07-02)
 
 The Theseus template exposed two extraction lies: the Brand DNA panel showed the **stock Microsoft Office

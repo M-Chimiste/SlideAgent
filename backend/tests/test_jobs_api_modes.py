@@ -153,6 +153,7 @@ async def test_create_freeform_job_without_template() -> None:
         "length_strategy": "auto",
         "presentation_style": "auto",
         "design_language": "auto",
+        "background_style": "auto",
         "run_visual_qa": True,
         "plan_only": False,
     }
@@ -218,6 +219,7 @@ async def test_create_brand_job_uses_template_mode() -> None:
         "length_strategy": "auto",
         "presentation_style": "auto",
         "design_language": "auto",
+        "background_style": "auto",
         "run_visual_qa": True,
         "plan_only": False,
     }
@@ -247,6 +249,7 @@ async def test_create_brand_job_accepts_deep_planner_profile() -> None:
         "length_strategy": "auto",
         "presentation_style": "auto",
         "design_language": "auto",
+        "background_style": "auto",
         "run_visual_qa": True,
         "plan_only": False,
     }
@@ -278,6 +281,7 @@ async def test_create_job_accepts_quality_and_length_controls() -> None:
         "length_strategy": "expanded",
         "presentation_style": "auto",
         "design_language": "auto",
+        "background_style": "auto",
         "run_visual_qa": False,
         "plan_only": False,
     }
@@ -481,6 +485,7 @@ async def test_outline_endpoint_returns_review_safe_slide_data() -> None:
             "visual_intent": {},
             "visual_degradation": {},
             "exhibit_type": "comparison_table",
+            "background_mode": "",
             "points": [],
             "sources": ["Uploaded source: Section 1"],
             "source_refs": ["sec-1"],

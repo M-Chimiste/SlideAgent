@@ -23,7 +23,7 @@ import {
   TemplateProfile,
   updateTemplate,
 } from "./api/client";
-import { DesignLanguage, Length, Mode, Planner, PresentationStyle, Quality, Screen, Theme } from "./types";
+import { DesignLanguage, Length, Mode, Planner, PresentationStyle, Quality, Screen, Theme, BackgroundStyle } from "./types";
 import TopBar from "./components/TopBar";
 import Stepper from "./components/Stepper";
 import ModeScreen from "./components/ModeScreen";
@@ -51,6 +51,7 @@ export default function App() {
   const [length, setLength] = useState<Length>("auto");
   const [presentationStyle, setPresentationStyle] = useState<PresentationStyle>("auto");
   const [designLanguage, setDesignLanguage] = useState<DesignLanguage>("auto");
+  const [backgroundStyle, setBackgroundStyle] = useState<BackgroundStyle>("auto");
   const [visualQa, setVisualQa] = useState(true);
 
   // ── brief ──
@@ -240,6 +241,7 @@ export default function App() {
     const nextStyle = String(job.config_json?.presentation_style || "auto") as PresentationStyle;
     setPresentationStyle(nextStyle);
     const nextDesign = String(job.config_json?.design_language || "auto") as DesignLanguage;
+    setBackgroundStyle(String(job.config_json?.background_style || "auto") as BackgroundStyle);
     setDesignLanguage(nextDesign);
     setBrief((job.instructions || "").split("\n\nAudience:")[0]);
   };
@@ -342,6 +344,7 @@ export default function App() {
       form.append("length_strategy", length);
       form.append("presentation_style", presentationStyle);
       form.append("design_language", designLanguage);
+      form.append("background_style", backgroundStyle);
       form.append("run_visual_qa", String(visualQa));
       form.append("plan_only", String(planOnly));
       if (mode !== "freeform" && template) form.append("template_id", template.id);
@@ -519,6 +522,8 @@ export default function App() {
               length={length}
               presentationStyle={presentationStyle}
               designLanguage={designLanguage}
+              backgroundStyle={backgroundStyle}
+              onBackgroundStyle={setBackgroundStyle}
               visualQa={visualQa}
               onPlanner={setPlanner}
               onQuality={setQuality}

@@ -354,6 +354,7 @@ export type SlideEditPayload = {
   subheading?: string;
   points?: SlidePoint[];
   layout?: string;
+  background?: "auto" | "dark" | "light";
 };
 
 export type JobOutlineSlide = {
@@ -371,6 +372,7 @@ export type JobOutlineSlide = {
   visual_intent?: Record<string, any> | null;
   visual_degradation?: Record<string, any> | null;
   exhibit_type?: string | null;
+  background_mode?: string;
   points?: SlidePoint[];
   sources: string[];
   source_refs: string[];

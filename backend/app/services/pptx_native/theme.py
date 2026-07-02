@@ -26,7 +26,9 @@ def pt(px_size: float, scale: float = 1.0) -> float:
 
 
 def slide_modes(outlines: list[SlideOutline]) -> list[str]:
-    """Per-slide dark/light modes via the shared rhythm logic."""
+    """Per-slide dark/light modes: an explicit ``background_mode`` on the
+    outline (a user- or deck-level choice) wins; everything else follows the
+    shared rhythm logic."""
     keyed = [
         (
             (o.content_json or {}).get("narrative_role") or (o.content_json or {}).get("slide_type"),
@@ -34,7 +36,12 @@ def slide_modes(outlines: list[SlideOutline]) -> list[str]:
         )
         for o in outlines
     ]
-    return resolve_modes(keyed)
+    modes = resolve_modes(keyed)
+    for index, outline in enumerate(outlines):
+        override = str((outline.content_json or {}).get("background_mode") or "").strip().lower()
+        if override in {"dark", "light"} and index < len(modes):
+            modes[index] = override
+    return modes
 
 
 def slide_content_area(theme: Theme, cover: bool = False) -> Rect:

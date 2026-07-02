@@ -43,6 +43,8 @@ class SlideEditRequest(BaseModel):
     subheading: Optional[str] = None
     points: Optional[list[SlidePointEdit]] = None
     layout: Optional[str] = None
+    # "auto" restores the deck rhythm; "dark"/"light" pin the slide background.
+    background: Optional[str] = None
 
 
 class RegenerateSlideRequest(BaseModel):
@@ -87,6 +89,7 @@ async def create_job(
     length_strategy: str = Form("auto"),
     presentation_style: str = Form("auto"),
     design_language: str = Form("auto"),
+    background_style: str = Form("auto"),
     run_visual_qa: bool = Form(True),
     plan_only: bool = Form(False),
     instructions: str = Form(""),
@@ -115,6 +118,9 @@ async def create_job(
     design_language = _form_value(design_language, "auto").strip().lower() or "auto"
     if design_language not in VALID_LANGUAGES:
         raise HTTPException(status_code=422, detail="Invalid design language.")
+    background_style = _form_value(background_style, "auto").strip().lower() or "auto"
+    if background_style not in {"auto", "light", "dark"}:
+        raise HTTPException(status_code=422, detail="Invalid background style.")
     plan_only_value = _form_bool(plan_only, False)
 
     template = None
@@ -142,6 +148,7 @@ async def create_job(
             "length_strategy": length_strategy,
             "presentation_style": presentation_style,
             "design_language": design_language,
+            "background_style": background_style,
             "run_visual_qa": _form_bool(run_visual_qa, True),
             "plan_only": plan_only_value,
         },
@@ -977,6 +984,7 @@ def _outline_payload(outline) -> dict:
         "visual_intent": content.get("visual_intent") or {},
         "visual_degradation": content.get("visual_degradation") or {},
         "exhibit_type": exhibit.get("type") if isinstance(exhibit, dict) else None,
+        "background_mode": content.get("background_mode") or "",
         "points": _outline_points(content),
         "sources": content.get("sources") or [],
         "source_refs": content.get("source_refs") or [],
@@ -1122,6 +1130,7 @@ async def regenerate_slide(
             if body.edits.points is not None
             else None,
             "layout": body.edits.layout,
+            "background": body.edits.background,
         }
     await orchestrator.regenerate_slide(
         job_id, template, slide_index, guidance=guidance, edits=edits
@@ -1153,6 +1162,8 @@ async def edit_slide(
             status_code=422,
             detail=f"layout must be one of {sorted(EDITABLE_SLIDE_LAYOUTS)}",
         )
+    if body.background and body.background.strip().lower() not in {"auto", "dark", "light"}:
+        raise HTTPException(status_code=422, detail="background must be auto, dark, or light")
     template = (
         orchestrator.freeform_template()
         if job.template_id == FREEFORM_TEMPLATE_ID
@@ -1165,6 +1176,7 @@ async def edit_slide(
         "subheading": body.subheading,
         "points": [p.model_dump() for p in body.points] if body.points is not None else None,
         "layout": body.layout,
+        "background": body.background,
     }
     await orchestrator.edit_slide(
         job_id,
