@@ -130,3 +130,49 @@ def test_design_language_changes_native_geometry(tmp_path):
     editorial = th.resolve_theme(_brand("editorial_serif"))
     assert bold.card_radius != editorial.card_radius
     assert th.pt(60, bold.heading_scale) > th.pt(60, editorial.heading_scale)
+
+
+def test_unknown_renderer_engine_resolves_to_native():
+    """A stale RENDERER_ENGINE value (e.g. the removed image-based `html`
+    engine) must resolve to the fully editable native renderer."""
+    from app.services.pptx_builder import PptxBuilder
+
+    builder = PptxBuilder(node_runner=object(), renderer_engine="html")
+    assert builder._renderer() is builder.native_renderer
+    builder = PptxBuilder(node_runner=object(), renderer_engine="native")
+    assert builder._renderer() is builder.native_renderer
+    builder = PptxBuilder(node_runner=object(), renderer_engine="authored")
+    assert builder._renderer() is builder.authored_renderer
+    builder = PptxBuilder(node_runner=object(), renderer_engine="legacy")
+    assert builder._renderer() is builder.legacy_renderer
+
+
+def test_editability_audit_flags_picture_dominated_slide(tmp_path):
+    """The post-build audit warns when a generated slide is mostly a picture
+    (rasterized-deck regression guard) and stays silent for native decks."""
+    from PIL import Image
+    from pptx.util import Inches
+
+    from app.services.pptx_builder import PptxBuilder
+
+    builder = PptxBuilder(node_runner=object(), renderer_engine="native")
+
+    # Native deck: zero pictures -> no editability warnings.
+    outs = [_outline(0, "cards", "A fully editable native slide title", [
+        "Point one is a finished thought", "Point two is also complete"])]
+    native_path = tmp_path / "native.pptx"
+    NativePptxRenderer().render(outs, _brand(), native_path)
+    assert builder._editability_audit(native_path) == []
+
+    # Deck with a near-full-bleed picture -> flagged.
+    img_path = tmp_path / "img.png"
+    Image.new("RGB", (32, 32), "navy").save(img_path)
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_picture(img_path.as_posix(), Inches(0), Inches(0), Inches(13.333), Inches(7.5))
+    flat_path = tmp_path / "flat.pptx"
+    prs.save(flat_path.as_posix())
+    warnings = builder._editability_audit(flat_path)
+    assert len(warnings) == 1
+    assert warnings[0]["field"] == "editability"

@@ -46,7 +46,11 @@ def _text_box_height(
     ``width_in`` per the shared fit model, so a header text box neither overflows
     (cut-off risk) nor over-reserves vertical space (which made the title box
     swallow the subhead box and read as an overlap to the audit)."""
-    cpl = fit.chars_per_line(width_in * 72, size_pt)
+    # Conservative wrap estimate: real serif-bold rendering is up to ~15% wider
+    # than the generic 0.52x-pt model. A title sized to "exactly one line" by the
+    # optimistic estimate wrapped to two in Office and overlapped the subhead
+    # below it, so reserve for the wider real-world metrics.
+    cpl = max(8, int(fit.chars_per_line(width_in * 72, size_pt) * 0.85))
     lines = max(min_lines, math.ceil(len(text) / max(1, cpl)))
     # capacity_lines = h_pt / (size_pt * 1.18); invert so capacity ~= lines.
     return (lines * size_pt * 1.18) / 72 + slack_in
@@ -115,16 +119,37 @@ def _footer(slide, content: dict, theme: Theme, pal, index: int, total: int) -> 
 # --------------------------------------------------------------------------- #
 # Item-card grid (shared by cards/steps/checklist/anti_pattern)
 # --------------------------------------------------------------------------- #
+def _card_content_height(items: list[dict], text_w_in: float) -> float:
+    """Tallest card's content height (inches): title + body wrap estimate plus
+    padding — so cards hug their content instead of floating text in a mostly
+    empty box."""
+    tallest = 0.0
+    width_pt = max(1.0, text_w_in * 72)
+    for it in items:
+        h = 0.5  # top/bottom padding
+        title = str(it.get("title") or "")
+        body_text = str(it.get("body") or "")
+        if title:
+            h += fit.estimate_lines([title], width_pt, 18) * (18 * 1.15) / 72 + 0.05
+        if body_text:
+            h += fit.estimate_lines([body_text], width_pt, 15.5) * (15.5 * 1.4) / 72
+        tallest = max(tallest, h)
+    return tallest
+
+
 def _card_grid(slide, content, theme, pal, body: Rect, *, numbered=False, max_n=6):
     items = _normalize_items(content)[:max_n]
     n = len(items) or 1
     cols = 1 if n == 1 else (2 if n in (2, 4) else 3)
     gap = card_gap_in(theme)
     n_rows = -(-n // cols)
-    # cap card height (content-sized, not stretched) and vertically center the
-    # block in the body — matches the CSS ``align-content: center``.
+    # content-sized card height (clamped), vertically centered block — matches
+    # the CSS ``align-content: center`` without the dead space a fixed-height
+    # card leaves under two lines of text.
     cap_h = 2.7 if n_rows == 1 else 2.4
-    card_h = min((body.h - gap * (n_rows - 1)) / n_rows, cap_h)
+    cell_w = (body.w - gap * (cols - 1)) / cols
+    content_h = _card_content_height(items, cell_w - 0.36 - 0.62)
+    card_h = min((body.h - gap * (n_rows - 1)) / n_rows, cap_h, max(1.15, content_h))
     used_h = card_h * n_rows + gap * (n_rows - 1)
     top = body.y + max(0.0, (body.h - used_h) / 2)
     cells = grid(n, cols, Rect(body.x, top, body.w, used_h), gap)
@@ -199,12 +224,18 @@ def statement(slide, content, theme, pal, body):
 
 def quote(slide, content, theme, pal, body):
     title = _clean_sentence(content.get("action_title") or "")
-    q = title
-    for b in content.get("bullets") or []:
-        t = _clean_sentence(_as_text(b))
-        if 24 <= len(t) <= 180:
+    ex = content.get("exhibit_spec") or {}
+    q = ""
+    # Prefer the exhibit's grounded source quote; otherwise use the first bullet
+    # that is a COMPLETE sentence — a truncated fragment displayed as a pull
+    # quote ("In professional software development, decisions") reads broken.
+    candidates = [ex.get("quote"), ex.get("key_idea")] + list(content.get("bullets") or [])
+    for b in candidates:
+        t = _trim_dangling(_clean_sentence(_as_text(b)))
+        if 24 <= len(t) <= 180 and (t[-1:] in ".!?\"”’" or t == title):
             q = t
             break
+    q = q or title
     attr = _clean_sentence(content.get("subheading") or "")
     C.add_paragraphs(slide, Rect(body.x, body.y, 1.5, 1.0), [Para("“", pt(110), pal.gold, font=_serif(theme))])
     paras = [Para(q, pt(34, theme.heading_scale), pal.headline, italic=True, font=_serif(theme), line_spacing=1.2)]
@@ -241,10 +272,21 @@ def callout_list(slide, content, theme, pal, body):
     cols = column_split(body, [0.82, 1.18], 0.3)
     C.add_card(slide, cols[0], theme, pal, fill=pal.teal)
     finner = cols[0].inset(0.3)
-    C.add_paragraphs(slide, finner, [
-        Para(feat.get("title") or "", pt(25, theme.heading_scale), pal.on_accent, bold=True, font=_serif(theme), space_after_pt=8),
-        Para(feat.get("body") or "", pt(15.5), pal.on_accent, line_spacing=1.4),
-    ], anchor=MSO_ANCHOR.MIDDLE)
+    feat_title = feat.get("title") or ""
+    feat_body = feat.get("body") or ""
+    feat_paras = []
+    if feat_title:
+        feat_paras.append(Para(feat_title, pt(25, theme.heading_scale), pal.on_accent, bold=True,
+                               font=_serif(theme), space_after_pt=8))
+        if feat_body:
+            feat_paras.append(Para(feat_body, pt(15.5), pal.on_accent, line_spacing=1.4))
+    else:
+        # An untitled feature is a single statement: set it large so the panel
+        # reads as a deliberate callout, not a lost caption in an empty box.
+        size = C.fit_size(feat_body, finner, pt(24, theme.heading_scale), min_pt=15.5)
+        feat_paras.append(Para(feat_body, size, pal.on_accent, bold=True,
+                               font=_serif(theme), line_spacing=1.25))
+    C.add_paragraphs(slide, finner, feat_paras, anchor=MSO_ANCHOR.MIDDLE)
     if rest:
         mini = stack(cols[1], len(rest), card_gap_in(theme))
         for i, (it, cell) in enumerate(zip(rest, mini)):
@@ -271,16 +313,26 @@ def _metric_value_display(value: str) -> str:
     return raw
 
 
+def _metric_tile_value(m: dict) -> str:
+    """Value + unit for a metric tile — a bare '95' with no unit reads as noise;
+    '95%' or '95 hrs' reads as a statistic."""
+    value = _metric_value_display(m.get("value", ""))
+    unit = str(m.get("unit") or "").strip()
+    if not unit or not value or unit.lower() in value.lower():
+        return value
+    return f"{value}{unit}" if unit in ("%", "x", "×") else f"{value} {unit}"
+
+
 def metrics(slide, content, theme, pal, body):
     data = []
     for m in content.get("metrics") or []:
         if isinstance(m, dict):
-            data.append((_metric_value_display(m.get("value", "")), str(m.get("label") or m.get("name") or ""), str(m.get("description") or "")))
+            data.append((_metric_tile_value(m), str(m.get("label") or m.get("name") or ""), str(m.get("description") or "")))
     if not data:
         chart = content.get("chart_spec") or {}
         for p in chart.get("data_points") or []:
             if isinstance(p, dict):
-                data.append((_metric_value_display(p.get("value", "")), str(p.get("label", "")), ""))
+                data.append((_metric_tile_value(p), str(p.get("label", "")), ""))
     if not data:
         return cards(slide, content, theme, pal, body)
     data = data[:4]
@@ -307,20 +359,36 @@ def table(slide, content, theme, pal, body):
     rows_data = rows_data[:6]
     tbl_shape = slide.shapes.add_table(len(rows_data) + 1, len(cols), Inches(body.x), Inches(body.y),
                                        Inches(body.w), Inches(min(body.h, 0.5 * (len(rows_data) + 1)))).table
+    # Kill the default PowerPoint table style (banded blue) so the table carries
+    # the deck theme: ink header, alternating theme-tinted body rows.
+    tbl_shape.first_row = False
+    tbl_shape.horz_banding = False
+    header_fill = C._resolve(theme.ink, pal.bg)
+    row_fill = C._resolve(theme.card_bg("light"), pal.bg)
+    row_alt_fill = C._resolve(theme.card_light_alt, pal.bg)
     for c, col in enumerate(cols):
         cell = tbl_shape.cell(0, c)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = RGBColor(*header_fill)
         cell.text = _clean_sentence(col)
-        cell.text_frame.paragraphs[0].runs[0].font.size = Pt(12)
-        cell.text_frame.paragraphs[0].runs[0].font.bold = True
+        run = cell.text_frame.paragraphs[0].runs[0]
+        run.font.size = Pt(12)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
     for r, row in enumerate(rows_data, start=1):
         cells = (row.get("label", ""), *row.get("values", [])) if isinstance(row, dict) else tuple(row)
+        fill = row_fill if r % 2 == 1 else row_alt_fill
         for c in range(len(cols)):
             val = cells[c] if c < len(cells) else ""
             tcell = tbl_shape.cell(r, c)
+            tcell.fill.solid()
+            tcell.fill.fore_color.rgb = RGBColor(*fill)
             tcell.text = _clean_sentence(str(val))
             for p in tcell.text_frame.paragraphs:
                 for run in p.runs:
                     run.font.size = Pt(12)
+                    run.font.bold = c == 0
+                    run.font.color.rgb = RGBColor(*C._resolve(theme.text_dark, fill))
 
 
 def matrix(slide, content, theme, pal, body):
@@ -400,6 +468,21 @@ def closing(slide, content, theme, pal, body):
     steps_list = ex.get("next_steps") or [_as_text(b) for b in (content.get("bullets") or [])]
     steps_list = [_clean_sentence(_as_text(s)) for s in steps_list if _as_text(s).strip()][:4]
     ask = _clean_sentence(ex.get("decision_ask") or "")
+    # The closing is a real slide, not a bare checklist: it opens with its own
+    # eyebrow + action title (this primitive draws its own header).
+    title = _trim_dangling(_clean_sentence(content.get("action_title") or content.get("title") or ""))
+    y = body.y
+    if title:
+        eyebrow = _eyebrow_text(content) or "THE DECISION"
+        C.add_paragraphs(slide, Rect(body.x, y, body.w, 0.3),
+                         [Para(eyebrow.upper(), pt(14), pal.eyebrow, bold=True)])
+        y += 0.42
+        size = _title_pt(title, theme)
+        th = _text_box_height(title, size, body.w)
+        C.add_paragraphs(slide, Rect(body.x, y, body.w, th),
+                         [Para(title, size, pal.headline, bold=True, font=_serif(theme), line_spacing=1.05)])
+        y += th + 0.25
+    body = Rect(body.x, y, body.w, max(0.8, body.bottom - y))
     cells = stack(Rect(body.x, body.y, min(body.w, 8.0), body.h - (0.8 if ask else 0)), max(1, len(steps_list)), 0.18,
                   row_h=0.6)
     for i, (step, cell) in enumerate(zip(steps_list, cells), start=1):

@@ -417,6 +417,36 @@ class ContextPlanningMixin:
                     refs.append(ref)
         return refs
 
+    # Common finite-verb forms beyond spec_gate's modal set — used to recognize
+    # that an extracted source sentence already has its own subject+verb, so the
+    # fallback title path never grafts an imperative onto it ("Adopt vibe coding
+    # works right up until it doesn't").
+    _CLAIM_FINITE_MARKERS = frozenset({
+        "is", "are", "was", "were", "must", "should", "can", "could", "will",
+        "would", "needs", "need", "has", "have", "had", "do", "does", "did",
+        "works", "work", "made", "make", "makes", "creates", "create", "means",
+        "shows", "show", "gives", "give", "takes", "take", "gets", "get",
+        "becomes", "become", "keeps", "keep", "leads", "lead", "turns", "turn",
+        "feeds", "feed", "fails", "fail", "requires", "require", "improves",
+        "reduces", "produces", "provides", "remains", "stays", "comes", "goes",
+        "lets", "let", "helps", "help", "starts", "start", "stops", "stop",
+        "live", "lives", "grows", "grow", "matters", "matter", "depends",
+        "depend", "changes", "change", "breaks", "break", "builds", "build",
+        "scales", "scale", "costs", "cost", "saves", "save", "drives", "drive",
+        "delivers", "deliver", "happens", "exists", "moves", "move", "stores",
+        "tracks", "captures", "preserves", "degrades", "compounds", "erodes",
+        "shifts", "shift", "evolves",
+    })
+
+    def _claim_reads_as_sentence(self, text: str) -> bool:
+        words = [w.lower().strip(",.;:'\"()") for w in str(text).split()]
+        if len(words) < 4:
+            return False
+        if any(w in self._CLAIM_FINITE_MARKERS for w in words):
+            return True
+        # Contracted verb forms: it's / we've / don't / doesn't / they're ...
+        return any(re.search(r"\w+['’](s|re|ve|ll|d|t)$", w) for w in str(text).split())
+
     def _claim_to_action_title(self, claim: str, role: str) -> str:
         # LLM path: trust the model's claim wording — never graft a verb prefix onto
         # a clause that already has its own subject+verb ("Adopt specifications must
@@ -427,6 +457,25 @@ class ContextPlanningMixin:
         cleaned = self._phrase(claim, "Clarify the recommendation.", limit=120)
         if self._has_action_verb(cleaned):
             return cleaned
+        # Strip a mid-paragraph connective so an extracted sentence stands alone.
+        cleaned = (
+            re.sub(
+                r"^(?:further|however|also|moreover|meanwhile|additionally|finally|"
+                r"in addition|in turn|of course|for example|for instance)[,\s]+",
+                "",
+                cleaned,
+                flags=re.I,
+            ).strip()
+            or cleaned
+        )
+        cleaned = self._repair_dangling_fragment(cleaned)
+        if self._claim_reads_as_sentence(cleaned):
+            # A finished declarative claim IS the action title (style guide: a
+            # complete sentence stating the conclusion). Never graft onto it.
+            return cleaned[:1].upper() + cleaned[1:]
+        if re.match(r"^from\s+\S.*\s+to\s+\S", cleaned, flags=re.I):
+            # "from X to Y" fragments read as a shift, not a graft target.
+            return f"Move {cleaned[:1].lower() + cleaned[1:]}"
         prefixes = {
             "problem": "Diagnose",
             "evidence": "Use",

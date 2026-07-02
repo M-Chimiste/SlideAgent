@@ -156,6 +156,64 @@ What exists today:
   numeric claims, strict placeholders, strict table cells, strict chart caches,
   warning-aware QA repair, and visual QA fallback behavior.
 
+### LLM-output protection, fallback title grammar, native polish & editability guard (2026-07-02)
+
+A repo-wide audit (render paths + planner) traced the remaining "generic deck" feel to three sources and
+fixed each:
+
+- **LLM-path protection — deterministic code can no longer overwrite authored content.** The exhibit
+  selector (`exhibit_selection._apply_exhibit_selection`) previously rebuilt any slide whose archetype
+  disagreed with its keyword heuristics, replacing model-authored exhibits with the canned
+  `specs._exhibit_for_archetype` scaffolding ("Source evidence → Confident decision", "Fragmented inputs /
+  Shared source of truth"). With a configured LLM client it now refreshes **only on a real defect**
+  (incomplete exhibit, repeated fingerprint/type-over-budget, blown metric budget), and any rebuild goes
+  authored-first: scaffold-dependent archetypes (dependency_map, framework_cycle, anti_patterns,
+  code_panel) demote to a list shape compiled from the slide's own points
+  (`_authored_reselection_target`); `_body_to_bullets` learned the `{title, body}` point shape so "the
+  slide's own content" is actually visible to repairs. `_ensure_core_exhibit_mix` (which injected a
+  style-mandated archetype plus a canned fallback title into an authored slide) and
+  `_polish_source_action_titles` (canned title banks) are now no-LLM-fallback-only; title dedup
+  (`_unique_action_title`) prefers the slide's own authored sentences before any bank. Quote exhibits
+  never fabricate a quotation: `specs._exhibit_for_archetype("quote_sidebar")` quotes a real complete
+  sentence from the source/authored content (`_quotable_sentence`) or omits the quote. Guarded by an
+  extended `test_llm_path_deck_has_no_canned_strings` canned-string list plus a new
+  `test_llm_authored_exhibit_survives_heuristic_disagreement` (keyword-bait content survives; canned
+  connector trios/scaffolds do not appear), and the rerouted-archetype test now asserts the model's
+  declared slide types are respected (7 distinct layouts).
+- **Fallback (no-LLM) titles are grammatical.** `context._claim_to_action_title` grafted an imperative
+  onto extracted source sentences ("Adopt vibe coding works right up until it doesn't", "Prioritize
+  further we had Anthropic CEO…"). It now recognizes complete declaratives (`_CLAIM_FINITE_MARKERS` +
+  contraction detection), strips leading mid-paragraph connectives, uses the sentence itself as the
+  action title (style-guide compliant), renders "from X to Y" fragments as "Move from X to Y", and grafts
+  only onto true noun-phrase fragments. Verified live: the full no-LLM Beyond-Vibe deck now ships 13/13
+  grammatical titles.
+- **Native renderer polish** (all verified by before/after LibreOffice renders): header wrap math is
+  conservative (+15% width safety) so two-line titles never overlap the subhead; native tables are
+  **themed** (ink header row, white/alt-tinted banded body rows, theme text colors) instead of the
+  PowerPoint default blue; dark-mode cards got real definition (card fill 5.5%→10% white, border
+  12%→20%, muted text 74%→84%); card grids are **content-sized** (cards hug their text instead of
+  floating two lines in a 2.4in box); the quote primitive prefers the exhibit's grounded quote and only
+  accepts complete sentences (no more truncated pull-quotes); the closing slide now renders its eyebrow +
+  action title above the next-steps/ask band; metric tiles render value+unit ("95%", "200K tokens") via
+  `_metric_tile_value`; an untitled callout feature panel sets its statement large/fit-sized instead of a
+  lost caption.
+- **Editability guarantee.** `PptxBuilder._renderer()` resolves **any unrecognized engine value —
+  including the removed image-based `html` engine — to `native`** (previously it silently fell to
+  `authored`, which inserts icon/diagram PNGs), and every generated render now runs a post-build
+  **editability audit** (`_editability_audit`): any slide ≥40% picture coverage emits an `editability`
+  build warning, so a rasterizing regression is caught at build time. Verified on the live pipeline:
+  freeform deck = 13 slides, **0 pictures, 98 editable text shapes, 1 native table**, zero build
+  warnings. Brand and freeform share the same planning path and the same native renderer on the brand
+  fallback, so both modes inherit all of the above.
+- **Design language now reaches the planner.** `plan()` accepts the resolved `design_language` and the
+  orchestrator threads it through, so `llm._beat_authoring_contract` computes char budgets for the type
+  scale the deck actually renders in (previously always `editorial_serif`).
+
+Verification: backend suite **470 passed** (5 new tests), `ruff check app/ tests/` clean, live no-LLM
+end-to-end render inspected as a contact sheet (before/after). A live qwen e2e
+(`all_mode_smoke --vision`) is the recommended next check when the metis endpoint
+(`100.87.204.73:1240`) is reachable again — it was down this session.
+
 ### LLM-authored content + critique-and-refine pass; less deterministic rewriting (2026-06-26)
 
 A 5-critic content-quality diagnosis found freeform decks were **not consultant-shippable**, but ~85% of

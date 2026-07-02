@@ -97,8 +97,13 @@ class ContentPlanner(
         quality_profile: str = "balanced",
         length_strategy: str = "auto",
         presentation_style: str = "consulting",
+        design_language: str = "editorial_serif",
     ) -> tuple[list[SlideOutline], list[dict[str, Any]]]:
         self._presentation_style = (presentation_style or "consulting").strip().lower()
+        # The resolved design language drives the per-primitive char budgets in
+        # the authoring contract (fit.budget_for), so authored content is sized
+        # for the type scale it will actually render in.
+        self._design_language = (design_language or "editorial_serif").strip().lower()
         mode = generation_mode or template.type
         if mode in {GenerationMode.freeform.value, GenerationMode.brand.value}:
             deck, warnings = self._plan_generated_deck(
@@ -283,6 +288,12 @@ class ContentPlanner(
                 slide.subheading = fix(slide.subheading)
 
     def _ensure_core_exhibit_mix(self, deck: DeckSpec, bundle: DocumentBundle) -> None:
+        # LLM path: the model owns the exhibit mix. Forcing a style-mandated
+        # archetype here overwrites an authored slide with canned scaffolding plus
+        # a fallback title — the single most visible source of generic decks.
+        # Structural variety for LLM decks is handled by _ensure_structural_variety.
+        if self.llm_client is not None:
+            return
         if len(deck.slides) < 6 or not bundle.sections:
             return
         # Force only resilient editorial/table shapes into the mix. Code panels,
@@ -413,6 +424,16 @@ class ContentPlanner(
         deck: DeckSpec,
         bundle: DocumentBundle,
     ) -> None:
+        # LLM path: titles are owned by the author + narrative + refine passes
+        # (with _backstop_weak_titles as the last resort). The canned polish banks
+        # below are for the deterministic fallback deck only — apply just the
+        # mechanical typo fix and leave authored titles alone.
+        if self.llm_client is not None:
+            for slide in deck.slides:
+                title = str(slide.action_title or "")
+                if "scanable" in title:
+                    slide.action_title = title.replace("scanable", "scannable")
+            return
         seen_titles: set[str] = set()
         for slide in deck.slides:
             title = " ".join(str(slide.action_title or "").split())

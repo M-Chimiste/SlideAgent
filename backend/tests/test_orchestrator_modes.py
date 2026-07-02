@@ -193,6 +193,7 @@ class CountingPlanner(ContentPlanner):
         quality_profile: str = "balanced",
         length_strategy: str = "auto",
         presentation_style: str = "consulting",
+        design_language: str = "editorial_serif",
     ):
         self.calls += 1
         return super().plan(
@@ -203,6 +204,7 @@ class CountingPlanner(ContentPlanner):
             quality_profile=quality_profile,
             length_strategy=length_strategy,
             presentation_style=presentation_style,
+            design_language=design_language,
         )
 
 
@@ -216,6 +218,7 @@ class DuplicateOutlinePlanner(ContentPlanner):
         quality_profile: str = "balanced",
         length_strategy: str = "auto",
         presentation_style: str = "consulting",
+        design_language: str = "editorial_serif",
     ):
         created_at = "2026-01-01T00:00:00Z"
         outlines = []
@@ -261,6 +264,7 @@ class ArtifactFailingPlanner(ContentPlanner):
         quality_profile: str = "balanced",
         length_strategy: str = "auto",
         presentation_style: str = "consulting",
+        design_language: str = "editorial_serif",
     ):
         self.last_planning_artifacts = {
             "story-map": {

@@ -111,9 +111,12 @@ class PptxBuilder:
     def _renderer(self):
         if self.renderer_engine == "legacy":
             return self.legacy_renderer
-        if self.renderer_engine == "native":
-            return self.native_renderer
-        return self.authored_renderer
+        if self.renderer_engine == "authored":
+            return self.authored_renderer
+        # "native" and any unrecognized value (e.g. the removed "html" image
+        # engine) resolve to the fully editable native renderer, so a stale env
+        # setting can never silently select an image-inserting path.
+        return self.native_renderer
 
     def _render_generated(
         self,
@@ -122,7 +125,48 @@ class PptxBuilder:
         output_path: Path,
     ) -> list[dict[str, str | int]]:
         """Render generated freeform/brand decks with the selected native engine."""
-        return self._renderer().render(outlines, brand, output_path)
+        warnings = self._renderer().render(outlines, brand, output_path)
+        warnings.extend(self._editability_audit(output_path))
+        return warnings
+
+    def _editability_audit(self, output_path: Path) -> list[dict[str, str | int]]:
+        """Generated decks must download as editable PowerPoint, never as slides
+        flattened to images. Flag any slide whose area is dominated by pictures
+        so a rasterizing regression (or an image-heavy engine) is caught at
+        build time instead of by a user opening the file."""
+        try:
+            from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+            prs = Presentation(Path(output_path).as_posix())
+        except Exception:
+            return []
+        slide_area = float((prs.slide_width or 0) * (prs.slide_height or 0))
+        if not slide_area:
+            return []
+        warnings: list[dict[str, str | int]] = []
+        for index, slide in enumerate(prs.slides):
+            picture_area = 0.0
+            for shape in slide.shapes:
+                try:
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        picture_area += float((shape.width or 0) * (shape.height or 0))
+                except Exception:
+                    continue
+            coverage = picture_area / slide_area
+            if coverage >= 0.4:
+                warnings.append(
+                    {
+                        "slide_index": index,
+                        "field": "editability",
+                        "severity": "warning",
+                        "message": (
+                            f"slide {index + 1} is {coverage:.0%} picture coverage; "
+                            "generated slides must stay editable text/shapes"
+                        ),
+                    }
+                )
+        return warnings
 
     def prepare_outlines(
         self,

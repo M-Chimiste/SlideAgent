@@ -96,18 +96,25 @@ class ExhibitSelectionMixin:
                     avoid={desired, self._expected_exhibit_type(desired)},
                 )
             desired_exhibit_type = self._expected_exhibit_type(desired)
-            should_refresh = (
-                desired != archetype
-                or self._exhibit_is_incomplete(slide)
-                or (
-                    desired_exhibit_type
-                    and current_exhibit_type
-                    and current_exhibit_type != desired_exhibit_type
-                    and not (
-                        desired == "framework_cycle" and current_exhibit_type == "cycle"
+            if self.llm_client is not None:
+                # LLM-authored decks: the model owns the archetype choice. Only a
+                # real defect — an incomplete exhibit here, or the repeat/metric
+                # budget checks below — may trigger a rebuild. A keyword-heuristic
+                # disagreement with the model must never overwrite authored content.
+                should_refresh = self._exhibit_is_incomplete(slide)
+            else:
+                should_refresh = (
+                    desired != archetype
+                    or self._exhibit_is_incomplete(slide)
+                    or (
+                        desired_exhibit_type
+                        and current_exhibit_type
+                        and current_exhibit_type != desired_exhibit_type
+                        and not (
+                            desired == "framework_cycle" and current_exhibit_type == "cycle"
+                        )
                     )
                 )
-            )
             current_repeats = self._exhibit_repeats(
                 slide,
                 used_exhibit_fingerprints,
@@ -479,13 +486,51 @@ class ExhibitSelectionMixin:
         current = self._normalize_archetype(slide.archetype or "")
         return current if current in {"callouts", "icon_rows", "two_column"} else "callouts"
 
+    # Archetypes whose deterministic exhibit builder pads with house scaffolding
+    # (canned dependency nodes, cycle steps, pattern consequences, code lines)
+    # when the source lacks the right evidence shape. Acceptable for the no-LLM
+    # fallback deck; on the LLM path a rebuilt exhibit must stay grounded in the
+    # model's own authored content, so these demote to a safe list shape instead.
+    _SCAFFOLDED_ARCHETYPES = frozenset(
+        {"dependency_map", "framework_cycle", "anti_patterns", "code_panel", "reference"}
+    )
+
+    def _authored_reselection_target(
+        self,
+        slide: GeneratedSlideSpec,
+        archetype: str,
+        section: DocumentSection | None,
+        bundle: DocumentBundle,
+    ) -> tuple[str, DocumentSection | None]:
+        """LLM-path reselection target: demote scaffold-dependent archetypes to a
+        list shape and prefer the slide's own authored points as the content
+        source, so a rebuild never replaces model content with house boilerplate."""
+        desired = self._normalize_archetype(archetype)
+        if desired in self._SCAFFOLDED_ARCHETYPES or (
+            desired == "comparison_table" and not (bundle.tables or bundle.metrics)
+        ):
+            desired = self._safe_list_archetype(slide)
+        return desired, self._authored_section_for_safe_reselection(slide, desired, section)
+
+    def _safe_list_archetype(self, slide: GeneratedSlideSpec) -> str:
+        bullets = [
+            bullet
+            for bullet in self._body_to_bullets(slide)
+            if len(str(bullet).split()) >= 3
+        ]
+        if len(bullets) >= 4:
+            return "icon_rows"
+        if len(bullets) == 2:
+            return "two_column"
+        return "callouts"
+
     def _authored_section_for_safe_reselection(
         self,
         slide: GeneratedSlideSpec,
         desired: str,
         section: DocumentSection | None,
     ) -> DocumentSection | None:
-        if desired not in {"callouts", "icon_rows", "two_column", "checklist"}:
+        if desired not in {"callouts", "icon_rows", "two_column", "checklist", "quote_sidebar"}:
             return None
         bullets = [
             bullet
@@ -510,6 +555,12 @@ class ExhibitSelectionMixin:
         bundle: DocumentBundle,
         used_metric_ids: set[str] | None = None,
     ) -> None:
+        if self.llm_client is not None:
+            archetype, authored_section = self._authored_reselection_target(
+                slide, archetype, section, bundle
+            )
+            if authored_section is not None:
+                section = authored_section
         if section is None and bundle.sections:
             section = bundle.sections[min(slide.slide_number - 1, len(bundle.sections) - 1)]
         if section is None:

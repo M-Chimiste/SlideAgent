@@ -3685,7 +3685,9 @@ def test_planner_repairs_repeated_action_titles_without_slide_suffix() -> None:
     titles = [outline.label for outline in outlines]
     assert len(titles) == len(set(titles))
     assert all("for slide" not in title.lower() for title in titles)
-    assert titles[1] == "Use acceptance criteria as pre-execution review gates"
+    # Dedup on the LLM path reuses the slide's own authored sentence as the
+    # replacement title instead of a canned bank entry.
+    assert titles[1] == "Acceptance criteria make generated work reviewable"
     assert not warnings
 
 
@@ -4644,14 +4646,16 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
 
     layouts = [outline.layout_json["layout"] for outline in outlines]
 
-    # Archetype routing still maps each Claude-style slide type to a deliberate,
-    # varied layout. The executive-summary slide now routes to `callouts` rather
-    # than `table_reference` under the new title/layout architecture.
+    # LLM-authored decks keep the model's declared slide types: the keyword
+    # selector may only rebuild a slide with a real defect (incomplete exhibit,
+    # repeats, blown metric budget), never on a heuristic disagreement. Each
+    # Claude-style type therefore routes to its own layout and the deck stays
+    # fully varied (7 distinct layouts).
     assert layouts == [
         "anti_patterns",
-        "callouts",
+        "framework_cycle",
         "dependency_map",
-        "comparison_table",
+        "code_panel",
         "checklist",
         "quote_sidebar",
         "callouts",
