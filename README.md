@@ -31,8 +31,9 @@ The quality rubric lives in [project_docs/style_guide.md](project_docs/style_gui
 
 Current local Qwen baseline: the `data/Beyond Vibe Coding.docx` all-mode smoke
 passes across freeform, brand, and strict with no planner fallback, no planning
-warnings, no build warnings, and no final visual-QA issues. The latest verified
-backend suite is `234 passed`.
+warnings, no build warnings, and no final visual-QA issues. Recent project
+status updates record the backend suite at `493 passed`, with ruff, frontend
+typecheck, and frontend build clean.
 
 ## App Architecture
 
@@ -47,17 +48,26 @@ FastAPI backend
         |
         v
 DocumentIngester
-  -> TemplateAnalyzer
+  -> TemplateAnalyzer (brand/strict only)
   -> ContentPlanner
   -> DesignAgent
+  -> [optional plan-review gate]
   -> PptxBuilder
   -> VisualQAAgent
 ```
 
-Generated freeform and brand decks use the deterministic PPTX renderer.
+Generated freeform and brand decks default to the polished native renderer
+(`RENDERER_ENGINE=native`), which builds editable PowerPoint shapes, text,
+tables, and charts. `authored` and `legacy` remain opt-in rollback paths; the
+removed image-based `html` value resolves to `native`. Brand mode defaults to
+the same native layout system themed with extracted brand DNA
+(`BRAND_RENDER_MODE=native`), with the conservative clone/edit path available
+via `BRAND_RENDER_MODE=clone`.
+
 Strict-mode decks use XML-level injection to preserve existing template
 geometry, formatting, relationships, media, masters, layouts, and content
-types.
+types. Generated jobs can optionally stop at `planned` for outline review and
+then resume rendering.
 
 For deeper context, read:
 
@@ -95,15 +105,21 @@ OPENAI_COMPATIBLE_BASE_URL=http://localhost:1240/v1
 OPENAI_COMPATIBLE_MODEL=qwen3.6-35b-a3b-mtp
 VISION_BASE_URL=http://localhost:1240/v1
 VISION_MODEL=qwen3.6-35b-a3b-mtp
+RENDERER_ENGINE=native
+BRAND_RENDER_MODE=native
 ```
 
 Use your local OpenAI-compatible server, LM Studio, or Bedrock settings as
-needed.
-Planner routing is controlled per job with:
+needed. Planner and design routing are controlled per job:
 
-- `planner_profile=fast|deep`
-- `quality_profile=fast|balanced|showcase`
-- `length_strategy=auto|concise|expanded`
+| Field | Values |
+| --- | --- |
+| `planner_profile` | `fast`, `deep` |
+| `quality_profile` | `fast`, `balanced`, `showcase` |
+| `length_strategy` | `auto`, `concise`, `expanded` |
+| `presentation_style` | `auto`, `consulting`, `investor_pitch`, `sales`, `academic_lecture`, `technical_deep_dive`, `keynote_narrative`, `status_report_qbr` |
+| `design_language` | `auto`, `editorial_serif`, `modern_geometric`, `bold_minimal`, `warm_magazine`, `technical_mono`, `data_forward` |
+| `background_style` | `auto`, `light`, `dark` |
 
 ## Quick Start: Docker UI
 
@@ -227,9 +243,9 @@ Premium/deep planner smoke, when a separate planner server is available:
 ```bash
 cd backend
 python -m app.tools.all_mode_smoke \
-  --base-url http://localhost:1240/v1 \
-  --model your-model-name \
-  --label deep-planner
+  --base-url http://athena.local:1240/v1 \
+  --model minimax-m2.7 \
+  --label minimax-m27
 ```
 
 ## API Overview
@@ -242,11 +258,24 @@ Main endpoints:
 | `POST` | `/api/jobs` | Create a generation job |
 | `GET` | `/api/jobs` | List jobs |
 | `GET` | `/api/jobs/{id}` | Get job status, previews, warnings, and QA |
+| `POST` | `/api/jobs/{id}/render` | Render a generated job paused at `planned` |
+| `GET` | `/api/jobs/{id}/outline` | Fetch a planned/generated outline for review |
+| `PATCH` | `/api/jobs/{id}/outline` | Edit outline titles/subheadings before render |
+| `GET` | `/api/jobs/{id}/planning/{artifact}` | Fetch planning artifacts such as `story-map`, `spec-gate`, or `narrative-pass` |
+| `GET` | `/api/jobs/{id}/qa/rendered-slide-audit` | Fetch rendered-slide audit findings |
+| `GET` | `/api/jobs/{id}/preview` | List rendered preview images |
 | `GET` | `/api/jobs/{id}/preview/{image}` | Fetch a rendered slide preview |
 | `GET` | `/api/jobs/{id}/download?format=pptx|pdf` | Download generated output |
-| `POST` | `/api/jobs/{id}/regen/{slide_index}` | Regenerate one slide |
+| `POST` | `/api/jobs/{id}/regen/{slide_index}` | Regenerate one slide, optionally with guidance or edits |
+| `PATCH` | `/api/jobs/{id}/slides/{slide_index}` | Directly edit title, subheading, points, layout, or background |
 | `POST` | `/api/templates/analyze` | Analyze a brand or strict PPTX template |
 | `GET` | `/api/templates` | List saved templates |
+| `GET` | `/api/templates/{id}` | Fetch a saved template profile |
+| `GET` | `/api/templates/{id}/assets` | List thumbnails, discovered images, logo state, and frame-map summary |
+| `GET` | `/api/templates/{id}/thumbnail/{image}` | Fetch a rendered template thumbnail |
+| `GET` | `/api/templates/{id}/logo` | Fetch the selected template logo |
+| `GET` | `/api/templates/{id}/image/{image}` | Fetch a discovered template image |
+| `PATCH` | `/api/templates/{id}/logo` | Select or remove a template logo override |
 | `PATCH` | `/api/templates/{id}` | Update template metadata/schema |
 | `DELETE` | `/api/templates/{id}` | Delete a template |
 | `POST` | `/api/templates/{id}/duplicate` | Duplicate a template |
@@ -260,14 +289,18 @@ Main endpoints:
 | `planner_profile` | `fast`, `deep` |
 | `quality_profile` | `fast`, `balanced`, `showcase` |
 | `length_strategy` | `auto`, `concise`, `expanded` |
+| `presentation_style` | `auto`, `consulting`, `investor_pitch`, `sales`, `academic_lecture`, `technical_deep_dive`, `keynote_narrative`, `status_report_qbr` |
+| `design_language` | `auto`, `editorial_serif`, `modern_geometric`, `bold_minimal`, `warm_magazine`, `technical_mono`, `data_forward` |
+| `background_style` | `auto`, `light`, `dark` |
 | `run_visual_qa` | boolean |
+| `plan_only` | boolean; generated modes only |
 | `instructions` | deck brief |
 | `documents` | uploaded source files |
 
 Job lifecycle:
 
 ```text
-queued -> analyzing -> planning -> generating -> qa -> done | error
+queued -> analyzing -> planning -> [planned] -> generating -> qa <-> repairing -> done | review_failed | error
 ```
 
 ## Repository Layout
@@ -278,7 +311,9 @@ backend/
     routes/              FastAPI API routes
     services/            pipeline services and public facades
     services/planning/   planner internals
-    services/pptx_rendering/
+    services/pptx_native/
+    services/pptx_rendering/  legacy deterministic renderer internals
+    services/slide_design/    renderer-agnostic design helpers
     services/visual_qa/
     workers/             Node workers for diagrams/icons
   tests/
@@ -308,11 +343,14 @@ scripts/
 - Generated-mode smoke gates should pass without planner fallback or build
   warnings. The current Qwen acceptance gate also expects no final planning
   warnings and no final visual-QA issues for the Beyond Vibe Coding smoke.
+- The default generated renderer should stay editable. Picture-dominated output
+  should surface `editability` build warnings instead of quietly passing review.
 
 ## Current Caveat
 
 SlideForge works end-to-end locally across freeform, brand, and strict modes,
-and the current Qwen path can produce polished, production-grade PPTX artifacts
-for the Beyond Vibe Coding smoke. The broader quality frontier is still manual
+and the current native-rendered Qwen path can produce polished, editable PPTX
+artifacts for the core smoke set. The broader quality frontier is still manual
 Office compatibility review, richer diagram/chart families, deeper brand/layout
-fidelity, and broader smoke coverage across non-demo source documents.
+fidelity beyond extracted BrandDNA, and broader smoke coverage across non-demo
+source documents.
