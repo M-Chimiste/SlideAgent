@@ -10,12 +10,40 @@ from app.config import Settings
 
 
 class OpenAICompatibleClient:
+    # A local model may legitimately take minutes to *generate* (read timeout),
+    # but *connecting* to a reachable server takes milliseconds. Without a
+    # separate connect timeout, an unreachable host (machine asleep, VPN down)
+    # black-holes the job for the full read timeout x retries — hours of
+    # "stuck", with the single job worker blocked for everyone behind it.
+    CONNECT_TIMEOUT_SECONDS = 10.0
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.base_url = settings.openai_compatible_base_url.rstrip("/")
         self.model = settings.openai_compatible_model
         self.api_key = settings.openai_compatible_api_key
         self.timeout = settings.openai_compatible_timeout_seconds
+
+    def _http_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(self.timeout, connect=self.CONNECT_TIMEOUT_SECONDS)
+
+    def preflight(self) -> None:
+        """Fail fast (and clearly) when the endpoint is unreachable, instead of
+        letting the first planning call hang for the full generation timeout.
+        Only connection-level failures raise — an HTTP error status means the
+        server is up (some OpenAI-compatible servers don't implement /models)."""
+        try:
+            with httpx.Client(timeout=httpx.Timeout(5.0)) as client:
+                client.get(
+                    f"{self.base_url}/models",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+        except httpx.TransportError as exc:
+            raise RuntimeError(
+                f"LLM endpoint unreachable at {self.base_url} "
+                f"({type(exc).__name__}: {exc}). Check that the model server is "
+                "running and the host is reachable, or update the *_BASE_URL in .env."
+            ) from exc
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     def complete_text(
@@ -41,7 +69,7 @@ class OpenAICompatibleClient:
         if self.settings.openai_compatible_reasoning_effort:
             payload["reasoning_effort"] = self.settings.openai_compatible_reasoning_effort
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self._http_timeout()) as client:
             response = client.post(
                 f"{self.base_url}/chat/completions",
                 json=payload,
@@ -130,7 +158,7 @@ class OpenAICompatibleClient:
         if self.settings.openai_compatible_reasoning_effort:
             payload["reasoning_effort"] = self.settings.openai_compatible_reasoning_effort
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self._http_timeout()) as client:
             response = client.post(
                 f"{self.base_url}/chat/completions",
                 json=payload,

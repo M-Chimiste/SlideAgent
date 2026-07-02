@@ -1,8 +1,51 @@
-import { CSSProperties } from "react";
-import { JobOutlineSlide, JobStatus, previewImageUrl, RenderedSlideAuditSlide } from "../api/client";
+import { CSSProperties, useEffect, useState } from "react";
+import {
+  EDITABLE_SLIDE_LAYOUTS,
+  JobOutlineSlide,
+  JobStatus,
+  previewImageUrl,
+  RenderedSlideAuditSlide,
+  SlideEditPayload,
+  SlidePoint,
+} from "../api/client";
 import { slideIssues } from "../qa";
 
 const MONO = "'IBM Plex Mono', monospace";
+
+const fieldStyle: CSSProperties = {
+  width: "100%",
+  padding: "8px 10px",
+  border: "1px solid var(--line)",
+  borderRadius: 8,
+  background: "var(--surface)",
+  color: "var(--ink)",
+  font: "inherit",
+  fontSize: 12.5,
+};
+
+const primaryBtnStyle: CSSProperties = {
+  height: 44,
+  background: "var(--ink)",
+  color: "var(--paper)",
+  border: "none",
+  borderRadius: 8,
+  font: "inherit",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+const smallBtnStyle: CSSProperties = {
+  border: "1px solid var(--line)",
+  background: "transparent",
+  color: "var(--ink-2)",
+  borderRadius: 8,
+  font: "inherit",
+  fontSize: 12,
+  cursor: "pointer",
+  padding: "6px 10px",
+};
 
 type Props = {
   jobId: string;
@@ -12,8 +55,12 @@ type Props = {
   auditSlide?: RenderedSlideAuditSlide;
   regening: boolean;
   regenError: string | null;
+  saving: boolean;
+  saveError: string | null;
+  previewVersion?: number;
   onClose: () => void;
-  onRegen: () => void;
+  onRegen: (guidance: string, edits?: SlideEditPayload) => void;
+  onSaveEdit: (payload: SlideEditPayload) => void;
 };
 
 function qaBadge(ok: boolean): { label: string; bg: string; ink: string } {
@@ -30,9 +77,47 @@ export default function SlideLightbox({
   auditSlide,
   regening,
   regenError,
+  saving,
+  saveError,
+  previewVersion,
   onClose,
   onRegen,
+  onSaveEdit,
 }: Props) {
+  const [guidance, setGuidance] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editSubheading, setEditSubheading] = useState("");
+  const [editLayout, setEditLayout] = useState("");
+  const [editPoints, setEditPoints] = useState<SlidePoint[]>([]);
+
+  useEffect(() => {
+    setEditTitle(outlineSlide?.action_title || "");
+    setEditSubheading(outlineSlide?.subheading || "");
+    setEditLayout(outlineSlide?.layout || "");
+    setEditPoints((outlineSlide?.points || []).map((p) => ({ ...p })));
+    setEditing(false);
+    setGuidance("");
+  }, [outlineSlide, index]);
+
+  const editable =
+    !!outlineSlide &&
+    outlineSlide.mode === "flexible" &&
+    ["done", "review_failed", "planned"].includes(status.job.status);
+
+  const editPayload = (): SlideEditPayload => {
+    const payload: SlideEditPayload = {
+      action_title: editTitle,
+      subheading: editSubheading,
+      points: editPoints.filter((p) => p.title.trim() || p.body.trim()),
+    };
+    if (editLayout && editLayout !== (outlineSlide?.layout || "")) {
+      payload.layout = editLayout;
+    }
+    return payload;
+  };
+
+  const submitEdit = () => onSaveEdit(editPayload());
   const images = status.preview_images ?? [];
   const img = images[index];
   const issues = slideIssues(status, index);
@@ -95,18 +180,29 @@ export default function SlideLightbox({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "100%",
-          maxWidth: 1120,
+          maxWidth: editing ? 1240 : 1120,
+          maxHeight: "calc(100vh - 56px)",
           background: "var(--surface)",
           border: "1px solid var(--line-2)",
           borderRadius: 14,
           boxShadow: "var(--shadow-lg)",
           overflow: "hidden",
           display: "grid",
-          gridTemplateColumns: "1fr 300px",
+          gridTemplateColumns: editing ? "1fr 520px" : "1fr 300px",
         }}
       >
         {/* the slide */}
-        <div style={{ padding: 30, borderRight: "1px solid var(--line)", background: "var(--paper)" }}>
+        <div
+          style={{
+            padding: 30,
+            borderRight: "1px solid var(--line)",
+            background: "var(--paper)",
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+          }}
+        >
           <div
             style={{
               position: "relative",
@@ -131,7 +227,7 @@ export default function SlideLightbox({
             />
             {img ? (
               <img
-                src={previewImageUrl(jobId, img)}
+                src={previewImageUrl(jobId, img, previewVersion)}
                 alt={`Slide ${index + 1}`}
                 style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
               />
@@ -155,7 +251,7 @@ export default function SlideLightbox({
         </div>
 
         {/* QA side */}
-        <div style={{ padding: "26px 24px", display: "flex", flexDirection: "column" }}>
+        <div style={{ padding: "26px 24px", display: "flex", flexDirection: "column", overflowY: "auto", minHeight: 0 }}>
           <div
             style={{
               display: "flex",
@@ -184,6 +280,8 @@ export default function SlideLightbox({
             </button>
           </div>
 
+          {!editing && (
+          <>
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".1em", color: "var(--ink-3)", marginBottom: 12 }}>
             QA STATUS
           </div>
@@ -372,36 +470,163 @@ export default function SlideLightbox({
             ISSUES
           </div>
           <div style={{ flex: 1, fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5 }}>{issue}</div>
+          </>
+          )}
 
-          <button
-            onClick={onRegen}
-            disabled={regening}
-            style={{
-              width: "100%",
-              height: 44,
-              marginTop: 18,
-              background: "var(--ink)",
-              color: "var(--paper)",
-              border: "none",
-              borderRadius: 8,
-              font: "inherit",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: regening ? "default" : "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 8,
-              whiteSpace: "nowrap",
-              opacity: regening ? 0.75 : 1,
-            }}
-          >
-            {regening ? "Regenerating…" : "Regenerate slide"}
-          </button>
-          {regenError && (
-            <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--bad)", lineHeight: 1.4 }}>
-              {regenError}
+          {editing && editable && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".1em", color: "var(--ink-3)" }}>
+                EDIT SLIDE
+              </div>
+              <input
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                placeholder="Action title"
+                style={fieldStyle}
+              />
+              <textarea
+                value={editSubheading}
+                onChange={(e) => setEditSubheading(e.target.value)}
+                placeholder="Positioning subheading"
+                rows={2}
+                style={{ ...fieldStyle, resize: "vertical" }}
+              />
+              <select value={editLayout} onChange={(e) => setEditLayout(e.target.value)} style={fieldStyle}>
+                <option value="">Layout: {outlineSlide?.layout || "keep current"}</option>
+                {EDITABLE_SLIDE_LAYOUTS.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+              {editPoints.map((p, i) => (
+                <div
+                  key={i}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 4,
+                    padding: 8,
+                    border: "1px solid var(--line)",
+                    borderRadius: 8,
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      value={p.title}
+                      onChange={(e) =>
+                        setEditPoints(editPoints.map((q, j) => (j === i ? { ...q, title: e.target.value } : q)))
+                      }
+                      placeholder={`Point ${i + 1} lead`}
+                      style={{ ...fieldStyle, flex: 1 }}
+                    />
+                    <button
+                      onClick={() => setEditPoints(editPoints.filter((_, j) => j !== i))}
+                      title="Remove point"
+                      style={{ ...smallBtnStyle, width: 30 }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <textarea
+                    value={p.body}
+                    onChange={(e) =>
+                      setEditPoints(editPoints.map((q, j) => (j === i ? { ...q, body: e.target.value } : q)))
+                    }
+                    placeholder="One complete supporting sentence"
+                    rows={2}
+                    style={{ ...fieldStyle, resize: "vertical" }}
+                  />
+                </div>
+              ))}
+              {editPoints.length < 6 && (
+                <button
+                  onClick={() => setEditPoints([...editPoints, { title: "", body: "", icon: "" }])}
+                  style={smallBtnStyle}
+                >
+                  + Add point
+                </button>
+              )}
+              <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".1em", color: "var(--ink-3)", marginTop: 8 }}>
+                MODEL GUIDANCE
+              </div>
+              <textarea
+                value={guidance}
+                onChange={(e) => setGuidance(e.target.value)}
+                placeholder="Optional context for the model — e.g. 'Reframe around cost risk for the CFO; keep my second point verbatim; more quantitative.'"
+                rows={3}
+                style={{ ...fieldStyle, resize: "vertical" }}
+              />
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  position: "sticky",
+                  bottom: -26,
+                  marginBottom: -26,
+                  padding: "10px 0 26px",
+                  background: "var(--surface)",
+                }}
+              >
+                <button
+                  onClick={submitEdit}
+                  disabled={saving || regening}
+                  style={{ ...primaryBtnStyle, flex: 1, opacity: saving ? 0.75 : 1 }}
+                >
+                  {saving ? "Saving & rebuilding…" : "Save changes"}
+                </button>
+                <button
+                  onClick={() => onRegen(guidance.trim(), editPayload())}
+                  disabled={saving || regening}
+                  title="Apply your edits, then let the model rework the slide with your guidance"
+                  style={{ ...primaryBtnStyle, flex: 1, background: "var(--accent)", opacity: regening ? 0.75 : 1 }}
+                >
+                  {regening ? "Regenerating…" : "Save & regenerate"}
+                </button>
+                <button onClick={() => setEditing(false)} disabled={saving || regening} style={{ ...smallBtnStyle, height: 44 }}>
+                  Cancel
+                </button>
+              </div>
+              {regenError && (
+                <div style={{ fontSize: 11.5, color: "var(--bad)", lineHeight: 1.4 }}>{regenError}</div>
+              )}
+              {saveError && <div style={{ fontSize: 11.5, color: "var(--bad)", lineHeight: 1.4 }}>{saveError}</div>}
             </div>
+          )}
+
+          {!editing && (
+            <>
+              <textarea
+                value={guidance}
+                onChange={(e) => setGuidance(e.target.value)}
+                placeholder="Guidance for regeneration (optional) — e.g. 'Reframe around cost risk, make it a comparison, more quantitative.'"
+                rows={2}
+                style={{ ...fieldStyle, marginTop: 16, resize: "vertical" }}
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button
+                  onClick={() => onRegen(guidance.trim())}
+                  disabled={regening || saving}
+                  style={{ ...primaryBtnStyle, flex: 1, opacity: regening ? 0.75 : 1 }}
+                >
+                  {regening ? "Regenerating…" : guidance.trim() ? "Regenerate with guidance" : "Regenerate slide"}
+                </button>
+                {editable && (
+                  <button
+                    onClick={() => setEditing(true)}
+                    disabled={regening || saving}
+                    style={{ ...smallBtnStyle, height: 44, padding: "0 14px" }}
+                  >
+                    Edit
+                  </button>
+                )}
+              </div>
+              {regenError && (
+                <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--bad)", lineHeight: 1.4 }}>
+                  {regenError}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

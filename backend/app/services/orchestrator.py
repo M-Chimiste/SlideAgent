@@ -96,6 +96,13 @@ class JobOrchestrator:
                 template, generation_mode, bundle, job, design_language, presentation_style
             )
             planner = self._planner_for_job(job)
+            # Fail fast with a clear error when the configured LLM endpoint is
+            # unreachable — otherwise the first planning call would sit in a
+            # connect black-hole for the full generation timeout, pinning the
+            # job worker while the UI shows an early stage forever.
+            preflight = getattr(planner.llm_client, "preflight", None)
+            if callable(preflight):
+                preflight()
             outlines, warnings = planner.plan(
                 template,
                 bundle,
@@ -347,20 +354,129 @@ class JobOrchestrator:
             completed_at=self._timestamp(),
         )
 
+    def _apply_slide_fields(self, outline, fields: dict):
+        """Apply validated slide edits (title/subheading/points/layout) to an
+        outline copy — the single write path shared by manual edits and guided
+        regeneration, so every renderer sees a consistent spec."""
+        from app.services import slide_types
+
+        revised = outline.model_copy(deep=True)
+        content = revised.content_json
+        title = " ".join(str(fields.get("action_title") or "").split())
+        if title:
+            revised.label = title
+            content["action_title"] = title
+            content["title"] = title
+        if fields.get("subheading") is not None:
+            content["subheading"] = " ".join(str(fields["subheading"]).split())
+        points = fields.get("points")
+        if isinstance(points, list) and points:
+            clean = [
+                {
+                    "title": " ".join(str(p.get("title") or "").split()),
+                    "body": " ".join(str(p.get("body") or "").split()),
+                    **({"icon": str(p.get("icon"))} if p.get("icon") else {}),
+                }
+                for p in points
+                if isinstance(p, dict) and (p.get("title") or p.get("body"))
+            ]
+            if clean:
+                exhibit = dict(content.get("exhibit_spec") or {})
+                exhibit["points"] = clean
+                exhibit.setdefault("type", "callouts")
+                content["exhibit_spec"] = exhibit
+                content["bullets"] = [
+                    f"{c['title'].rstrip('.')}: {c['body']}" if c["title"] and c["body"]
+                    else (c["title"] or c["body"])
+                    for c in clean
+                ]
+        layout = str(fields.get("layout") or "").strip().lower()
+        if layout:
+            stype_key = slide_types.slide_type_for_archetype(layout)
+            stype = slide_types.get_slide_type(stype_key)
+            revised.layout_json["layout"] = layout
+            content["slide_type"] = stype_key
+            content["pinned_primitive"] = stype.primitive
+            content["pinned_family"] = stype.composition_family
+            exhibit = dict(content.get("exhibit_spec") or {})
+            if exhibit:
+                content["exhibit_spec"] = exhibit
+        return revised
+
     async def regenerate_slide(
         self,
         job_id: str,
         template: TemplateProfile,
         slide_index: int,
+        guidance: str = "",
+        edits: dict | None = None,
     ) -> None:
+        outlines = await self.store.list_slide_outlines(job_id)
+        bundle = self.storage.load_document_bundle(job_id)
+        updated = []
+        for outline in outlines:
+            if outline.slide_index == slide_index and outline.mode == "flexible":
+                # Manual edits apply first so the model reworks the USER'S
+                # version of the slide (one rebuild for edit + regenerate).
+                base = self._apply_slide_fields(outline, edits) if edits else outline
+                revised = None
+                planner = self.planner
+                if planner.llm_client is not None and bundle is not None:
+                    fields = planner.regenerate_outline_slide(base, bundle, guidance)
+                    if fields:
+                        revised = self._apply_slide_fields(base, fields)
+                if revised is None:
+                    # No client / rejected rewrite: keep the user's edits when
+                    # present; the deterministic design tweak is the last resort.
+                    revised = base if edits else self.designer.revise_for_qa(base)
+                await self.store.update_slide_outline(
+                    revised.id,
+                    label=revised.label,
+                    content_json=revised.content_json,
+                    layout_json=revised.layout_json,
+                )
+                updated.append(revised)
+            else:
+                updated.append(outline)
+        working_dir = self.storage.job_dir(job_id)
+        await self._rebuild_and_review(job_id, template, updated, working_dir)
+
+    async def edit_slide(
+        self,
+        job_id: str,
+        template: TemplateProfile,
+        slide_index: int,
+        fields: dict,
+        rebuild: bool = True,
+    ) -> None:
+        """Apply direct user edits (title/subheading/points/layout) to one slide
+        and rebuild the deck so the previews/downloads reflect them."""
         outlines = await self.store.list_slide_outlines(job_id)
         updated = []
         for outline in outlines:
             if outline.slide_index == slide_index and outline.mode == "flexible":
-                updated.append(self.designer.revise_for_qa(outline))
+                revised = self._apply_slide_fields(outline, fields)
+                await self.store.update_slide_outline(
+                    revised.id,
+                    label=revised.label,
+                    content_json=revised.content_json,
+                    layout_json=revised.layout_json,
+                )
+                updated.append(revised)
             else:
                 updated.append(outline)
-        working_dir = self.storage.job_dir(job_id)
+        if rebuild:
+            await self._rebuild_and_review(
+                job_id, template, updated, self.storage.job_dir(job_id)
+            )
+
+    async def _rebuild_and_review(
+        self,
+        job_id: str,
+        template: TemplateProfile,
+        updated: list[SlideOutline],
+        working_dir: Path,
+    ) -> None:
         output_path = self.storage.output_pptx_path(job_id)
         strict_warnings = self.builder.build_deck(template, updated, output_path, working_dir)
         qa_result, images = self.qa_agent.inspect_deck(

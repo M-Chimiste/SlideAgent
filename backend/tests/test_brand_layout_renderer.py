@@ -105,7 +105,7 @@ def test_instantiation_missing_source_returns_false(tmp_path: Path) -> None:
 
 def test_build_deck_routes_to_instantiation_when_flag_on(tmp_path: Path) -> None:
     profile = _brand_template(tmp_path)
-    builder = PptxBuilder(node_runner=object(), brand_layout_instantiation=True)
+    builder = PptxBuilder(node_runner=object(), brand_layout_instantiation=True, brand_render_mode="clone")
     out = tmp_path / "deck.pptx"
 
     builder.build_deck(profile, _sample_outlines(), out, tmp_path)

@@ -481,6 +481,7 @@ async def test_outline_endpoint_returns_review_safe_slide_data() -> None:
             "visual_intent": {},
             "visual_degradation": {},
             "exhibit_type": "comparison_table",
+            "points": [],
             "sources": ["Uploaded source: Section 1"],
             "source_refs": ["sec-1"],
             "speaker_notes": "Use this as the talk track.",
@@ -1201,6 +1202,7 @@ async def test_template_asset_endpoints_return_thumbnails_and_logo(tmp_path) -> 
         "template_id": "brand-template",
         "thumbnails": ["slide-001.jpg"],
         "logo_available": True,
+        "images": [],
         "frame_map": {
             "available": True,
             "artifact": "template-frame-map",
@@ -1254,3 +1256,61 @@ async def test_template_asset_endpoints_return_clean_404s(tmp_path) -> None:
     assert missing_thumb.value.status_code == 404
     assert traversal.value.status_code == 404
     assert missing_logo.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_edit_slide_rejects_running_jobs_and_bad_layouts() -> None:
+    from app.routes.jobs import SlideEditRequest, edit_slide
+
+    class EditStore(DummyStore):
+        def __init__(self, status: str) -> None:
+            super().__init__()
+            self._status = status
+
+        async def get_job(self, job_id: str):
+            return JobRecord(
+                id=job_id,
+                template_id=FREEFORM_TEMPLATE_ID,
+                instructions="",
+                status=self._status,
+                progress=1.0,
+                qa_rounds=0,
+                warnings=[],
+                created_at="2026-01-01T00:00:00Z",
+            )
+
+    class NoopOrchestrator:
+        def freeform_template(self):
+            return TemplateProfile(
+                id=FREEFORM_TEMPLATE_ID, name="Freeform", type="freeform",
+                brand=BrandDNA(), slides=[], source_file="",
+                created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
+            )
+
+        async def edit_slide(self, *args, **kwargs) -> None:
+            self.called = True
+
+    # running jobs cannot be edited
+    with pytest.raises(HTTPException) as exc:
+        await edit_slide(
+            "job-1", 1, SlideEditRequest(action_title="New title"),
+            store=EditStore("generating"), orchestrator=NoopOrchestrator(),
+        )
+    assert exc.value.status_code == 409
+
+    # unknown layout rejected
+    with pytest.raises(HTTPException) as exc:
+        await edit_slide(
+            "job-1", 1, SlideEditRequest(layout="hologram"),
+            store=EditStore("done"), orchestrator=NoopOrchestrator(),
+        )
+    assert exc.value.status_code == 422
+
+    # valid edit on a terminal job reaches the orchestrator
+    orch = NoopOrchestrator()
+    result = await edit_slide(
+        "job-1", 1, SlideEditRequest(action_title="New title", layout="icon_rows"),
+        store=EditStore("done"), orchestrator=orch,
+    )
+    assert result == {"status": "updated"}
+    assert getattr(orch, "called", False)

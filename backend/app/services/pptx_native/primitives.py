@@ -22,6 +22,7 @@ from app.services.slide_design.content import (
 )
 
 from . import components as C
+from . import icons
 from .geometry import Rect, column_split, grid, stack
 from .theme import Theme, card_gap_in, pt
 
@@ -65,6 +66,62 @@ def _short(value, max_chars: int) -> str:
         # word-boundary cut, then drop the trailing comma/dash the cut left behind
         t = t[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:—–-")
     return _trim_dangling(t)
+
+
+# Icon-circle glyphs: a meaning symbol when the item's hint/lead signals one,
+# else a monogram of the lead word. Never an empty dot (reads as placeholder)
+# and never the audit-flagged bullet glyphs [•◦▪●].
+_GLYPH_RULES: list[tuple[tuple[str, ...], str]] = [
+    (("check", "valid", "success", "complete", "pass", "proof", "benefit", "win"), "✓"),
+    (("risk", "fail", "problem", "warning", "gap", "break", "anti", "threat", "error"), "!"),
+    (("shift", "transition", "migrat", "adopt", "handoff", "flow", "pipeline"), "→"),
+    (("grow", "increase", "scale", "improve", "gain", "expand", "accelerat"), "↑"),
+    (("reduc", "declin", "fewer", "lower", "shrink", "cut "), "↓"),
+    (("question", "unknown", "uncertain", "decision", "decide"), "?"),
+]
+
+
+def _item_glyph(it: dict) -> str:
+    signal = f"{it.get('icon') or ''} {it.get('title') or ''}".lower()
+    for keys, glyph in _GLYPH_RULES:
+        if any(k in signal for k in keys):
+            return glyph
+    lead = (it.get("title") or it.get("body") or "").strip()
+    return lead[:1].upper() if lead[:1].isalpha() else (lead[:1] or "")
+
+
+def _add_item_icon(slide, cx: float, cy: float, d: float, accent, it: dict, index: int) -> None:
+    """Reference-deck icon chip: accent circle + white react-icons (Feather)
+    icon resolved from the item's hint/lead. Glyph/monogram fallback when the
+    Node icon worker is unavailable."""
+    name = icons.resolve_icon(
+        str(it.get("icon") or ""), str(it.get("title") or ""), str(it.get("body") or ""), index
+    )
+    C.add_icon_circle(slide, cx, cy, d, accent, _item_glyph(it),
+                      icon_path=icons.icon_file(name, "FFFFFF"))
+
+
+def _lead_body_paras(it: dict, theme: Theme, pal, *, lead_pt: float = 18.0,
+                     body_pt: float = 15.5, lead_scale: float = 1.0,
+                     lead_color=None, body_color=None,
+                     serif_lead: bool = True, line_spacing: float = 1.35) -> list:
+    """Paragraphs for an item card/row (sizes in CSS px, like every primitive).
+    An untitled item renders its FULL body as the content, slightly larger —
+    never a chopped pseudo-title with the rest of the sentence discarded."""
+    title = str(it.get("title") or "")
+    body_text = str(it.get("body") or "")
+    lead_color = lead_color if lead_color is not None else pal.headline
+    body_color = body_color if body_color is not None else pal.body
+    paras: list = []
+    if title:
+        paras.append(Para(title, pt(lead_pt, lead_scale), lead_color, bold=True,
+                          font=_serif(theme) if serif_lead else None,
+                          line_spacing=1.1, space_after_pt=3))
+        if body_text:
+            paras.append(Para(body_text, pt(body_pt), body_color, line_spacing=line_spacing))
+    elif body_text:
+        paras.append(Para(body_text, pt(body_pt + 1.5), body_color, line_spacing=line_spacing))
+    return paras
 
 
 def _header(slide, content: dict, theme: Theme, pal, area: Rect, *, title_size: float | None = None) -> Rect:
@@ -119,7 +176,8 @@ def _footer(slide, content: dict, theme: Theme, pal, index: int, total: int) -> 
 # --------------------------------------------------------------------------- #
 # Item-card grid (shared by cards/steps/checklist/anti_pattern)
 # --------------------------------------------------------------------------- #
-def _card_content_height(items: list[dict], text_w_in: float) -> float:
+def _card_content_height(items: list[dict], text_w_in: float, *, lead_pt: float = 18.0,
+                         body_pt: float = 15.5) -> float:
     """Tallest card's content height (inches): title + body wrap estimate plus
     padding — so cards hug their content instead of floating text in a mostly
     empty box."""
@@ -130,9 +188,10 @@ def _card_content_height(items: list[dict], text_w_in: float) -> float:
         title = str(it.get("title") or "")
         body_text = str(it.get("body") or "")
         if title:
-            h += fit.estimate_lines([title], width_pt, 18) * (18 * 1.15) / 72 + 0.05
+            h += fit.estimate_lines([title], width_pt, lead_pt) * (lead_pt * 1.15) / 72 + 0.05
         if body_text:
-            h += fit.estimate_lines([body_text], width_pt, 15.5) * (15.5 * 1.4) / 72
+            size = body_pt if title else body_pt + 1.5
+            h += fit.estimate_lines([body_text], width_pt, size) * (size * 1.4) / 72
         tallest = max(tallest, h)
     return tallest
 
@@ -143,34 +202,39 @@ def _card_grid(slide, content, theme, pal, body: Rect, *, numbered=False, max_n=
     cols = 1 if n == 1 else (2 if n in (2, 4) else 3)
     gap = card_gap_in(theme)
     n_rows = -(-n // cols)
+    # Few items get BIGGER panels and type, not more whitespace — two tiny
+    # cards floating in an empty canvas is the opposite of consultant-grade.
+    duo = n <= 2
+    lead_pt_v = 22.0 if duo else 18.0
+    body_pt_v = 17.0 if duo else 15.5
+    icon_d = 0.6 if duo else 0.5
     # content-sized card height (clamped), vertically centered block — matches
     # the CSS ``align-content: center`` without the dead space a fixed-height
     # card leaves under two lines of text.
-    cap_h = 2.7 if n_rows == 1 else 2.4
+    cap_h = 3.4 if duo else (2.7 if n_rows == 1 else 2.4)
     cell_w = (body.w - gap * (cols - 1)) / cols
-    content_h = _card_content_height(items, cell_w - 0.36 - 0.62)
-    card_h = min((body.h - gap * (n_rows - 1)) / n_rows, cap_h, max(1.15, content_h))
+    content_h = _card_content_height(items, cell_w - 0.36 - 0.62,
+                                     lead_pt=lead_pt_v, body_pt=body_pt_v)
+    # Duo panels get a height floor so two cards command the canvas instead of
+    # floating as thin strips in empty space.
+    card_h = min((body.h - gap * (n_rows - 1)) / n_rows, cap_h,
+                 max(2.4 if duo else 1.15, content_h))
     used_h = card_h * n_rows + gap * (n_rows - 1)
     top = body.y + max(0.0, (body.h - used_h) / 2)
     cells = grid(n, cols, Rect(body.x, top, body.w, used_h), gap)
     for i, (it, cell) in enumerate(zip(items, cells)):
         C.add_card(slide, cell, theme, pal)
-        inner = cell.inset(0.18, 0.2)
-        cy = inner.y + 0.26
+        inner = cell.inset(0.18, 0.2 if not duo else 0.3)
+        cy = inner.y + 0.26 + (0.06 if duo else 0.0)
+        accent = pal.teal if i % 2 == 0 else pal.gold
         if numbered:
-            C.add_badge(slide, inner.x + 0.24, cy, 0.42, pal.teal if i % 2 == 0 else pal.gold, number=str(i + 1))
+            C.add_badge(slide, inner.x + 0.24, cy, 0.42, accent, number=str(i + 1))
         else:
-            C.add_circle(slide, inner.x + 0.26, cy, 0.5, pal.teal if i % 2 == 0 else pal.gold)
-        tx = inner.x + 0.62
+            _add_item_icon(slide, inner.x + 0.26, cy, icon_d, accent, it, i)
+        tx = inner.x + (0.72 if duo else 0.62)
         tw = inner.right - tx
-        title = it.get("title") or ""
-        body_text = it.get("body") or ""
-        paras = []
-        if title:
-            paras.append(Para(title, pt(18), pal.headline, bold=True, font=_serif(theme), line_spacing=1.1,
-                              space_after_pt=3))
-        if body_text:
-            paras.append(Para(body_text, pt(15.5), pal.body, line_spacing=1.4))
+        paras = _lead_body_paras(it, theme, pal, lead_pt=lead_pt_v, body_pt=body_pt_v,
+                                 line_spacing=1.4)
         if paras:
             C.add_paragraphs(slide, Rect(tx, inner.y + 0.04, tw, inner.h - 0.04), paras)
 
@@ -190,14 +254,23 @@ def rows(slide, content, theme, pal, body):
     for i, (it, cell) in enumerate(zip(items, cells)):
         C.add_card(slide, cell, theme, pal)
         inner = cell.inset(0.12, 0.24)
-        C.add_circle(slide, inner.x + 0.26, inner.cy, 0.5, pal.teal if i % 2 == 0 else pal.gold)
-        title = it.get("title") or _short(it.get("body"), 60)
-        bodyt = it.get("body") if it.get("title") else ""
-        C.add_paragraphs(slide, Rect(inner.x + 0.66, cell.y, 3.0, cell.h),
-                         [Para(title, pt(19), pal.headline, bold=True, line_spacing=1.05)], anchor=MSO_ANCHOR.MIDDLE)
-        if bodyt:
-            C.add_paragraphs(slide, Rect(inner.x + 3.8, cell.y, inner.right - (inner.x + 3.8), cell.h),
-                             [Para(bodyt, pt(15.5), pal.body, line_spacing=1.35)], anchor=MSO_ANCHOR.MIDDLE)
+        accent = pal.teal if i % 2 == 0 else pal.gold
+        _add_item_icon(slide, inner.x + 0.26, inner.cy, 0.5, accent, it, i)
+        tx = inner.x + 0.66
+        if it.get("title"):
+            C.add_paragraphs(slide, Rect(tx, cell.y, 3.0, cell.h),
+                             [Para(it["title"], pt(19), pal.headline, bold=True, line_spacing=1.05)],
+                             anchor=MSO_ANCHOR.MIDDLE)
+            if it.get("body"):
+                C.add_paragraphs(slide, Rect(inner.x + 3.8, cell.y, inner.right - (inner.x + 3.8), cell.h),
+                                 [Para(it["body"], pt(15.5), pal.body, line_spacing=1.35)],
+                                 anchor=MSO_ANCHOR.MIDDLE)
+        else:
+            # Untitled: the full sentence IS the row — render it whole across
+            # the row instead of a 60-char chop with the remainder discarded.
+            C.add_paragraphs(slide, Rect(tx, cell.y, inner.right - tx, cell.h),
+                             [Para(it.get("body") or "", pt(16.5), pal.body, line_spacing=1.35)],
+                             anchor=MSO_ANCHOR.MIDDLE)
 
 
 def statement(slide, content, theme, pal, body):
@@ -289,14 +362,20 @@ def callout_list(slide, content, theme, pal, body):
     C.add_paragraphs(slide, finner, feat_paras, anchor=MSO_ANCHOR.MIDDLE)
     if rest:
         mini = stack(cols[1], len(rest), card_gap_in(theme))
+        solo = len(rest) == 1  # one supporting card fills the column, larger type
         for i, (it, cell) in enumerate(zip(rest, mini)):
             C.add_card(slide, cell, theme, pal)
             inner = cell.inset(0.1, 0.2)
-            C.add_circle(slide, inner.x + 0.22, inner.cy, 0.42, pal.teal if i % 2 == 0 else pal.gold)
-            C.add_paragraphs(slide, Rect(inner.x + 0.56, cell.y, inner.right - (inner.x + 0.56), cell.h), [
-                Para(it.get("title") or _short(it.get("body"), 50), pt(17), pal.headline, bold=True, space_after_pt=2),
-                Para(it.get("body") if it.get("title") else "", pt(14.5), pal.body, line_spacing=1.3),
-            ], anchor=MSO_ANCHOR.MIDDLE)
+            accent = pal.teal if i % 2 == 0 else pal.gold
+            _add_item_icon(slide, inner.x + 0.22, inner.cy, 0.5 if solo else 0.42, accent, it, i)
+            paras = _lead_body_paras(
+                it, theme, pal,
+                lead_pt=20 if solo else 17,
+                body_pt=16 if solo else 14.5,
+                serif_lead=False, line_spacing=1.3,
+            )
+            C.add_paragraphs(slide, Rect(inner.x + 0.56, cell.y, inner.right - (inner.x + 0.56), cell.h),
+                             paras, anchor=MSO_ANCHOR.MIDDLE)
 
 
 def _metric_value_display(value: str) -> str:
@@ -402,11 +481,11 @@ def matrix(slide, content, theme, pal, body):
     for i, (it, cell) in enumerate(zip(items, cells)):
         C.add_card(slide, cell, theme, pal)
         inner = cell.inset(0.22, 0.24)
-        C.add_paragraphs(slide, inner, [
+        paras = [
             Para((qlabels[i] if i < len(qlabels) else labels[i]).upper(), pt(14), pal.eyebrow, bold=True, space_after_pt=4),
-            Para(it.get("title") or _short(it.get("body"), 60), pt(18), pal.headline, bold=True, space_after_pt=3),
-            Para(it.get("body") if it.get("title") else "", pt(14.5), pal.body, line_spacing=1.35),
-        ])
+            *_lead_body_paras(it, theme, pal, lead_pt=18, body_pt=14.5, serif_lead=False, line_spacing=1.35),
+        ]
+        C.add_paragraphs(slide, inner, paras)
 
 
 def timeline(slide, content, theme, pal, body):
@@ -415,10 +494,10 @@ def timeline(slide, content, theme, pal, body):
     cells = stack(body, n, 0.14)
     for i, (it, cell) in enumerate(zip(items, cells)):
         C.add_badge(slide, cell.x + 0.3, cell.cy, 0.46, pal.teal if i % 2 == 0 else pal.gold, number=str(i + 1))
-        C.add_paragraphs(slide, Rect(cell.x + 0.7, cell.y, cell.w - 0.7, cell.h), [
-            Para(it.get("title") or _short(it.get("body"), 70), pt(18), pal.headline, bold=True, space_after_pt=2),
-            Para(it.get("body") if it.get("title") else "", pt(15), pal.body, line_spacing=1.35),
-        ], anchor=MSO_ANCHOR.MIDDLE)
+        C.add_paragraphs(slide, Rect(cell.x + 0.7, cell.y, cell.w - 0.7, cell.h),
+                         _lead_body_paras(it, theme, pal, lead_pt=18, body_pt=15,
+                                          serif_lead=False, line_spacing=1.35),
+                         anchor=MSO_ANCHOR.MIDDLE)
 
 
 def layers(slide, content, theme, pal, body):
@@ -428,13 +507,18 @@ def layers(slide, content, theme, pal, body):
     for i, (it, cell) in enumerate(zip(items, cells)):
         C.add_card(slide, cell, theme, pal)
         inner = cell.inset(0.1, 0.24)
-        C.add_paragraphs(slide, Rect(inner.x, cell.y, 2.8, cell.h),
-                         [Para(it.get("title") or _short(it.get("body"), 60), pt(18), pal.headline, bold=True)],
-                         anchor=MSO_ANCHOR.MIDDLE)
-        bodyt = it.get("body") if it.get("title") else ""
-        if bodyt:
-            C.add_paragraphs(slide, Rect(inner.x + 3.0, cell.y, inner.right - (inner.x + 3.0), cell.h),
-                             [Para(bodyt, pt(15), pal.body, line_spacing=1.35)], anchor=MSO_ANCHOR.MIDDLE)
+        if it.get("title"):
+            C.add_paragraphs(slide, Rect(inner.x, cell.y, 2.8, cell.h),
+                             [Para(it["title"], pt(18), pal.headline, bold=True)],
+                             anchor=MSO_ANCHOR.MIDDLE)
+            if it.get("body"):
+                C.add_paragraphs(slide, Rect(inner.x + 3.0, cell.y, inner.right - (inner.x + 3.0), cell.h),
+                                 [Para(it["body"], pt(15), pal.body, line_spacing=1.35)],
+                                 anchor=MSO_ANCHOR.MIDDLE)
+        else:
+            C.add_paragraphs(slide, Rect(inner.x, cell.y, inner.w, cell.h),
+                             [Para(it.get("body") or "", pt(16), pal.body, line_spacing=1.35)],
+                             anchor=MSO_ANCHOR.MIDDLE)
 
 
 def columns(slide, content, theme, pal, body):
@@ -445,10 +529,10 @@ def columns(slide, content, theme, pal, body):
     for it, col in zip(items, cols):
         C.add_card(slide, col, theme, pal)
         inner = col.inset(0.26)
-        C.add_paragraphs(slide, inner, [
-            Para(it.get("title") or _short(it.get("body"), 60), pt(21, theme.heading_scale), pal.headline, bold=True, font=_serif(theme), space_after_pt=8),
-            Para(it.get("body") if it.get("title") else "", pt(15), pal.body, line_spacing=1.4),
-        ])
+        C.add_paragraphs(slide, inner,
+                         _lead_body_paras(it, theme, pal, lead_pt=21,
+                                          lead_scale=theme.heading_scale,
+                                          body_pt=15, line_spacing=1.4))
 
 
 def cover(slide, content, theme, pal, body):
@@ -456,11 +540,16 @@ def cover(slide, content, theme, pal, body):
     sub = _clean_sentence(content.get("subheading") or content.get("summary") or "")
     C.add_paragraphs(slide, Rect(body.x, 2.2, body.w, 0.4),
                      [Para("WHITEPAPER  ·  EXECUTIVE BRIEFING", pt(15), pal.gold, bold=True)])
-    size = pt(74 if len(title) <= 46 else 56, theme.heading_scale)
-    C.add_paragraphs(slide, Rect(body.x, 2.7, body.w, 2.4),
+    size = pt(74 if len(title) <= 46 else (56 if len(title) <= 90 else 44), theme.heading_scale)
+    th = _text_box_height(title, size, body.w)
+    C.add_paragraphs(slide, Rect(body.x, 2.7, body.w, th),
                      [Para(title, size, pal.headline, bold=True, font=_serif(theme), line_spacing=1.04)])
     if sub:
-        C.add_paragraphs(slide, Rect(body.x, 5.1, min(body.w, 8.5), 1.0), [Para(sub, pt(21), pal.body, line_spacing=1.4)])
+        # Subtitle sits below the measured title block — a fixed y overlapped
+        # the fourth line of a long deck title.
+        sub_y = min(6.4, max(5.1, 2.7 + th + 0.3))
+        C.add_paragraphs(slide, Rect(body.x, sub_y, min(body.w, 8.5), 0.9),
+                         [Para(sub, pt(21), pal.body, line_spacing=1.4)])
 
 
 def closing(slide, content, theme, pal, body):
@@ -483,16 +572,24 @@ def closing(slide, content, theme, pal, body):
                          [Para(title, size, pal.headline, bold=True, font=_serif(theme), line_spacing=1.05)])
         y += th + 0.25
     body = Rect(body.x, y, body.w, max(0.8, body.bottom - y))
-    cells = stack(Rect(body.x, body.y, min(body.w, 8.0), body.h - (0.8 if ask else 0)), max(1, len(steps_list)), 0.18,
-                  row_h=0.6)
+    band_w = min(body.w, 8.6)
+    # Size the ask band to its text — a fixed-height band overflows on a
+    # three-line decision ask and the last line spills past the band edge.
+    band_h = 0.0
+    if ask:
+        band_h = max(0.62, _text_box_height(ask, pt(19), band_w - 0.6, slack_in=0.0) + 0.24)
+    cells = stack(Rect(body.x, body.y, min(body.w, 8.0), body.h - (band_h + 0.25 if ask else 0)),
+                  max(1, len(steps_list)), 0.18, row_h=0.6)
     for i, (step, cell) in enumerate(zip(steps_list, cells), start=1):
         C.add_badge(slide, cell.x + 0.22, cell.cy, 0.4, pal.gold, number=str(i))
         C.add_paragraphs(slide, Rect(cell.x + 0.6, cell.y, cell.w - 0.6, cell.h),
                          [Para(step, pt(19), pal.body, line_spacing=1.3)], anchor=MSO_ANCHOR.MIDDLE)
     if ask:
-        C.add_card(slide, Rect(body.x, body.bottom - 0.7, min(body.w, 8.0), 0.62), theme, pal, fill=pal.gold, shadow=False)
-        C.add_paragraphs(slide, Rect(body.x + 0.3, body.bottom - 0.7, min(body.w, 8.0) - 0.6, 0.62),
-                         [Para(ask, pt(19), RGBColor(0x19, 0x12, 0x0A), bold=True)], anchor=MSO_ANCHOR.MIDDLE)
+        band_y = body.bottom - band_h - 0.05
+        C.add_card(slide, Rect(body.x, band_y, band_w, band_h), theme, pal, fill=pal.gold, shadow=False)
+        C.add_paragraphs(slide, Rect(body.x + 0.3, band_y + 0.08, band_w - 0.6, band_h - 0.16),
+                         [Para(ask, pt(19), RGBColor(0x19, 0x12, 0x0A), bold=True, line_spacing=1.18)],
+                         anchor=MSO_ANCHOR.MIDDLE)
 
 
 # slide_type primitive -> builder

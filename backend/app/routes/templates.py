@@ -8,6 +8,9 @@ from fastapi.responses import FileResponse
 from app.infra.local_storage import LocalStorage
 from app.infra.sqlite_store import SQLiteStore
 from app.models.api import TemplateListResponse
+from pydantic import BaseModel
+
+from app.models.brand import BrandLogo
 from app.models.template import TemplateProfile, TemplateUpdateRequest
 from app.services.template_analyzer import TemplateAnalyzer
 
@@ -42,6 +45,10 @@ async def analyze_template(
         source_path, template_name=name, template_type=template_type, template_id=template_id
     )
     profile.source_file = source_path.as_posix()
+    try:
+        analyzer.extract_image_assets(source_path)
+    except Exception:
+        pass  # discovered-image assets are best-effort
     await store.create_template(profile)
     storage.save_template_profile(template_id, profile.model_dump_json())
     return profile
@@ -83,11 +90,20 @@ async def get_template_assets(
             ]
         )
     logo_path = Path(template.brand.logo.path) if template.brand.logo else None
+    images_dir = storage.template_dir(template_id) / "images"
+    images = []
+    if images_dir.exists():
+        images = sorted(
+            path.name
+            for path in images_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+        )
     frame_map = _template_frame_map_summary(storage, template_id)
     return {
         "template_id": template_id,
         "thumbnails": thumbnails,
         "logo_available": bool(logo_path and logo_path.exists()),
+        "images": images,
         "frame_map": frame_map,
     }
 
@@ -175,6 +191,68 @@ async def get_template_logo(
     if not logo_path.exists() or not logo_path.is_file():
         raise HTTPException(status_code=404, detail="Logo not found.")
     return FileResponse(logo_path.as_posix(), filename=logo_path.name)
+
+
+@router.get("/templates/{template_id}/image/{image_name}")
+async def get_template_image(
+    template_id: str,
+    image_name: str,
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+) -> FileResponse:
+    template = await store.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    if Path(image_name).name != image_name:
+        raise HTTPException(status_code=404, detail="Image not found.")
+    image_path = storage.template_dir(template_id) / "images" / image_name
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(image_path.as_posix(), filename=image_path.name)
+
+
+class LogoUpdateRequest(BaseModel):
+    # null/empty -> remove the logo; otherwise a file name from the template's
+    # discovered images (GET /templates/{id}/assets -> images).
+    image: str | None = None
+
+
+@router.patch("/templates/{template_id}/logo", response_model=TemplateProfile)
+async def update_template_logo(
+    template_id: str,
+    body: LogoUpdateRequest,
+    store: SQLiteStore = Depends(_get_store),
+    storage: LocalStorage = Depends(_get_storage),
+) -> TemplateProfile:
+    template = await store.get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    image = (body.image or "").strip()
+    brand = template.brand.model_copy(deep=True)
+    if not image:
+        brand.logo = None
+    else:
+        if Path(image).name != image:
+            raise HTTPException(status_code=404, detail="Image not found.")
+        image_path = storage.template_dir(template_id) / "images" / image
+        if not image_path.exists() or not image_path.is_file():
+            raise HTTPException(status_code=404, detail="Image not found.")
+        width_in, height_in = 1.2, 0.5
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as img:
+                w, h = img.size
+            height_in = 0.5
+            width_in = max(0.3, min(2.2, height_in * (w / max(1, h))))
+        except Exception:
+            pass
+        brand.logo = BrandLogo(path=image_path.as_posix(), w=width_in, h=height_in)
+    updated = await store.update_template(template_id, TemplateUpdateRequest(brand=brand))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    storage.save_template_profile(template_id, updated.model_dump_json())
+    return updated
 
 
 @router.patch("/templates/{template_id}", response_model=TemplateProfile)

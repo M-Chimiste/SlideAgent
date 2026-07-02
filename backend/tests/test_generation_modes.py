@@ -4649,8 +4649,9 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
     # LLM-authored decks keep the model's declared slide types: the keyword
     # selector may only rebuild a slide with a real defect (incomplete exhibit,
     # repeats, blown metric budget), never on a heuristic disagreement. Each
-    # Claude-style type therefore routes to its own layout and the deck stays
-    # fully varied (7 distinct layouts).
+    # Claude-style type routes to its own layout, and a deck authored without a
+    # closing beat gets its LAST slide converted into a grounded recommendation
+    # (decks of substance end on a decision).
     assert layouts == [
         "anti_patterns",
         "framework_cycle",
@@ -4658,7 +4659,7 @@ def test_planner_routes_claude_style_archetypes_to_distinct_layouts() -> None:
         "code_panel",
         "checklist",
         "quote_sidebar",
-        "callouts",
+        "closing_recommendation",
     ]
     assert len(set(layouts)) >= 6
     assert not warnings
@@ -5270,14 +5271,15 @@ def test_planner_repairs_sparse_comparison_exhibits_before_render() -> None:
     )
 
     exhibit = outlines[0].content_json["exhibit_spec"]
-    body = outlines[0].content_json["content_blocks"][0]["body"]
 
     assert warnings == []
-    assert exhibit["columns"] == ["Dimension", "Current state", "Target state"]
-    assert len(exhibit["rows"]) == 3
-    assert all(row["values"][0] and row["values"][1] for row in exhibit["rows"])
-    assert body[0] == ["Dimension", "Current state", "Target state"]
-    assert len(body) == 4
+    # LLM path: a sparse authored comparison is reshaped into a list built from
+    # the slide's own content — never stuffed with the canned dimension rows
+    # ("Fragmented inputs / Shared source of truth").
+    assert exhibit["type"] in {"callouts", "two_column", "icon_rows"}
+    blob = json.dumps(exhibit).lower()
+    assert "fragmented inputs" not in blob
+    assert "current state" not in blob
 
 
 def test_planner_enriches_single_metric_chart_from_source_metrics() -> None:
@@ -5737,3 +5739,65 @@ def _chart_text(chart_xml: etree._Element, xpath: str) -> str:
     node = chart_xml.find(xpath, namespaces=ns)
     assert node is not None
     return node.text
+
+
+def _client_settings(base_url: str) -> Settings:
+    return Settings(
+        OPENAI_COMPATIBLE_BASE_URL=base_url,
+        OPENAI_COMPATIBLE_MODEL="qwen3.6-35b-a3b-mtp",
+        OPENAI_COMPATIBLE_API_KEY="lm-studio",
+        BEDROCK_VALIDATE=False,
+    )
+
+
+def test_openai_compatible_client_splits_connect_timeout() -> None:
+    """Generation may take minutes (read timeout) but connecting must fail in
+    seconds — otherwise an unreachable host black-holes the job worker."""
+    import httpx
+
+    client = OpenAICompatibleClient(_client_settings("http://metis.local:1240/v1"))
+    timeout = client._http_timeout()
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == OpenAICompatibleClient.CONNECT_TIMEOUT_SECONDS
+    assert timeout.read == client.timeout
+
+
+def test_preflight_raises_clear_error_when_endpoint_unreachable() -> None:
+    import socket
+
+    import pytest
+
+    # Grab a port with no listener so the connection is refused instantly.
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    client = OpenAICompatibleClient(_client_settings(f"http://127.0.0.1:{port}/v1"))
+    with pytest.raises(RuntimeError, match="LLM endpoint unreachable"):
+        client.preflight()
+
+
+def test_preflight_passes_when_server_responds_with_http_error(monkeypatch) -> None:
+    """A server that answers — even with an error status — is reachable; only
+    transport-level failures should fail preflight."""
+
+    class FakeResponse:
+        status_code = 404
+
+    class FakeHTTPClient:
+        def __init__(self, timeout=None) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def get(self, url: str, headers: dict) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.openai_compatible_client.httpx.Client", FakeHTTPClient)
+    client = OpenAICompatibleClient(_client_settings("http://metis.local:1240/v1"))
+    client.preflight()  # no raise

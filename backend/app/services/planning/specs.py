@@ -794,6 +794,14 @@ class SlideSpecPlanningMixin:
                     if row
                 ]
                 return {"type": "comparison_table", "columns": columns, "rows": rows}
+            if self.llm_client is not None:
+                # LLM path: a comparison slide with no authored table reshapes
+                # to a list of its own points — same policy as the underfilled
+                # repair; the canned dimension rows are fallback-deck-only.
+                safe = self._safe_list_archetype(slide)
+                slide.archetype = safe
+                slide.slide_type = self._slide_type_for_archetype(safe)
+                return self._derive_exhibit_spec(slide)
             return {
                 "type": "comparison_table",
                 "columns": ["Dimension", "Current state", "Target state"],
@@ -1133,11 +1141,20 @@ class SlideSpecPlanningMixin:
         if archetype == "comparison_table" and self._comparison_exhibit_is_sparse(
             slide.exhibit_spec
         ):
-            slide.exhibit_spec = {
-                "type": "comparison_table",
-                "columns": ["Dimension", "Current state", "Target state"],
-                "rows": self._fallback_comparison_rows(slide, self._body_to_bullets(slide)),
-            }
+            if self.llm_client is not None:
+                # LLM path: never fill a sparse authored comparison with the
+                # canned dimension rows ("Fragmented inputs / Shared source of
+                # truth") — reshape the slide's own points as a list instead.
+                safe = self._safe_list_archetype(slide)
+                slide.archetype = safe
+                slide.slide_type = self._slide_type_for_archetype(safe)
+                slide.exhibit_spec = self._derive_exhibit_spec(slide)
+            else:
+                slide.exhibit_spec = {
+                    "type": "comparison_table",
+                    "columns": ["Dimension", "Current state", "Target state"],
+                    "rows": self._fallback_comparison_rows(slide, self._body_to_bullets(slide)),
+                }
         if archetype == "metric_chart":
             existing_metrics = self._normalized_metric_dicts(
                 slide.exhibit_spec.get("metrics", [])

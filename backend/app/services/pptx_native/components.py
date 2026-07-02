@@ -189,6 +189,36 @@ def add_circle(slide, cx: float, cy: float, d: float, color: RGBColor):
     return shape
 
 
+def add_icon_circle(slide, cx: float, cy: float, d: float, color: RGBColor, glyph: str,
+                    *, text_color: RGBColor | None = None, icon_path=None):
+    """Accent circle carrying a real icon (react-icons PNG) when available,
+    else a meaning glyph or monogram — never an empty placeholder dot."""
+    add_circle(slide, cx, cy, d, color)
+    if icon_path is not None:
+        s = d * 0.52
+        try:
+            slide.shapes.add_picture(str(icon_path), Inches(cx - s / 2), Inches(cy - s / 2),
+                                     Inches(s), Inches(s))
+            return
+        except Exception:
+            pass  # unreadable cache file -> glyph fallback below
+    if not glyph:
+        return
+    box = slide.shapes.add_textbox(Inches(cx - d / 2), Inches(cy - d / 2), Inches(d), Inches(d))
+    tf = box.text_frame
+    tf.word_wrap = False
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    for margin in ("margin_left", "margin_right", "margin_top", "margin_bottom"):
+        setattr(tf, margin, 0)
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    run = p.add_run()
+    run.text = glyph[:1]
+    run.font.size = Pt(max(10, d * 72 * 0.44))
+    run.font.bold = True
+    run.font.color.rgb = text_color or RGBColor(0xFF, 0xFF, 0xFF)
+
+
 def add_badge(slide, cx: float, cy: float, d: float, color: RGBColor, *, number: str | None = None,
               text_color: RGBColor | None = None):
     add_circle(slide, cx, cy, d, color)

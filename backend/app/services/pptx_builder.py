@@ -21,6 +21,7 @@ class PptxBuilder:
         node_runner: NodePptxGenRunner,
         renderer_engine: str = "authored",
         brand_layout_instantiation: bool = False,
+        brand_render_mode: str = "native",
     ) -> None:
         self.node_runner = node_runner
         self.hybrid_assembler = HybridAssembler()
@@ -33,6 +34,11 @@ class PptxBuilder:
         self.editing_contract = GenerationEditingContract()
         self.renderer_engine = renderer_engine.strip().lower() or "authored"
         self.brand_layout_instantiation = brand_layout_instantiation
+        # "native" (default): brand decks render through the SAME layout system
+        # as freeform, themed with the template's extracted brand DNA (colors,
+        # fonts, logo) — consistent output across modes. "clone": the legacy
+        # conservative duplicate-slide clone/edit path.
+        self.brand_render_mode = (brand_render_mode or "native").strip().lower()
 
     def build_deck(
         self,
@@ -43,7 +49,11 @@ class PptxBuilder:
     ) -> list[dict[str, str | int]]:
         if template.type in {"freeform", "brand"}:
             prepared = self.prepare_outlines(template, outlines)
-            if template.type == "brand" and self.renderer_engine != "legacy":
+            if (
+                template.type == "brand"
+                and self.renderer_engine != "legacy"
+                and self.brand_render_mode == "clone"
+            ):
                 pre_warnings: list[dict[str, str | int]] = []
                 if self.brand_layout_instantiation:
                     instantiated, instantiate_warnings = self.brand_layout_renderer.render(
@@ -181,6 +191,10 @@ class PptxBuilder:
             else self.authored_renderer.author_outlines(outlines)
         )
         if template.type != "brand":
+            return prepared
+        if self.brand_render_mode != "clone":
+            # Unified native rendering doesn't consume template frames — brand
+            # identity travels through the extracted BrandDNA instead.
             return prepared
         return self._attach_template_frames(template, prepared)
 

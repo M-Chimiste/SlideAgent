@@ -61,7 +61,8 @@ def run_smoke(
     client = OpenAICompatibleClient(settings)
     planner = ContentPlanner(llm_client=client, slide_generation_strategy=slide_strategy)
     designer = DesignAgent()
-    builder = PptxBuilder(node_runner=object(), renderer_engine=settings.renderer_engine)
+    builder = PptxBuilder(node_runner=object(), renderer_engine=settings.renderer_engine,
+                          brand_render_mode=settings.brand_render_mode)
     qa_client = OpenAICompatibleClient(vision_settings or settings) if use_vision else None
     qa_agent = VisualQAAgent(openai_client=qa_client)
 

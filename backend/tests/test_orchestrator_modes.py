@@ -827,7 +827,244 @@ async def test_orchestrator_freeform_job_with_native_engine(tmp_path: Path) -> N
     assert job.result_file and Path(job.result_file).exists()
     prs = Presentation(job.result_file)
     assert len(prs.slides) == len(outlines)
-    # native engine emits editable shapes/text, never a full-bleed picture
+    # native engine emits editable shapes/text; only small icon/logo pictures
+    # are allowed, never a rasterized slide
+    from pptx.util import Emu
+
     for slide in prs.slides:
-        assert all(shape.shape_type != 13 for shape in slide.shapes), "slide is an image"
+        for shape in slide.shapes:
+            if shape.shape_type == 13:
+                assert Emu(shape.width).inches <= 2.4, "picture larger than an icon/logo"
         assert any(shape.has_text_frame and shape.text_frame.text.strip() for shape in slide.shapes)
+
+
+class UnreachableEndpointPlanner(ContentPlanner):
+    """Planner wired to a client whose endpoint preflight fails."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        class _DeadClient:
+            def preflight(self) -> None:
+                raise RuntimeError(
+                    "LLM endpoint unreachable at http://metis.local:1240/v1 "
+                    "(ConnectTimeout: timed out)."
+                )
+
+        self.llm_client = _DeadClient()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_fails_fast_when_llm_endpoint_unreachable(
+    tmp_path: Path,
+) -> None:
+    """An unreachable model server errors the job immediately with a clear
+    message instead of black-holing the worker for the generation timeout."""
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("dead-endpoint-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=UnreachableEndpointPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object()),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("dead-endpoint-job")
+
+    job = await store.get_job("dead-endpoint-job")
+    assert job is not None
+    assert job.status == "error"
+    assert "LLM endpoint unreachable" in (job.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_edit_slide_applies_fields_and_rebuilds(tmp_path: Path) -> None:
+    """The review-cockpit edit path: title/points/layout edits persist to the
+    outline and the rebuilt deck carries the new text."""
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("edit-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=ContentPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object(), renderer_engine="native"),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("edit-job")
+    job = await store.get_job("edit-job")
+    assert job.status in {"done", "review_failed"}
+    outlines = await store.list_slide_outlines("edit-job")
+    target = next(o for o in outlines if o.mode == "flexible" and o.slide_index > 0)
+
+    await orchestrator.edit_slide(
+        "edit-job",
+        orchestrator.freeform_template(),
+        target.slide_index,
+        {
+            "action_title": "Edited title states the user's own conclusion",
+            "subheading": "Edited positioning line explains why this matters now.",
+            "points": [
+                {"title": "Edited lead", "body": "Edited body sentence carries the user's evidence.", "icon": "target"},
+                {"title": "Second lead", "body": "Second body sentence adds a concrete consequence."},
+            ],
+            "layout": "icon_rows",
+        },
+    )
+
+    refreshed = await store.list_slide_outlines("edit-job")
+    edited = next(o for o in refreshed if o.slide_index == target.slide_index)
+    assert edited.content_json["action_title"] == "Edited title states the user's own conclusion"
+    assert edited.layout_json["layout"] == "icon_rows"
+    assert edited.content_json["exhibit_spec"]["points"][0]["title"] == "Edited lead"
+
+    from pptx import Presentation
+
+    job = await store.get_job("edit-job")
+    prs = Presentation(job.result_file)
+    texts = " ".join(
+        sh.text_frame.text for s in prs.slides for sh in s.shapes if sh.has_text_frame
+    )
+    assert "Edited title states the user's own conclusion" in texts
+    assert "Edited body sentence carries the user's evidence" in texts
+
+
+@pytest.mark.asyncio
+async def test_regenerate_slide_with_guidance_uses_llm_rewrite(tmp_path: Path) -> None:
+    """Guided regeneration: the planner client re-authors the slide following
+    the user's guidance, and the rebuilt deck carries the rewrite."""
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("guided-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    class GuidedRegenLLM:
+        def complete_json(self, **kwargs):
+            prompt = kwargs.get("user_prompt", "")
+            if "USER GUIDANCE" in prompt:
+                assert "make it about risk" in prompt
+                return {
+                    "action_title": "Unmanaged rollout risk erodes stakeholder trust",
+                    "subheading": "Risk framing repositions the slide for the steering committee.",
+                    "points": [
+                        {"title": "Exposure", "body": "Unreviewed changes reach production without an owner.", "icon": "risk"},
+                        {"title": "Mitigation", "body": "A named reviewer gates every consequential change."},
+                    ],
+                    "layout": "callouts",
+                }
+            return None
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=ContentPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object(), renderer_engine="native"),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("guided-job")
+    outlines = await store.list_slide_outlines("guided-job")
+    target = next(o for o in outlines if o.mode == "flexible" and o.slide_index > 0)
+
+    orchestrator.planner.llm_client = GuidedRegenLLM()
+    await orchestrator.regenerate_slide(
+        "guided-job",
+        orchestrator.freeform_template(),
+        target.slide_index,
+        guidance="make it about risk",
+    )
+
+    refreshed = await store.list_slide_outlines("guided-job")
+    edited = next(o for o in refreshed if o.slide_index == target.slide_index)
+    assert edited.content_json["action_title"] == "Unmanaged rollout risk erodes stakeholder trust"
+    assert edited.content_json["exhibit_spec"]["points"][0]["icon"] == "risk"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_slide_applies_edits_before_llm_rework(tmp_path: Path) -> None:
+    """Save & regenerate: manual edits land first, then the model reworks the
+    edited slide; with a rejected rewrite the user's edits still survive."""
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    await store.create_job(_job("edit-regen-job", FREEFORM_TEMPLATE_ID, "freeform"))
+
+    class EchoEditsLLM:
+        def complete_json(self, **kwargs):
+            prompt = kwargs.get("user_prompt", "")
+            # The PRODUCED payload must already carry the user's edit.
+            assert "User edited lead" in prompt
+            return {
+                "action_title": "Reworked claim builds on the user's edit",
+                "subheading": "The model refined the user's version of the slide.",
+                "points": [
+                    {"title": "User edited lead", "body": "The model kept the user's point and sharpened it."},
+                ],
+                "layout": "callouts",
+            }
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=ContentPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object(), renderer_engine="native"),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("edit-regen-job")
+    outlines = await store.list_slide_outlines("edit-regen-job")
+    target = next(o for o in outlines if o.mode == "flexible" and o.slide_index > 0)
+
+    orchestrator.planner.llm_client = EchoEditsLLM()
+    await orchestrator.regenerate_slide(
+        "edit-regen-job",
+        orchestrator.freeform_template(),
+        target.slide_index,
+        guidance="build on my edits",
+        edits={
+            "action_title": None,
+            "subheading": None,
+            "points": [{"title": "User edited lead", "body": "The user's own sentence.", "icon": ""}],
+            "layout": None,
+        },
+    )
+    refreshed = await store.list_slide_outlines("edit-regen-job")
+    edited = next(o for o in refreshed if o.slide_index == target.slide_index)
+    assert edited.content_json["action_title"] == "Reworked claim builds on the user's edit"
+
+    # Rejected rewrite (no client): the edits alone still persist.
+    orchestrator.planner.llm_client = None
+    await orchestrator.regenerate_slide(
+        "edit-regen-job",
+        orchestrator.freeform_template(),
+        target.slide_index,
+        guidance="",
+        edits={
+            "action_title": "Manual title survives a rejected rewrite",
+            "subheading": None,
+            "points": None,
+            "layout": None,
+        },
+    )
+    refreshed = await store.list_slide_outlines("edit-regen-job")
+    edited = next(o for o in refreshed if o.slide_index == target.slide_index)
+    assert edited.content_json["action_title"] == "Manual title survives a rejected rewrite"

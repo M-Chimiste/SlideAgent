@@ -5,6 +5,7 @@ const ReactDOMServer = require("react-dom/server");
 const sharp = require("sharp");
 
 const iconSets = {
+  Fi: require("react-icons/fi"),
   Fa: require("react-icons/fa"),
   Md: require("react-icons/md"),
   Hi: require("react-icons/hi"),

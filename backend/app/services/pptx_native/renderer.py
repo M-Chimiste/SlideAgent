@@ -56,6 +56,11 @@ class NativePptxRenderer:
             C.add_background(slide, theme, pal)
 
             primitive = self._primitive(content)
+            if primitive == "cover" and i > 0:
+                # Only the first slide is a cover; a mid-deck "cover" (model
+                # variance) renders as a statement so the deck never shows two
+                # title pages.
+                primitive = "statement"
             builder = P.BUILDERS.get(primitive, P.cards)
             area = slide_content_area(theme, cover=(primitive == "cover"))
             try:
@@ -78,6 +83,9 @@ class NativePptxRenderer:
                 })
                 self._fallback(slide, content, theme, pal, area)
 
+            if theme.logo_path and primitive in ("cover", "closing"):
+                self._add_logo(slide, theme)
+
             notes = content.get("speaker_notes")
             if notes:
                 try:
@@ -87,6 +95,25 @@ class NativePptxRenderer:
 
         prs.save(output_path.as_posix())
         return warnings
+
+    def _add_logo(self, slide, theme) -> None:
+        """Brand logo on the cover/closing, top-left, aspect-preserved."""
+        path = Path(str(theme.logo_path))
+        if not path.exists():
+            return
+        try:
+            from PIL import Image
+
+            with Image.open(path) as img:
+                w, h = img.size
+            height = 0.5
+            width = min(2.2, height * (w / max(1, h)))
+            slide.shapes.add_picture(
+                path.as_posix(), Inches(0.875), Inches(0.62),
+                Inches(width), Inches(height),
+            )
+        except Exception:
+            return
 
     def _primitive(self, content: dict) -> str:
         pinned = (content.get("pinned_primitive") or "").strip().lower()
