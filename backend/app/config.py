@@ -89,8 +89,9 @@ class Settings(BaseSettings):
     job_worker_concurrency: int = Field(default=1, alias="JOB_WORKER_CONCURRENCY")
     # Default to the polished *native* (editable) renderer — real python-pptx
     # shapes/text reproducing the design-system look, so generated decks can be
-    # tweaked in PowerPoint. (`html` = the legacy image-based renderer; `authored`
-    # / `legacy` = the older flat native renderers.)
+    # tweaked in PowerPoint. `authored` / `legacy` are the older flat native
+    # renderers (opt-in; they may insert icon/diagram PNGs). Any other value —
+    # including the removed image-based `html` engine — resolves to `native`.
     renderer_engine: str = Field(default="native", alias="RENDERER_ENGINE")
 
     # Decompose deck planning into smaller LLM calls (batched for the fast

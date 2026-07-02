@@ -365,13 +365,49 @@ class PlanningRepairMixin:
         )
 
     def _action_title_candidates(self, slide: GeneratedSlideSpec) -> list[str]:
-        candidates = self._alternate_action_titles(slide)
+        candidates: list[str] = []
+        if self.llm_client is not None:
+            # LLM path: reuse the slide's own authored sentences as replacement
+            # titles so dedup stays grounded in model content instead of
+            # reaching for canned vocabulary.
+            candidates.extend(self._authored_title_candidates(slide))
+        candidates.extend(self._alternate_action_titles(slide))
         candidates.extend(
             [
                 self._repair_weak_action_title(slide, self._distinct_action_title(slide)),
                 self._distinct_action_title(slide),
             ]
         )
+        return candidates
+
+    def _authored_title_candidates(self, slide: GeneratedSlideSpec) -> list[str]:
+        """Complete sentences already authored on the slide (exhibit point bodies,
+        content-block bullets) that can stand alone as an action title."""
+        texts: list[str] = []
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        for key in ("points", "items", "steps", "cards", "rows"):
+            seq = exhibit.get(key)
+            if isinstance(seq, list) and seq:
+                for entry in seq:
+                    if isinstance(entry, dict):
+                        texts.append(
+                            str(
+                                entry.get("body")
+                                or entry.get("text")
+                                or entry.get("description")
+                                or ""
+                            )
+                        )
+                    else:
+                        texts.append(str(entry))
+                break
+        for block in slide.content_blocks:
+            texts.extend(str(item) for item in block.body if isinstance(item, str))
+        candidates: list[str] = []
+        for text in texts:
+            cleaned = " ".join(str(text).split()).rstrip(".")
+            if 5 <= len(cleaned.split()) <= 16 and not self._gate_title_is_weak(cleaned):
+                candidates.append(cleaned)
         return candidates
 
     def _clean_action_title_candidate(self, title: str) -> str:

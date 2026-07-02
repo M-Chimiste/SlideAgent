@@ -410,13 +410,17 @@ class SourceGroundingMixin:
         return bullets[:5]
 
     def _metric_bullet_from_dict(self, item: dict[str, Any]) -> str:
-        label = " ".join(str(item.get("label") or item.get("name") or "").split())
+        label = " ".join(
+            str(item.get("label") or item.get("name") or item.get("title") or "").split()
+        )
         value = item.get("value", "")
         unit = str(item.get("unit") or "").strip()
         if str(value).strip():
             rendered = f"{value}{unit}" if unit == "%" else f"{value} {unit}".strip()
             return f"{label} — {rendered}".strip(" —") if label else rendered
-        for key in ("text", "description"):
+        # Authored {title, body} point objects must round-trip into bullets so
+        # repairs grounded in "the slide's own content" can actually see it.
+        for key in ("text", "description", "body"):
             text = str(item.get(key) or "").strip()
             if text:
                 return f"{label}: {text}" if label and label.lower() not in text.lower() else text

@@ -533,6 +533,13 @@ _CANNED_STRINGS = (
     "approve a time-boxed pilot with named owners",
     "evidence to inspect", "condition to validate", "implication to resolve",
     "make the key decision explicit", "use the source evidence to choose the next step",
+    # Canned exhibit scaffolding (specs._exhibit_for_archetype) — must never
+    # replace an LLM-authored exhibit.
+    "fragmented inputs", "shared source of truth", "implicit judgment",
+    "make the standard explicit before asking the team to move faster",
+    "confident decision", "define the benchmark contract",
+    "make the operating context explicit",
+    "compare the current model with the target operating model",
 )
 
 
@@ -606,3 +613,142 @@ def test_llm_path_deck_has_no_canned_strings():
     )
     assert outlines
     _assert_no_canned_strings(outlines)
+
+
+def test_llm_authored_exhibit_survives_heuristic_disagreement():
+    """A complete LLM-authored exhibit must not be overwritten just because the
+    keyword selector would have chosen a different archetype for the text."""
+    from app.models.brand import BrandDNA
+    from app.models.template import TemplateProfile
+
+    def authored_points(slide_number: int) -> list[dict]:
+        subjects = {
+            1: "Onboarding decks",
+            2: "Review checklists",
+            3: "Context handoffs",
+            4: "Agent memory files",
+            5: "Workflow contracts",
+            6: "Delivery pipelines",
+        }
+        subject = subjects.get(slide_number, f"Workstream {slide_number}")
+        return [
+            {"title": "Dependency graph", "body": f"{subject} feed each other in a directed dependency graph."},
+            {"title": "Cycle discipline", "body": f"{subject} loop through plan, execute, and review phases."},
+            {"title": "Comparison signal", "body": f"{subject} compare poorly with the target operating flow."},
+        ]
+
+    class OpinionatedLLM:
+        """Authors callouts whose text is stuffed with dependency/cycle/comparison
+        keywords — bait for the keyword selector to reroute the archetype."""
+
+        model = "test-model"
+
+        def complete_json(self, **kwargs):
+            prompt = kwargs.get("user_prompt", "")
+            low = prompt.lower()
+            if "story map" in low:
+                claims = [
+                    ("cover", "Persistent context turns AI agents into dependable teammates"),
+                    ("problem", "Dependency chains between context files break silently today"),
+                    ("evidence", "The plan-execute-review cycle depends on explicit context handoffs"),
+                    ("closing", "Adopt explicit context dependencies before scaling agent work"),
+                ]
+                return {
+                    "thesis": "Explicit context dependencies make agent work reliable.",
+                    "narrative_arc": "Situation -> Complication -> Resolution",
+                    "recommendation": "Adopt explicit context dependencies this quarter.",
+                    "beats": [
+                        {"beat_number": i + 1, "role": r, "claim": c, "source_refs": [],
+                         "preferred_exhibit": "callouts", "rationale": "Advance the argument."}
+                        for i, (r, c) in enumerate(claims)
+                    ],
+                }
+            if "one slide object" in low or "beats:" in low:
+                match = re.search(r"Beats: (\[.*?\])\nAllowed", prompt, re.DOTALL)
+                beats = json.loads(match.group(1)) if match else []
+                return {"slides": [
+                    {
+                        "slide_number": b["slide_number"], "slide_type": "content",
+                        "action_title": b["claim"],
+                        "subheading": "Evidence drawn from validated workflows",
+                        "archetype": "callouts", "narrative_role": b["role"],
+                        "exhibit_spec": {"type": "callouts", "points": authored_points(b["slide_number"])},
+                        "sources": ["Uploaded source"], "source_refs": ["doc-1:Solution"],
+                    }
+                    for b in beats
+                ]}
+            return {"titles": [], "slides": []}
+
+    template = TemplateProfile(
+        id="t", name="t", type="freeform", brand=BrandDNA(), slides=[],
+        source_file="", created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
+    )
+    planner = ContentPlanner(llm_client=OpinionatedLLM(), slide_generation_strategy="batched")
+    outlines, _ = planner.plan(
+        template, _bundle(),
+        instructions="Create a deck about context dependencies.",
+        generation_mode="freeform", quality_profile="fast",
+    )
+    assert outlines
+    blob = " ".join(json.dumps(o.content_json).lower() for o in outlines)
+    # The authored content survives somewhere in the deck, and no canned
+    # dependency-map scaffolding ("Source evidence" -> "Confident decision")
+    # replaced it.
+    assert "directed dependency graph" in blob
+    assert "confident decision" not in blob
+    assert "feeds" not in blob or "constrains" not in blob  # canned connector trio
+    _assert_no_canned_strings(outlines)
+
+
+def test_fallback_claim_titles_never_graft_onto_sentences():
+    """No-LLM fallback: a claim that is already a complete sentence is used as
+    the action title verbatim (capitalized); verb prefixes graft only onto true
+    noun-phrase fragments."""
+    planner = ContentPlanner(llm_client=None)
+
+    # Complete sentences keep their own subject+verb — no graft.
+    assert planner._claim_to_action_title(
+        "vibe coding works right up until it doesn't", "implementation"
+    ) == "Vibe coding works right up until it doesn't"
+    assert planner._claim_to_action_title(
+        "the decisions live in ephemeral chat sessions", "closing"
+    ) == "The decisions live in ephemeral chat sessions"
+    # Leading connectives from mid-paragraph extraction are stripped.
+    assert planner._claim_to_action_title(
+        "further we had teams claiming that AI would be replacing engineers", "decision"
+    ) == "We had teams claiming that AI would be replacing engineers"
+    # "from X to Y" fragments become a shift, not a graft.
+    assert planner._claim_to_action_title(
+        "from unstructured prompting to persistent-context engineering", "evidence"
+    ) == "Move from unstructured prompting to persistent-context engineering"
+    # True noun-phrase fragments still get the role prefix.
+    assert planner._claim_to_action_title(
+        "the reproducibility gap for teams", "problem"
+    ) == "Diagnose the reproducibility gap for teams"
+
+
+def test_plan_threads_design_language_into_authoring_contract():
+    """The resolved design language reaches the authoring contract so char
+    budgets match the type scale the deck will actually render in."""
+    from app.models.brand import BrandDNA
+    from app.models.template import TemplateProfile
+
+    template = TemplateProfile(
+        id="t", name="t", type="freeform", brand=BrandDNA(), slides=[],
+        source_file="", created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
+    )
+    planner = ContentPlanner(llm_client=None)
+    planner.plan(
+        template, _bundle(), instructions="brief", generation_mode="freeform",
+        design_language="bold_minimal",
+    )
+    assert planner._design_language == "bold_minimal"
+    beat = StoryBeat(beat_number=1, role="evidence", claim="A grounded claim about the work",
+                     source_refs=[], preferred_exhibit="callouts", rationale="r")
+    contract = planner._beat_authoring_contract(beat)
+    from app.services import slide_types
+    from app.services.slide_design import fit
+    stype = slide_types.get_slide_type(slide_types.slide_type_for_archetype("callouts"))
+    expected = fit.budget_for(stype.primitive, "bold_minimal").lead.authoring_chars()
+    assert contract["lead_chars"] == expected
+    assert expected != fit.budget_for(stype.primitive, "editorial_serif").lead.authoring_chars()

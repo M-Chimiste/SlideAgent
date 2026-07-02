@@ -104,6 +104,7 @@ class JobOrchestrator:
                 quality_profile=self._quality_profile(job),
                 length_strategy=self._length_strategy(job),
                 presentation_style=presentation_style,
+                design_language=design_language,
             )
             if planner.last_planning_artifacts:
                 self.storage.save_planning_artifacts(

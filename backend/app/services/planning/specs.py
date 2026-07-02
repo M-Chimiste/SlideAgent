@@ -332,12 +332,23 @@ class SlideSpecPlanningMixin:
                 source_metrics or [],
             )
         if archetype == "quote_sidebar":
-            return {
+            # A quote slide must never fabricate a quotation: pull a real,
+            # complete sentence from the section (or the slide's own authored
+            # points, when reselection passes them in as the section) and let the
+            # renderer fall back to the key idea when no quotable sentence exists.
+            quote = self._quotable_sentence(section.content)
+            key_idea = (bullets[0] if bullets else "") or self._phrase(
+                section.content,
+                "The work shifts from isolated output to managed operating discipline.",
+            )
+            spec: dict[str, Any] = {
                 "type": "quote_sidebar",
-                "key_idea": "The work shifts from isolated output to managed operating discipline.",
-                "supporting_points": bullets[:3],
-                "quote": "Make the standard explicit before asking the team to move faster.",
+                "key_idea": key_idea,
+                "supporting_points": bullets[1:4] if len(bullets) > 1 else bullets[:3],
             }
+            if quote:
+                spec["quote"] = quote
+            return spec
         if archetype == "callouts":
             spec: dict[str, Any] = {"type": "callouts", "points": bullets[:3]}
             if source_metrics:
@@ -745,6 +756,19 @@ class SlideSpecPlanningMixin:
         # spec-gate density pass converts the resulting thin slide into a finished
         # statement (or merges it) rather than padding with template phrases.
         return phrases[:count]
+
+    def _quotable_sentence(self, text: str) -> str:
+        """First complete, quote-sized sentence in the text — used so a quote
+        slide always quotes the source verbatim instead of a canned line."""
+        for raw in re.split(r"(?<=[.!?])\s+", str(text or "")):
+            candidate = " ".join(raw.split()).strip()
+            if not candidate or candidate[-1:] not in ".!?":
+                continue
+            if candidate.startswith(("#", "|", "-", "*", ">")) or candidate.count('"') % 2 == 1:
+                continue
+            if 8 <= len(candidate.split()) <= 28:
+                return candidate
+        return ""
 
     def _phrase(self, text: str, fallback: str, limit: int = 105) -> str:
         cleaned = self._clean_generated_visual_placeholder(text or fallback)

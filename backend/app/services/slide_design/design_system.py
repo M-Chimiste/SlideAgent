@@ -216,12 +216,14 @@ def resolve_theme(brand: BrandDNA) -> Theme:
         text_dark=darken(ink, 0.05),
         text_dark_muted=rgba(darken(ink, 0.0), 0.62),
         text_light="#FFFFFF",
-        text_light_muted="rgba(233,239,245,0.74)",
+        text_light_muted="rgba(236,241,247,0.84)",
         card_light="#FFFFFF",
         card_light_alt=lighten(light, 0.55),
         card_border_light=rgba(ink, 0.10),
-        card_dark=rgba("#FFFFFF", 0.055),
-        card_border_dark="rgba(255,255,255,0.12)",
+        # Dark-mode cards need real definition in Office renders — the original
+        # CSS 5.5%-white wash reads as mud in LibreOffice/PowerPoint exports.
+        card_dark=rgba("#FFFFFF", 0.10),
+        card_border_dark="rgba(255,255,255,0.20)",
         serif=serif,
         sans=sans,
         mono=lang.mono,
