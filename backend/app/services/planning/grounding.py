@@ -401,7 +401,10 @@ class SourceGroundingMixin:
                 if isinstance(item, dict):
                     text = self._metric_bullet_from_dict(item)
                 elif isinstance(item, list):
-                    text = " | ".join(str(value) for value in item)
+                    # Table row -> readable phrase from its non-empty cells only
+                    # (joining empties produced junk bullets like "Context | |").
+                    cells = [str(value).strip() for value in item if str(value).strip()]
+                    text = " — ".join(cells) if len(cells) >= 2 else (cells[0] if cells else "")
                 else:
                     text = str(item)
                 cleaned = self._clean_generated_visual_placeholder(text)
@@ -873,6 +876,12 @@ class SourceGroundingMixin:
             out = candidate
         if out:
             return out
+        # A single sentence moderately over budget keeps its finished thought —
+        # a complete sentence slightly long beats the mid-sentence stub that
+        # word-cutting ships ("...approved documents, replicated").
+        sentences = self._split_sentences(cleaned)
+        if sentences and len(sentences[0]) <= int(limit * 1.45):
+            return sentences[0]
         truncated = cleaned[: limit - 3].rsplit(" ", 1)[0].rstrip(".,;:")
         return f"{truncated}..."
 

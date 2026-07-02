@@ -16,6 +16,8 @@ import {
   PlanningArtifactName,
   RenderedSlideAudit,
   regenerateSlide,
+  updateSlide,
+  SlideEditPayload,
   renderPlannedJob,
   SlideSpec,
   TemplateProfile,
@@ -83,6 +85,9 @@ export default function App() {
   const [openSlide, setOpenSlide] = useState<number | null>(null);
   const [renderedAudit, setRenderedAudit] = useState<RenderedSlideAudit | null>(null);
   const [regening, setRegening] = useState(false);
+  const [slideSaving, setSlideSaving] = useState(false);
+  const [slideSaveError, setSlideSaveError] = useState<string | null>(null);
+  const [previewVersion, setPreviewVersion] = useState(0);
   const [regenError, setRegenError] = useState<string | null>(null);
 
   // ── library ──
@@ -391,19 +396,49 @@ export default function App() {
     }
   };
 
-  const handleRegen = async () => {
+  const handleRegen = async (guidance = "", edits?: SlideEditPayload) => {
     if (!jobId || openSlide == null) return;
     setRegening(true);
     setRegenError(null);
     try {
-      await regenerateSlide(jobId, openSlide);
+      await regenerateSlide(jobId, openSlide, guidance, edits);
       const s = await getJobStatus(jobId);
       setStatus(s);
+      try {
+        const o = await getJobOutline(jobId);
+        setOutline(o.slides);
+      } catch {
+        /* outline refresh is best-effort */
+      }
+      setPreviewVersion((v) => v + 1);
       await refreshLibrary();
     } catch (err: any) {
       setRegenError(err?.message || "Failed to regenerate slide.");
     } finally {
       setRegening(false);
+    }
+  };
+
+  const handleSaveSlide = async (payload: SlideEditPayload) => {
+    if (!jobId || openSlide == null) return;
+    setSlideSaving(true);
+    setSlideSaveError(null);
+    try {
+      await updateSlide(jobId, openSlide, payload);
+      const s = await getJobStatus(jobId);
+      setStatus(s);
+      try {
+        const o = await getJobOutline(jobId);
+        setOutline(o.slides);
+      } catch {
+        /* outline refresh is best-effort */
+      }
+      setPreviewVersion((v) => v + 1);
+      await refreshLibrary();
+    } catch (err: any) {
+      setSlideSaveError(err?.message || "Failed to save slide edits.");
+    } finally {
+      setSlideSaving(false);
     }
   };
 
@@ -552,8 +587,12 @@ export default function App() {
           auditSlide={renderedAudit?.slides?.find((slide) => slide.slide_index === openSlide)}
           regening={regening}
           regenError={regenError}
+          saving={slideSaving}
+          saveError={slideSaveError}
+          previewVersion={previewVersion}
           onClose={() => setOpenSlide(null)}
           onRegen={handleRegen}
+          onSaveEdit={handleSaveSlide}
         />
       )}
 

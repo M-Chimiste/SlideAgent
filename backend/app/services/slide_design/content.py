@@ -66,6 +66,8 @@ _TRAILING_DANGLING = {
     "a", "an", "and", "as", "by", "for", "from", "in", "into", "of", "or", "that",
     "the", "their", "through", "to", "which", "with", "but", "on", "at", "than",
     "then", "when", "while", "where", "because", "so", "if",
+    "rather", "versus", "vs", "instead", "toward", "towards", "across", "between",
+    "against", "unlike", "via", "per", "such", "either", "neither", "both",
 }
 
 

@@ -309,7 +309,7 @@ def test_pptx_builder_attaches_brand_template_frame_metadata(tmp_path: Path) -> 
         created_at="2026-01-01T00:00:00Z",
     )
 
-    prepared = PptxBuilder(node_runner=object()).prepare_outlines(profile, [outline])
+    prepared = PptxBuilder(node_runner=object(), brand_render_mode="clone").prepare_outlines(profile, [outline])
 
     frame = prepared[0].layout_json["template_frame"]
     assert frame["source_file"] == source_file.as_posix()
@@ -406,7 +406,7 @@ def test_pptx_builder_renders_brand_deck_by_cloning_and_editing_source_slide(
     )
     output_path = tmp_path / "brand-output.pptx"
 
-    warnings = PptxBuilder(node_runner=object()).build_deck(
+    warnings = PptxBuilder(node_runner=object(), brand_render_mode="clone").build_deck(
         template,
         [outline],
         output_path,
@@ -601,7 +601,7 @@ def test_pptx_builder_strips_template_frames_before_clone_edit_fallback(tmp_path
         layout_json={"layout": "callouts", "archetype": "callouts"},
         created_at="2026-01-01T00:00:00Z",
     )
-    builder = PptxBuilder(node_runner=object())
+    builder = PptxBuilder(node_runner=object(), brand_render_mode="clone")
     capture = CapturingRenderer()
     builder.brand_template_renderer = BlockingCloneRenderer()
     builder.authored_renderer = capture
@@ -677,7 +677,7 @@ def test_brand_clone_edit_cleans_unused_template_slide_parts(tmp_path: Path) -> 
     )
     output_path = tmp_path / "brand-clean-output.pptx"
 
-    warnings = PptxBuilder(node_runner=object()).build_deck(
+    warnings = PptxBuilder(node_runner=object(), brand_render_mode="clone").build_deck(
         template,
         [outline],
         output_path,
@@ -785,7 +785,7 @@ def test_brand_clone_edit_deletes_inherited_media_placeholder(tmp_path: Path) ->
     )
     output_path = tmp_path / "brand-media-output.pptx"
 
-    warnings = PptxBuilder(node_runner=object()).build_deck(
+    warnings = PptxBuilder(node_runner=object(), brand_render_mode="clone").build_deck(
         template,
         [outline],
         output_path,
@@ -897,7 +897,7 @@ def test_brand_clone_edit_audits_unfilled_inherited_text_placeholder(tmp_path: P
     )
     output_path = tmp_path / "brand-placeholder-output.pptx"
 
-    warnings = PptxBuilder(node_runner=object()).build_deck(
+    warnings = PptxBuilder(node_runner=object(), brand_render_mode="clone").build_deck(
         template,
         [outline],
         output_path,
@@ -990,7 +990,7 @@ def test_brand_clone_edit_fills_inherited_table_frame(tmp_path: Path) -> None:
     )
     output_path = tmp_path / "brand-table-output.pptx"
 
-    warnings = PptxBuilder(node_runner=object()).build_deck(
+    warnings = PptxBuilder(node_runner=object(), brand_render_mode="clone").build_deck(
         template,
         [outline],
         output_path,
@@ -1109,7 +1109,7 @@ def test_brand_clone_edit_fills_inherited_chart_frame(tmp_path: Path) -> None:
     )
     output_path = tmp_path / "brand-chart-output.pptx"
 
-    warnings = PptxBuilder(node_runner=object()).build_deck(
+    warnings = PptxBuilder(node_runner=object(), brand_render_mode="clone").build_deck(
         template,
         [outline],
         output_path,
@@ -2081,3 +2081,93 @@ def test_renderer_splits_metric_units_to_avoid_card_label_overlap(tmp_path: Path
     assert "1M" in text
     assert "tokens" in text
     assert "1M tokens" not in text
+
+
+def test_stock_office_theme_colors_replaced_by_used_colors(tmp_path) -> None:
+    """A deck styled with direct formatting keeps the stock Office palette in
+    theme1.xml; the analyzer must derive the brand from colors actually used."""
+    from pptx import Presentation as PptxPresentation
+    from pptx.dml.color import RGBColor as Rgb
+    from pptx.util import Inches as In
+
+    from app.services.template_analyzer import TemplateAnalyzer
+
+    prs = PptxPresentation()  # stock Office theme -> accent1 = 4472C4
+    for _ in range(3):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        bg = slide.shapes.add_shape(1, In(0), In(0), In(10), In(7.5))
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = Rgb(0x0B, 0x0D, 0x10)  # near-black brand base
+        chip = slide.shapes.add_shape(1, In(1), In(1), In(2), In(1))
+        chip.fill.solid()
+        chip.fill.fore_color.rgb = Rgb(0xD6, 0xA5, 0x29)  # gold accent
+    path = tmp_path / "direct-formatted.pptx"
+    prs.save(path.as_posix())
+
+    brand = TemplateAnalyzer()._extract_brand(path)
+    assert brand.colors.primary.upper() != "4472C4"
+    assert brand.colors.primary.upper() == "0B0D10"
+    assert brand.colors.accent.upper() == "D6A529"
+
+
+def test_logo_extraction_returns_none_without_plausible_logo(tmp_path) -> None:
+    """Full-bleed background art must never be promoted to a logo."""
+    from PIL import Image
+    from pptx import Presentation as PptxPresentation
+    from pptx.util import Inches as In
+
+    from app.services.template_analyzer import TemplateAnalyzer
+
+    art = tmp_path / "art.png"
+    Image.new("RGB", (1600, 900), "navy").save(art)
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_picture(art.as_posix(), In(0), In(0), In(10), In(7.5))
+    path = tmp_path / "no-logo.pptx"
+    prs.save(path.as_posix())
+
+    assert TemplateAnalyzer()._extract_logo(path) is None
+
+
+def test_logo_extraction_finds_recurring_corner_image(tmp_path) -> None:
+    from PIL import Image
+    from pptx import Presentation as PptxPresentation
+    from pptx.util import Inches as In
+
+    from app.services.template_analyzer import TemplateAnalyzer
+
+    mark = tmp_path / "mark.png"
+    Image.new("RGB", (200, 80), "black").save(mark)
+    prs = PptxPresentation()
+    for _ in range(3):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.shapes.add_picture(mark.as_posix(), In(8.6), In(0.3), In(1.0), In(0.4))
+    path = tmp_path / "with-logo.pptx"
+    prs.save(path.as_posix())
+
+    logo = TemplateAnalyzer()._extract_logo(path)
+    assert logo is not None
+
+
+def test_extract_image_assets_saves_distinct_images(tmp_path) -> None:
+    from PIL import Image
+    from pptx import Presentation as PptxPresentation
+    from pptx.util import Inches as In
+
+    from app.services.template_analyzer import TemplateAnalyzer
+
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    Image.new("RGB", (400, 300), "navy").save(a)
+    Image.new("RGB", (300, 300), "gold").save(b)
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_picture(a.as_posix(), In(0), In(0), In(4), In(3))
+    slide.shapes.add_picture(b.as_posix(), In(5), In(0), In(3), In(3))
+    slide2 = prs.slides.add_slide(prs.slide_layouts[6])
+    slide2.shapes.add_picture(a.as_posix(), In(0), In(0), In(4), In(3))  # duplicate
+    path = tmp_path / "imgs.pptx"
+    prs.save(path.as_posix())
+
+    names = TemplateAnalyzer().extract_image_assets(path)
+    assert len(names) == 2  # deduped by content hash
+    assert all((path.parent / "images" / n).exists() for n in names)

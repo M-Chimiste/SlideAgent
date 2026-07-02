@@ -752,3 +752,69 @@ def test_plan_threads_design_language_into_authoring_contract():
     expected = fit.budget_for(stype.primitive, "bold_minimal").lead.authoring_chars()
     assert contract["lead_chars"] == expected
     assert expected != fit.budget_for(stype.primitive, "editorial_serif").lead.authoring_chars()
+
+
+def test_reconcile_title_numeral_with_item_count():
+    planner = ContentPlanner()
+    deck = DeckSpec(
+        deck_title="D",
+        slides=[
+            GeneratedSlideSpec(
+                slide_number=1, slide_type="content",
+                action_title="Five harness layers connect contracts, data, execution, and review",
+                exhibit_spec={"type": "callouts", "points": ["a", "b", "c", "d"]},
+            ),
+            GeneratedSlideSpec(  # digits are left alone
+                slide_number=2, slide_type="content",
+                action_title="Adoption hit 85 percent across five pilot teams",
+                exhibit_spec={"type": "callouts", "points": ["a", "b", "c"]},
+            ),
+            GeneratedSlideSpec(  # matching count untouched
+                slide_number=3, slide_type="content",
+                action_title="Three strategies extract implicit ground truth",
+                exhibit_spec={"type": "callouts", "points": ["a", "b", "c"]},
+            ),
+        ],
+    )
+    planner._reconcile_title_item_counts(deck)
+    assert deck.slides[0].action_title == (
+        "Four harness layers connect contracts, data, execution, and review"
+    )
+    assert deck.slides[1].action_title == "Adoption hit 85 percent across five pilot teams"
+    assert deck.slides[2].action_title == "Three strategies extract implicit ground truth"
+
+
+def test_truncate_at_word_keeps_single_long_sentence():
+    planner = ContentPlanner()
+    sentence = (
+        "Implicit ground truth already exists in operational data, approved "
+        "documents, and replicated benchmark cases across the organization."
+    )
+    # One sentence moderately over the cap survives whole (no mid-sentence stub).
+    assert planner._truncate_at_word(sentence, 100) == sentence
+    # Absurdly long single sentences still fall back to a bounded cut.
+    huge = "word " * 80
+    assert len(planner._truncate_at_word(huge.strip() + ".", 100)) <= 103
+
+
+def test_sparse_authored_comparison_reshapes_to_list_on_llm_path():
+    """A sparse model-authored comparison must never be stuffed with the canned
+    dimension rows on the LLM path — it reshapes the slide's own points."""
+    planner = ContentPlanner(llm_client=object())  # any configured client
+    from app.models.generation import ContentBlock
+
+    slide = GeneratedSlideSpec(
+        slide_number=3, slide_type="comparison", archetype="comparison_table",
+        action_title="Calibrate confidence against varying ground-truth certainty",
+        exhibit_spec={"type": "comparison_table", "columns": ["A"], "rows": []},
+        content_blocks=[ContentBlock(type="bullets", body=[
+            "Schema discovery determines how reliably agents find usable evidence.",
+            "Confidence calibration matters because source evidence varies in certainty.",
+            "Review quality depends on knowing which claims are already validated.",
+        ])],
+    )
+    planner._repair_underfilled_exhibit(slide, [])
+    blob = json.dumps(slide.exhibit_spec).lower()
+    assert "fragmented inputs" not in blob
+    assert "shared source of truth" not in blob
+    assert "schema discovery determines" in blob  # authored content reshaped

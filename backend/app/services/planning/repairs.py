@@ -92,6 +92,25 @@ class PlanningRepairMixin:
             "than",
             "prior",
             "optimal",
+            # comparative/prepositional stragglers a 15-word cut leaves behind
+            # ("...where validated truth already exists rather")
+            "rather",
+            "versus",
+            "vs",
+            "instead",
+            "toward",
+            "towards",
+            "across",
+            "between",
+            "against",
+            "unlike",
+            "via",
+            "per",
+            "through",
+            "such",
+            "either",
+            "neither",
+            "both",
         }
 
     def _truncate_title(self, title: str) -> str:

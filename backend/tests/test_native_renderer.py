@@ -109,9 +109,15 @@ def test_native_render_is_editable_no_images(tmp_path):
     res = Presentation(out.as_posix())
     slides = list(res.slides)
     assert len(slides) == len(outs)
+    from pptx.util import Emu
+
     for s in slides:
-        # editable: real text frames, zero full-bleed pictures
-        assert sum(1 for sh in s.shapes if sh.shape_type == 13) == 0
+        # editable: real text frames; the only pictures allowed are small icon
+        # chips / logos (like the reference decks), never rasterized content
+        for sh in s.shapes:
+            if sh.shape_type == 13:
+                assert Emu(sh.width).inches <= 2.4, "picture larger than an icon/logo"
+                assert Emu(sh.height).inches <= 1.2
         assert any(sh.has_text_frame and sh.text_frame.text.strip() for sh in s.shapes)
 
 
@@ -176,3 +182,121 @@ def test_editability_audit_flags_picture_dominated_slide(tmp_path):
     warnings = builder._editability_audit(flat_path)
     assert len(warnings) == 1
     assert warnings[0]["field"] == "editability"
+
+
+def test_untitled_items_render_full_body_not_chopped(tmp_path):
+    """An untitled item's full sentence must reach the slide — never a 50-60
+    char pseudo-title with the remainder discarded."""
+    long_body = (
+        "The recommended shift is from manual benchmark creation to governed "
+        "evidence discovery inside validated workflows"
+    )
+    for primitive in ("rows", "callout_list", "layers", "timeline", "columns", "matrix", "cards"):
+        outs = [_outline(0, primitive, "A grammatical action title states the point", [
+            {"title": "Lead point", "body": "A titled point keeps its lead and body."},
+            {"title": "", "body": long_body},
+        ])]
+        out = tmp_path / f"{primitive}.pptx"
+        NativePptxRenderer().render(outs, _brand(), out)
+        texts = " ".join(
+            sh.text_frame.text for s in Presentation(out.as_posix()).slides
+            for sh in s.shapes if sh.has_text_frame
+        )
+        assert "governed evidence discovery inside validated workflows" in texts, primitive
+
+
+def test_icon_circles_carry_glyph_or_monogram(tmp_path):
+    from app.services.pptx_native.primitives import _item_glyph
+
+    assert _item_glyph({"title": "Validated proof points", "body": ""}) == "✓"
+    assert _item_glyph({"title": "Execution risk", "body": ""}) == "!"
+    assert _item_glyph({"icon": "arrow-shift", "title": "", "body": "x"}) == "→"
+    # monogram fallback: first letter of the lead
+    assert _item_glyph({"title": "Data extraction", "body": ""}) == "D"
+    assert _item_glyph({"title": "", "body": "memory files feed the loop"}) == "M"
+
+
+def test_icon_resolver_maps_hints_keywords_and_rotates():
+    from app.services.pptx_native import icons
+
+    # explicit react-icons hint wins
+    assert icons.resolve_icon("FiZap", "anything", "", 0) == "FiZap"
+    # keyword stems over the lead
+    assert icons.resolve_icon("", "Benchmark saturation", "", 0) == "FiTrendingUp"
+    assert icons.resolve_icon("risk", "", "", 0) == "FiAlertTriangle"
+    assert icons.resolve_icon("", "Prohibitive curation cost", "", 0) == "FiDollarSign"
+    # no signal -> rotating defaults, varied across items
+    a = icons.resolve_icon("", "zzz", "zzz", 0)
+    b = icons.resolve_icon("", "zzz", "zzz", 1)
+    assert a != b
+
+
+def test_native_cards_carry_icon_chips_when_node_available(tmp_path):
+    import shutil
+
+    import pytest
+
+    from app.services.pptx_native import icons
+
+    if shutil.which("node") is None or icons.icon_file("FiTarget", "FFFFFF") is None:
+        pytest.skip("node icon worker unavailable")
+    outs = [_outline(0, "cards", "Three failure modes erode benchmark value", [
+        {"title": "Benchmark saturation", "body": "Frontier training pollutes public benchmarks."},
+        {"title": "Weak correlation", "body": "Scores rarely predict performance on actual use cases."},
+        {"title": "Curation cost", "body": "Expert-labeled ground truth is expensive to maintain."},
+    ])]
+    out = tmp_path / "icons.pptx"
+    NativePptxRenderer().render(outs, _brand(), out)
+    from pptx.util import Emu
+
+    pics = [sh for s in Presentation(out.as_posix()).slides for sh in s.shapes if sh.shape_type == 13]
+    assert len(pics) == 3  # one icon chip per card
+    assert all(Emu(p.width).inches <= 0.6 for p in pics)
+
+
+def test_native_renderer_places_brand_logo_on_cover(tmp_path):
+    from PIL import Image
+
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (200, 80), "navy").save(logo)
+    from app.models.brand import BrandLogo
+
+    brand = _brand()
+    brand.logo = BrandLogo(path=logo.as_posix())
+    outs = [
+        _outline(0, "cover", "Brand Deck", []),
+        _outline(1, "cards", "A content slide keeps the canvas clean", [
+            {"title": "Point", "body": "Body sentence for the card."}]),
+    ]
+    out = tmp_path / "logo.pptx"
+    NativePptxRenderer().render(outs, brand, out)
+    prs = Presentation(out.as_posix())
+    cover_pics = [sh for sh in prs.slides[0].shapes if sh.shape_type == 13]
+    assert cover_pics, "cover carries the brand logo"
+
+
+def test_brand_mode_renders_through_native_layouts_by_default(tmp_path):
+    """brand_render_mode='native' (default): brand decks use the same layout
+    system as freeform, themed by the template's BrandDNA — no clone path."""
+    from app.models.template import TemplateProfile
+    from app.services.pptx_builder import PptxBuilder
+
+    template = TemplateProfile(
+        id="b", name="b", type="brand", brand=_brand(), slides=[],
+        source_file="", created_at="t", updated_at="t",
+    )
+    builder = PptxBuilder(node_runner=object(), renderer_engine="native")
+    assert builder.brand_render_mode == "native"
+    outs = [
+        _outline(0, "cover", "Brand Deck Title", []),
+        _outline(1, "cards", "Brand slides share the freeform layout system", [
+            {"title": "Consistency", "body": "Both modes produce the same design language."}]),
+    ]
+    out = tmp_path / "brand.pptx"
+    warnings = builder.build_deck(template, outs, out, tmp_path)
+    assert out.exists()
+    assert not [w for w in warnings if w.get("field") == "editability"]
+    prs = Presentation(out.as_posix())
+    assert len(prs.slides) == 2
+    assert any(sh.has_text_frame and "layout system" in sh.text_frame.text
+               for sh in prs.slides[1].shapes)

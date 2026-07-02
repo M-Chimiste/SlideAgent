@@ -330,10 +330,14 @@ class LLMPlanningMixin:
             "and must not repeat any prior slide title. "
             "Every non-cover slide needs exactly one primary exhibit_spec matching the beat's preferred_exhibit. "
             "Comparison exhibits need clear columns and row labels; checklist, cycle, and dependency exhibits need structured arrays, not prose. "
-            "For list exhibits (callouts, icon_rows, two_column, checklist) fill exhibit_spec.points as objects {title, body}: title is an optional 2-5 word bold lead, body is ONE complete sentence of evidence (not a fragment). "
-            "Honor each beat's authoring_contract: produce at least its min_points substantive content points (never fewer) and at most max_points; "
+            "For list exhibits (callouts, icon_rows, two_column, checklist) fill exhibit_spec.points as objects {title, body, icon}: title is an optional 2-5 word bold lead, body is ONE complete sentence of evidence (not a fragment), icon is an optional 1-2 word visual concept for the point (e.g. 'database', 'risk', 'growth', 'shield'). "
+            "Honor each beat's authoring_contract: produce at least its min_points substantive content points (never fewer) and at most max_points — prefer the richer end when the evidence supports it; "
             "keep each bold lead within lead_chars characters and each supporting line within body_chars characters. "
+            "If a thought does not fit its budget, write a SHORTER complete sentence — never truncate a sentence mid-thought to fit. "
             "Write complete thoughts grounded in the beat's evidence — no sentence fragments, trailing clauses, placeholder text, or generic filler. "
+            "Each body sentence must ADD something the lead does not say: a mechanism, a concrete example, a consequence, or a number from the allowed tokens — never a restatement of the lead. "
+            "subheading is a POSITIONING line: one short sentence of context framing why this slide's claim matters to the audience (never a bare label like 'Evidence from source'). "
+            "speaker_notes: 2-3 sentences a presenter would actually say — the argument behind the slide and its transition, not a repeat of the bullets. "
             "Only use numbers that appear in the allowed numeric tokens; otherwise write [source needed] beside the number. "
             "Use the beat's source_refs as source_refs. Sources may only be 'Uploaded source', a label copied from source_refs, or '[source needed]'. "
             "Do not invent document names, people, companies, dates, or URLs. No markdown, comments, reasoning, or text outside the JSON.\n"
@@ -437,16 +441,42 @@ class LLMPlanningMixin:
             return deck
         fallback = self._fallback_deck(bundle, instructions, mode, blueprint, story_map=story_map)
         existing = {" ".join(s.action_title.lower().split()) for s in deck.slides}
+        # Backfill must respect the deck's narrative shape: never duplicate a
+        # role that exists once per deck (cover, executive summary, closing),
+        # and insert BEFORE a trailing closing so the deck still ends on the
+        # decision (appending after it produced cover/summary slides at the end).
+        singleton_roles = {"cover", "executive_summary", "closing"}
+        present_roles = {
+            (s.narrative_role or "").lower()
+            for s in deck.slides
+        } | {
+            "closing"
+            if self._normalize_archetype(s.archetype or "") == "closing_recommendation"
+            else ""
+            for s in deck.slides
+        }
+        insert_at = len(deck.slides)
+        if deck.slides and (
+            (deck.slides[-1].narrative_role or "").lower() == "closing"
+            or self._normalize_archetype(deck.slides[-1].archetype or "") == "closing_recommendation"
+        ):
+            insert_at = len(deck.slides) - 1
         for fb_slide in fallback.slides:
             if len(deck.slides) >= target_count:
                 break
+            role = (fb_slide.narrative_role or "").lower()
+            if role in singleton_roles and role in present_roles:
+                continue
             key = " ".join(fb_slide.action_title.lower().split())
             if key in existing:
                 continue
-            deck.slides.append(
-                fb_slide.model_copy(update={"slide_number": len(deck.slides) + 1}, deep=True)
-            )
+            deck.slides.insert(insert_at, fb_slide.model_copy(deep=True))
+            insert_at += 1
             existing.add(key)
+            if role in singleton_roles:
+                present_roles.add(role)
+        for number, slide in enumerate(deck.slides, start=1):
+            slide.slide_number = number
         return deck
 
     def _slide_schema_block(self) -> str:

@@ -32,6 +32,36 @@ class OutlinePatchRequest(BaseModel):
     slides: list[OutlineEdit]
 
 
+class SlidePointEdit(BaseModel):
+    title: str = ""
+    body: str = ""
+    icon: str = ""
+
+
+class SlideEditRequest(BaseModel):
+    action_title: Optional[str] = None
+    subheading: Optional[str] = None
+    points: Optional[list[SlidePointEdit]] = None
+    layout: Optional[str] = None
+
+
+class RegenerateSlideRequest(BaseModel):
+    guidance: str = ""
+    # Optional manual edits applied BEFORE the LLM regeneration, so the model
+    # reworks the user's version of the slide in a single rebuild.
+    edits: Optional[SlideEditRequest] = None
+
+
+# Layouts a user may switch a slide to from the review cockpit (mirrors the
+# planner's guided-regeneration whitelist).
+EDITABLE_SLIDE_LAYOUTS = {
+    "callouts", "icon_rows", "two_column", "checklist", "comparison_table",
+    "quote_sidebar", "matrix_2x2", "framework_cycle", "dependency_map",
+    "table_reference", "metric_chart", "anti_patterns", "executive_summary",
+    "closing_recommendation",
+}
+
+
 def _get_store(request: Request) -> SQLiteStore:
     return request.app.state.store
 
@@ -947,12 +977,43 @@ def _outline_payload(outline) -> dict:
         "visual_intent": content.get("visual_intent") or {},
         "visual_degradation": content.get("visual_degradation") or {},
         "exhibit_type": exhibit.get("type") if isinstance(exhibit, dict) else None,
+        "points": _outline_points(content),
         "sources": content.get("sources") or [],
         "source_refs": content.get("source_refs") or [],
         "speaker_notes": content.get("speaker_notes") or "",
         "qa_status": outline.qa_status,
         "qa_issues": issues,
     }
+
+
+def _outline_points(content: dict) -> list[dict]:
+    """Editable {title, body, icon} points for the review cockpit editor."""
+    exhibit = content.get("exhibit_spec")
+    raw = []
+    if isinstance(exhibit, dict):
+        for key in ("points", "items", "steps", "cards"):
+            seq = exhibit.get(key)
+            if isinstance(seq, list) and seq:
+                raw = seq
+                break
+    if not raw:
+        raw = content.get("bullets") or []
+    points: list[dict] = []
+    for entry in raw[:6]:
+        if isinstance(entry, dict):
+            points.append(
+                {
+                    "title": str(entry.get("title") or entry.get("label") or entry.get("name") or ""),
+                    "body": str(
+                        entry.get("body") or entry.get("text") or entry.get("description")
+                        or entry.get("action") or ""
+                    ),
+                    "icon": str(entry.get("icon") or ""),
+                }
+            )
+        elif isinstance(entry, str) and entry.strip():
+            points.append({"title": "", "body": entry.strip(), "icon": ""})
+    return points
 
 
 def _safe_template_frame(frame) -> dict | None:
@@ -1032,6 +1093,7 @@ async def download_job(
 async def regenerate_slide(
     job_id: str,
     slide_index: int,
+    body: Optional[RegenerateSlideRequest] = None,
     store: SQLiteStore = Depends(_get_store),
     orchestrator: JobOrchestrator = Depends(_get_orchestrator),
 ) -> dict[str, str]:
@@ -1045,8 +1107,73 @@ async def regenerate_slide(
     )
     if not template:
         raise HTTPException(status_code=404, detail="Template not found.")
-    await orchestrator.regenerate_slide(job_id, template, slide_index)
+    guidance = (body.guidance if body else "").strip()
+    edits = None
+    if body and body.edits is not None:
+        if body.edits.layout and body.edits.layout.strip().lower() not in EDITABLE_SLIDE_LAYOUTS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"layout must be one of {sorted(EDITABLE_SLIDE_LAYOUTS)}",
+            )
+        edits = {
+            "action_title": body.edits.action_title,
+            "subheading": body.edits.subheading,
+            "points": [p.model_dump() for p in body.edits.points]
+            if body.edits.points is not None
+            else None,
+            "layout": body.edits.layout,
+        }
+    await orchestrator.regenerate_slide(
+        job_id, template, slide_index, guidance=guidance, edits=edits
+    )
     return {"status": "regenerated"}
+
+
+@router.patch("/jobs/{job_id}/slides/{slide_index}")
+async def edit_slide(
+    job_id: str,
+    slide_index: int,
+    body: SlideEditRequest,
+    store: SQLiteStore = Depends(_get_store),
+    orchestrator: JobOrchestrator = Depends(_get_orchestrator),
+) -> dict[str, str]:
+    """Direct user edits from the review cockpit: title, subheading, points,
+    and/or layout. Terminal generated jobs rebuild the deck; planned jobs just
+    persist (render happens later)."""
+    job = await store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status not in {"done", "review_failed", "planned"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Slides can be edited only on completed or planned jobs.",
+        )
+    if body.layout and body.layout.strip().lower() not in EDITABLE_SLIDE_LAYOUTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"layout must be one of {sorted(EDITABLE_SLIDE_LAYOUTS)}",
+        )
+    template = (
+        orchestrator.freeform_template()
+        if job.template_id == FREEFORM_TEMPLATE_ID
+        else await store.get_template(job.template_id)
+    )
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    fields = {
+        "action_title": body.action_title,
+        "subheading": body.subheading,
+        "points": [p.model_dump() for p in body.points] if body.points is not None else None,
+        "layout": body.layout,
+    }
+    await orchestrator.edit_slide(
+        job_id,
+        template,
+        slide_index,
+        fields,
+        rebuild=job.status in {"done", "review_failed"},
+    )
+    return {"status": "updated"}
 
 
 def _timestamp() -> str:

@@ -49,6 +49,7 @@ def create_app() -> FastAPI:
         node_runner,
         renderer_engine=settings.renderer_engine,
         brand_layout_instantiation=settings.brand_layout_instantiation,
+        brand_render_mode=settings.brand_render_mode,
     )
     vision_client = None
     if settings.llm_provider == "openai_compatible":

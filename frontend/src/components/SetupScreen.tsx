@@ -6,6 +6,8 @@ import {
   templateThumbnailUrl,
   TemplateAssets,
   TemplateProfile,
+  templateImageUrl,
+  updateTemplateLogo,
 } from "../api/client";
 import { Mode } from "../types";
 
@@ -47,6 +49,8 @@ export default function SetupScreen({
 }: Props) {
   const isBrand = mode === "brand";
   const [assets, setAssets] = useState<TemplateAssets | null>(null);
+  const [logoVersion, setLogoVersion] = useState(0);
+  const [logoBusy, setLogoBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -63,6 +67,21 @@ export default function SetupScreen({
       active = false;
     };
   }, [template]);
+
+  const changeLogo = async (image: string | null) => {
+    if (!template) return;
+    setLogoBusy(true);
+    try {
+      await updateTemplateLogo(template.id, image);
+      const next = await getTemplateAssets(template.id);
+      setAssets(next);
+      setLogoVersion((v) => v + 1);
+    } catch {
+      /* surfaced by the unchanged logo box */
+    } finally {
+      setLogoBusy(false);
+    }
+  };
 
   const setupTitle = isBrand ? "Match an existing brand" : "Preserve a rigid template";
   const setupSub = isBrand
@@ -321,7 +340,13 @@ export default function SetupScreen({
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {isBrand ? (
-                <BrandProfile template={template} assets={assets} />
+                <BrandProfile
+                template={template}
+                assets={assets}
+                logoVersion={logoVersion}
+                logoBusy={logoBusy}
+                onChangeLogo={changeLogo}
+              />
               ) : (
                 <StrictSchema template={template} />
               )}
@@ -464,7 +489,19 @@ function FrameMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function BrandProfile({ template, assets }: { template: TemplateProfile; assets: TemplateAssets | null }) {
+function BrandProfile({
+  template,
+  assets,
+  logoVersion,
+  logoBusy,
+  onChangeLogo,
+}: {
+  template: TemplateProfile;
+  assets: TemplateAssets | null;
+  logoVersion: number;
+  logoBusy: boolean;
+  onChangeLogo: (image: string | null) => void;
+}) {
   const c = template.brand.colors;
   const swatches = [c.primary, c.secondary, c.accent, c.background_light].filter(Boolean);
   const fonts = [
@@ -476,7 +513,6 @@ function BrandProfile({ template, assets }: { template: TemplateProfile; assets:
     .map((s) => s.trim())
     .filter(Boolean)
     .slice(0, 4);
-  const logoPlacement = template.brand.logo?.placement || "top-right";
 
   return (
     <div style={{ ...card, padding: 24 }}>
@@ -551,16 +587,69 @@ function BrandProfile({ template, assets }: { template: TemplateProfile; assets:
           >
             {assets?.logo_available ? (
               <img
-                src={templateLogoUrl(template.id)}
+                src={templateLogoUrl(template.id, logoVersion)}
                 alt="Extracted logo"
                 style={{ maxWidth: "80%", maxHeight: "58px", objectFit: "contain" }}
               />
             ) : (
               <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
-                logo · {logoPlacement}
+                no logo — generated slides skip logo placement
               </span>
             )}
           </div>
+          {assets?.logo_available && (
+            <button
+              onClick={() => onChangeLogo(null)}
+              disabled={logoBusy}
+              style={{
+                marginTop: 8,
+                border: "1px solid var(--line)",
+                background: "transparent",
+                color: "var(--ink-2)",
+                borderRadius: 7,
+                font: "inherit",
+                fontSize: 11.5,
+                cursor: "pointer",
+                padding: "5px 10px",
+                opacity: logoBusy ? 0.6 : 1,
+              }}
+            >
+              {logoBusy ? "Updating…" : "Remove logo"}
+            </button>
+          )}
+          {(assets?.images?.length ?? 0) > 0 && (
+            <>
+              <div style={{ ...microLabel, margin: "14px 0 8px" }}>
+                {assets?.logo_available ? "OR PICK A DIFFERENT IMAGE" : "PICK A LOGO FROM DECK IMAGES"}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {assets?.images?.slice(0, 12).map((image) => (
+                  <button
+                    key={image}
+                    onClick={() => onChangeLogo(image)}
+                    disabled={logoBusy}
+                    title={`Use ${image} as the logo`}
+                    style={{
+                      width: 52,
+                      height: 40,
+                      padding: 2,
+                      border: "1px solid var(--line)",
+                      borderRadius: 6,
+                      background: "var(--surface-2)",
+                      cursor: logoBusy ? "default" : "pointer",
+                      opacity: logoBusy ? 0.6 : 1,
+                    }}
+                  >
+                    <img
+                      src={templateImageUrl(template.id, image)}
+                      alt={image}
+                      style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+                    />
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <div style={{ ...microLabel, margin: "22px 0 11px" }}>LAYOUT NOTES</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
             {notes.length ? (

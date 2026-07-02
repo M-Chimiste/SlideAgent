@@ -343,6 +343,19 @@ export type RenderedSlideAudit = {
   slides: RenderedSlideAuditSlide[];
 };
 
+export type SlidePoint = {
+  title: string;
+  body: string;
+  icon?: string;
+};
+
+export type SlideEditPayload = {
+  action_title?: string;
+  subheading?: string;
+  points?: SlidePoint[];
+  layout?: string;
+};
+
 export type JobOutlineSlide = {
   slide_index: number;
   mode: string;
@@ -358,6 +371,7 @@ export type JobOutlineSlide = {
   visual_intent?: Record<string, any> | null;
   visual_degradation?: Record<string, any> | null;
   exhibit_type?: string | null;
+  points?: SlidePoint[];
   sources: string[];
   source_refs: string[];
   speaker_notes?: string | null;
@@ -426,6 +440,7 @@ export type TemplateAssets = {
   template_id: string;
   thumbnails: string[];
   logo_available: boolean;
+  images?: string[];
   frame_map?: {
     available: boolean;
     artifact?: string;
@@ -570,8 +585,9 @@ export async function getRenderedSlideAudit(jobId: string): Promise<RenderedSlid
   return response.json();
 }
 
-export function previewImageUrl(jobId: string, image: string): string {
-  return `/api/jobs/${jobId}/preview/${image}`;
+export function previewImageUrl(jobId: string, image: string, version?: number): string {
+  const bust = version ? `?v=${version}` : "";
+  return `/api/jobs/${jobId}/preview/${image}${bust}`;
 }
 
 export function downloadUrl(jobId: string, format: "pptx" | "pdf" = "pptx"): string {
@@ -601,16 +617,62 @@ export function templateThumbnailUrl(templateId: string, image: string): string 
   return `/api/templates/${templateId}/thumbnail/${image}`;
 }
 
-export function templateLogoUrl(templateId: string): string {
-  return `/api/templates/${templateId}/logo`;
+export function templateLogoUrl(templateId: string, version?: number): string {
+  const bust = version ? `?v=${version}` : "";
+  return `/api/templates/${templateId}/logo${bust}`;
 }
 
-export async function regenerateSlide(jobId: string, slideIndex: number) {
+export function templateImageUrl(templateId: string, image: string): string {
+  return `/api/templates/${templateId}/image/${image}`;
+}
+
+export async function updateTemplateLogo(
+  templateId: string,
+  image: string | null
+): Promise<TemplateProfile> {
+  const response = await fetch(`/api/templates/${templateId}/logo`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Logo update failed.");
+  }
+  return response.json();
+}
+
+export async function regenerateSlide(
+  jobId: string,
+  slideIndex: number,
+  guidance = "",
+  edits?: SlideEditPayload
+) {
   const response = await fetch(`/api/jobs/${jobId}/regen/${slideIndex}`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ guidance, edits: edits ?? null }),
   });
   if (!response.ok) {
     throw await apiError(response, "Slide regeneration failed.");
   }
   return response.json();
 }
+
+export async function updateSlide(jobId: string, slideIndex: number, payload: SlideEditPayload) {
+  const response = await fetch(`/api/jobs/${jobId}/slides/${slideIndex}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Slide update failed.");
+  }
+  return response.json();
+}
+
+export const EDITABLE_SLIDE_LAYOUTS = [
+  "callouts", "icon_rows", "two_column", "checklist", "comparison_table",
+  "quote_sidebar", "matrix_2x2", "framework_cycle", "dependency_map",
+  "table_reference", "metric_chart", "anti_patterns", "executive_summary",
+  "closing_recommendation",
+] as const;

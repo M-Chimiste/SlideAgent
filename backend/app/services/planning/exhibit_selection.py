@@ -506,8 +506,12 @@ class ExhibitSelectionMixin:
         list shape and prefer the slide's own authored points as the content
         source, so a rebuild never replaces model content with house boilerplate."""
         desired = self._normalize_archetype(archetype)
+        # Table shapes need REAL source tables: without them the compiler falls
+        # back to the keyword-templated "Evidence signal / Unmanaged pattern /
+        # Harness move" scaffold — the most repetitive canned artifact a deck
+        # can ship. Metrics don't make a comparison table either.
         if desired in self._SCAFFOLDED_ARCHETYPES or (
-            desired == "comparison_table" and not (bundle.tables or bundle.metrics)
+            desired in {"comparison_table", "table_reference"} and not bundle.tables
         ):
             desired = self._safe_list_archetype(slide)
         return desired, self._authored_section_for_safe_reselection(slide, desired, section)

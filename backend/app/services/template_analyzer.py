@@ -26,6 +26,15 @@ from app.services.rendering import render_pptx_to_images
 
 SAFE_PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
 
+# Accent colors of the stock Microsoft Office themes (2013+ and 2007-2010). A
+# deck styled with direct formatting keeps these untouched in theme1.xml even
+# though they never appear on a single slide — a stock accent1 means
+# "unbranded theme", so derive the palette from the colors actually used.
+_OFFICE_STOCK_ACCENTS = {
+    "4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47",  # Office 2013+
+    "4F81BD", "C0504D", "9BBB59", "8064A2", "4BACC6", "F79646",  # Office 2007-2010
+}
+
 
 class TemplateAnalyzer:
     def __init__(self, bedrock: Optional[BedrockClient] = None) -> None:
@@ -274,12 +283,84 @@ class TemplateAnalyzer:
                     brand.colors.background_light = colors.get(
                         "lt2", brand.colors.background_light
                     )
+            # Decks styled with direct formatting leave the stock Office palette
+            # in theme1.xml (accent1=4472C4 ...). Those colors never appear on
+            # the slides — derive the brand from the colors ACTUALLY USED.
+            if (colors.get("accent1") or "").upper() in _OFFICE_STOCK_ACCENTS:
+                usage = self._brand_colors_from_usage(zip_ref)
+                for field, value in usage.items():
+                    setattr(brand.colors, field, value)
         logo = self._extract_logo(template_path)
         if logo:
             brand.logo = logo
         brand.design_notes = self._design_notes(template_path)
         brand.layout_profile = self._layout_profile(template_path)
         return brand
+
+    def _brand_colors_from_usage(self, zip_ref) -> dict[str, str]:
+        """Palette from the colors actually used across slides/layouts/masters
+        (srgbClr occurrences incl. gradient stops), weighted by frequency."""
+        from collections import Counter
+
+        counts: Counter[str] = Counter()
+        for name in zip_ref.namelist():
+            if not name.endswith(".xml"):
+                continue
+            if not (
+                name.startswith("ppt/slides/slide")
+                or name.startswith("ppt/slideLayouts/")
+                or name.startswith("ppt/slideMasters/")
+            ):
+                continue
+            xml = zip_ref.read(name).decode("utf-8", "ignore")
+            for match in re.finditer(r'srgbClr val="([0-9A-Fa-f]{6})"', xml):
+                counts[match.group(1).upper()] += 1
+        if sum(counts.values()) < 6:
+            return {}
+
+        def lum(hex_color: str) -> float:
+            r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+            return (0.299 * r + 0.587 * g + 0.114 * b) / 255
+
+        def sat(hex_color: str) -> float:
+            r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+            high = max(r, g, b)
+            return 0.0 if high == 0 else (high - min(r, g, b)) / high
+
+        def hue(hex_color: str) -> float:
+            r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (0, 2, 4))
+            high, low = max(r, g, b), min(r, g, b)
+            if high == low:
+                return 0.0
+            d = high - low
+            if high == r:
+                h = ((g - b) / d) % 6
+            elif high == g:
+                h = (b - r) / d + 2
+            else:
+                h = (r - g) / d + 4
+            return h * 60
+
+        ranked = [c for c, _ in counts.most_common()]
+        vivid = [c for c in ranked if sat(c) >= 0.30 and 0.10 <= lum(c) <= 0.88]
+        darks = [c for c in ranked if lum(c) < 0.30]
+        lights = [c for c in ranked if lum(c) > 0.85]
+
+        result: dict[str, str] = {}
+        if vivid:
+            result["accent"] = vivid[0]
+            for candidate in vivid[1:]:
+                if abs(hue(candidate) - hue(vivid[0])) % 360 >= 40:
+                    result["secondary"] = candidate
+                    break
+        preferred_darks = [c for c in darks if c != "000000"] or darks
+        if preferred_darks:
+            result["primary"] = preferred_darks[0]
+            result["background_dark"] = preferred_darks[0]
+            result["text_dark"] = preferred_darks[0]
+        if lights:
+            result["background_light"] = lights[0]
+        return result
 
     def _theme_color_value(self, color_node) -> str | None:
         last_color = str(color_node.get("lastClr") or "").strip()
@@ -409,19 +490,45 @@ class TemplateAnalyzer:
         return unique
 
     def _extract_logo(self, template_path: Path) -> BrandLogo | None:
+        """A logo is a SMALL image that recurs across slides or sits in a corner
+        band. When nothing matches, there is no logo — never promote the
+        smallest slice of background art (the old behavior)."""
         presentation = Presentation(template_path.as_posix())
-        candidates = []
-        slide_area = int(presentation.slide_width) * int(presentation.slide_height)
+        slide_w = int(presentation.slide_width)
+        slide_h = int(presentation.slide_height)
+        slide_area = max(slide_w * slide_h, 1)
+        by_hash: dict[str, dict] = {}
         for slide in presentation.slides:
             for shape in slide.shapes:
                 if getattr(shape, "shape_type", None) != MSO_SHAPE_TYPE.PICTURE:
                     continue
-                area = int(shape.width) * int(shape.height)
-                candidates.append((area / max(slide_area, 1), shape))
+                try:
+                    image = shape.image
+                    sha = image.sha1
+                except Exception:
+                    continue
+                area_ratio = (int(shape.width) * int(shape.height)) / slide_area
+                cx = (int(shape.left) + int(shape.width) / 2) / max(slide_w, 1)
+                cy = (int(shape.top) + int(shape.height) / 2) / max(slide_h, 1)
+                in_corner = (cx < 0.3 or cx > 0.7) and (cy < 0.25 or cy > 0.75)
+                entry = by_hash.setdefault(
+                    sha,
+                    {"shape": shape, "min_ratio": area_ratio, "slides": 0, "corner": False},
+                )
+                entry["slides"] += 1
+                entry["corner"] = entry["corner"] or in_corner
+                if area_ratio < entry["min_ratio"]:
+                    entry["min_ratio"] = area_ratio
+                    entry["shape"] = shape
+        candidates = [
+            entry
+            for entry in by_hash.values()
+            if entry["min_ratio"] <= 0.08 and (entry["slides"] >= 2 or entry["corner"])
+        ]
         if not candidates:
             return None
-        candidates.sort(key=lambda item: item[0])
-        _, shape = candidates[0]
+        candidates.sort(key=lambda e: (-e["slides"], e["min_ratio"]))
+        shape = candidates[0]["shape"]
         image = shape.image
         extension = image.ext or "png"
         logo_path = template_path.parent / f"brand-logo.{extension}"
@@ -429,6 +536,33 @@ class TemplateAnalyzer:
         width_inches = max(min(int(shape.width) / 914400, 1.6), 0.45)
         height_inches = max(min(int(shape.height) / 914400, 0.8), 0.25)
         return BrandLogo(path=logo_path.as_posix(), w=width_inches, h=height_inches)
+
+    def extract_image_assets(self, template_path: Path, limit: int = 12) -> list[str]:
+        """Save the deck's distinct images as template assets (images/img-NN.ext)
+        so the user can pick a logo among them. Returns saved file names."""
+        presentation = Presentation(template_path.as_posix())
+        images_dir = template_path.parent / "images"
+        seen: set[str] = set()
+        names: list[str] = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if getattr(shape, "shape_type", None) != MSO_SHAPE_TYPE.PICTURE:
+                    continue
+                try:
+                    image = shape.image
+                    sha = image.sha1
+                except Exception:
+                    continue
+                if sha in seen or len(image.blob) < 500:
+                    continue
+                seen.add(sha)
+                images_dir.mkdir(parents=True, exist_ok=True)
+                name = f"img-{len(names) + 1:02d}.{image.ext or 'png'}"
+                (images_dir / name).write_bytes(image.blob)
+                names.append(name)
+                if len(names) >= limit:
+                    return names
+        return names
 
     def _design_notes(self, template_path: Path) -> str:
         presentation = Presentation(template_path.as_posix())

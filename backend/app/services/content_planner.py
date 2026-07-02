@@ -238,13 +238,62 @@ class ContentPlanner(
         # so a refinement can never introduce an unsupported number.
         self._refine_slides(deck, story_map, source_compression, spec_gate_report, bundle)
         warnings.extend(self._ground_numeric_claims(deck, bundle))
+        self._ensure_closing_slide(deck, story_map)
         self._ground_closing_ask(deck, story_map)
         self._backstop_weak_titles(deck, bundle)
+        self._reconcile_title_item_counts(deck)
         self._finalize_action_titles(deck)
         self._clean_dangling_content(deck)
         deck, qa_warnings = self.qa.inspect(deck)
         warnings.extend(qa_warnings)
         return deck, warnings
+
+    _NUMBER_WORDS = {
+        "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    _WORD_FOR_NUMBER = {value: key for key, value in _NUMBER_WORDS.items()}
+
+    def _reconcile_title_item_counts(self, deck: DeckSpec) -> None:
+        """A title that promises a count the slide doesn't show ("Five harness
+        layers" over four cards) reads as an error to any careful reader. When
+        exactly one spelled-out number appears in the title and the exhibit
+        carries a different countable item list, restate the numeral to match
+        what actually renders. Conservative by design: skips titles with digits
+        or multiple number words."""
+        for slide in deck.slides:
+            count = self._exhibit_item_count(slide)
+            if not 2 <= count <= 10:
+                continue
+            title = str(slide.action_title or "")
+            if re.search(r"\d", title):
+                continue
+            matches = list(
+                re.finditer(
+                    r"\b(two|three|four|five|six|seven|eight|nine|ten)\b",
+                    title,
+                    flags=re.I,
+                )
+            )
+            if len(matches) != 1:
+                continue
+            word = matches[0].group(0)
+            if self._NUMBER_WORDS[word.lower()] == count:
+                continue
+            replacement = self._WORD_FOR_NUMBER[count]
+            if word[0].isupper():
+                replacement = replacement.capitalize()
+            slide.action_title = (
+                title[: matches[0].start()] + replacement + title[matches[0].end():]
+            )
+
+    def _exhibit_item_count(self, slide: GeneratedSlideSpec) -> int:
+        exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+        for key in ("points", "items", "steps", "cards", "rows", "patterns", "quadrants"):
+            seq = exhibit.get(key)
+            if isinstance(seq, list) and seq:
+                return len(seq)
+        return 0
 
     def _clean_dangling_content(self, deck: DeckSpec) -> None:
         """Trim dangling sentence fragments from every slide's rendered text
@@ -381,6 +430,41 @@ class ContentPlanner(
         ``stat`` when it already carries metrics, otherwise a ``statement`` that
         reframes its points as a headline plus supporting ticks."""
         slide.slide_type = "stat" if self._slide_has_metrics(slide) else "statement"
+
+    def _ensure_closing_slide(self, deck: DeckSpec, story_map: StoryMap | None) -> None:
+        """Every deck of substance ends on a decision. When the model leaves no
+        closing beat, convert the LAST slide into a recommendation built from
+        its own authored points + the story map's (LLM-authored) recommendation
+        — grounded content only, no canned next-steps bank."""
+        if len(deck.slides) < 5:
+            return
+        def is_closing(slide: GeneratedSlideSpec) -> bool:
+            exhibit = slide.exhibit_spec if isinstance(slide.exhibit_spec, dict) else {}
+            return (
+                self._normalize_archetype(slide.archetype or "") == "closing_recommendation"
+                or str(exhibit.get("type") or "") == "recommendation"
+            )
+
+        if any(is_closing(slide) for slide in deck.slides):
+            return
+        slide = deck.slides[-1]
+        recommendation = " ".join(
+            str((story_map.recommendation if story_map else "") or "").split()
+        )
+        next_steps = [
+            step for step in self._body_to_bullets(slide) if len(str(step).split()) >= 3
+        ][:3]
+        if not (recommendation or next_steps):
+            return
+        slide.archetype = "closing_recommendation"
+        slide.slide_type = self._slide_type_for_archetype("closing_recommendation")
+        slide.narrative_role = "closing"
+        slide.exhibit_spec = {
+            "type": "recommendation",
+            "recommendation": recommendation or slide.action_title,
+            "next_steps": next_steps,
+            "decision_ask": recommendation or slide.action_title,
+        }
 
     def _ground_closing_ask(self, deck: DeckSpec, story_map: StoryMap | None) -> None:
         """Replace the canned cross-deck decision ask with the deck's own

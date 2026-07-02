@@ -156,6 +156,152 @@ What exists today:
   numeric claims, strict placeholders, strict table cells, strict chart caches,
   warning-aware QA repair, and visual QA fallback behavior.
 
+### Brand extraction truthfulness: used-color palette + honest logo detection (2026-07-02)
+
+The Theseus template exposed two extraction lies: the Brand DNA panel showed the **stock Microsoft Office
+accents** (#4472C4/#ED7D31/... — theme1.xml defaults untouched because the designer used direct
+formatting), and the "logo" was a slice of background art (the old heuristic promoted the smallest
+picture in the deck).
+
+- **Used-color extraction** (`template_analyzer._brand_colors_from_usage`): when theme accent1 is a stock
+  Office accent (2013+ or 2007-2010 sets in `_OFFICE_STOCK_ACCENTS`), the palette is derived from srgbClr
+  frequencies across slides/layouts/masters (incl. gradient stops) — most-frequent vivid → accent, second
+  distinct hue → secondary, top non-black dark → primary/background_dark, top light → background_light.
+  Theseus now extracts 0B0D10 / D6A529 / B21F2D (near-black, gold, red) instead of the Office defaults,
+  verified by a native render carrying the true identity.
+- **Honest logo detection**: `_extract_logo` now requires a plausible logo — small (≤8% of slide area) AND
+  recurring across ≥2 slides or corner-positioned; otherwise **no logo** instead of promoting art.
+- **User override**: analysis saves the deck's distinct images as assets (`extract_image_assets` →
+  `<template>/images/img-NN.ext`, deduped by content hash); `GET /templates/{id}/assets` lists them,
+  `GET /templates/{id}/image/{name}` serves them, and new `PATCH /templates/{id}/logo` (`{image}` name or
+  null) sets or removes the logo (aspect-derived size). The Setup screen's LOGO box gained "Remove logo" +
+  a discovered-image picker; "no logo" states that generated slides skip logo placement.
+- Note: templates analyzed BEFORE this fix keep their stored colors/logo — re-upload (re-analyze) to pick
+  up the corrected extraction.
+
+Verified: backend **491 passed** (4 new analyzer tests incl. stock-theme replacement and no-logo cases),
+ruff clean, tsc + build clean, corrected Theseus palette confirmed in a rendered deck.
+
+### Review cockpit: slide editing + LLM-guided regeneration (2026-07-02)
+
+The review lightbox is now an editor, not just a report:
+
+- **Guided regeneration.** `POST /api/jobs/{id}/regen/{slide_index}` accepts an optional JSON body
+  `{guidance}`. The orchestrator threads it to the new `planning/refine.RefineMixin.regenerate_outline_slide`:
+  the LLM re-authors that ONE slide from its current content + bound source sections + the user's free-text
+  guidance, may switch the layout (whitelist `REGEN_LAYOUTS`), and is applied defensively (weak-title gate,
+  numeric grounding — numbers already on the slide stay legal so a rewrite never loses an existing statistic).
+  With no client or a rejected rewrite, the old deterministic design tweak remains the fallback. Verified
+  live against qwen: guidance "reframe around what leaders should DO next quarter" produced an on-guidance
+  rewrite with icon hints.
+- **Direct slide editing.** New `PATCH /api/jobs/{id}/slides/{slide_index}` (done/review_failed/planned
+  jobs) accepts `{action_title?, subheading?, points?: [{title, body, icon?}], layout?}` (layout from
+  `EDITABLE_SLIDE_LAYOUTS`), applies via the shared `orchestrator._apply_slide_fields` write path (exhibit
+  points + bullets mirror + pinned primitive/family from the slide-type catalog), persists the outline, and
+  rebuilds the deck + previews for terminal jobs (`_rebuild_and_review`, extracted from the regen tail).
+  The outline payload now exposes editable `points`.
+- **Frontend.** `SlideLightbox` gains an Edit mode (title input, positioning-subheading textarea, layout
+  select, per-point lead/body editors with add/remove, Save & rebuild) and a guidance textarea above
+  Regenerate ("Regenerate with guidance" when filled). Preview images cache-bust on a version counter after
+  edits/regens; `client.ts` adds `updateSlide`, guidance on `regenerateSlide`, and the layout whitelist.
+
+Verified: backend **486 passed** (orchestrator edit/guided-regen tests + route validation tests), ruff
+clean, `tsc --noEmit` + `npm run build` clean, live qwen guided-regeneration sanity check.
+
+Follow-ups (same day): the lightbox is viewport-bound with an independently scrolling sidebar; edit mode
+focuses the panel (QA/audit/outline sections hidden, 520px column, sticky action row); and the edit form
+gained a MODEL GUIDANCE block with **Save & regenerate** — the regen endpoint accepts optional `edits`
+applied BEFORE the LLM rework (`orchestrator.regenerate_slide(..., edits=)`), so edit+regenerate is one
+rebuild and the model reworks the user's version of the slide; a rejected rewrite still keeps the manual
+edits. Backend **487 passed**.
+
+### Renderer overhaul: react-icons chips, unified brand/freeform layouts, deeper content (2026-07-02)
+
+Studied the two reference decks (`data/Beyond_Vibe_Coding.pptx`, `data/Bootstrapping_Benchmarks_Executive.pptx`
+— 53/39 small 0.15-0.5in picture icons, positioning subheads, tight cards) and rebuilt the native renderer
+toward that standard:
+
+- **Real icons (react-icons/Feather).** New `pptx_native/icons.py`: resolves each item's model-authored
+  `icon` hint (the authoring + refine schemas now carry an optional per-point icon concept) or lead keywords
+  to a Feather icon name (~40 keyword stems + a rotating default set, explicit `Fi*` names honored),
+  rasterized once per (icon, color) into a temp disk cache by `workers/icon_renderer.js` (Fi set added).
+  Card/row/callout accent circles now carry white Feather icons; the glyph/monogram treatment survives as
+  the no-Node fallback. Editability tests updated to the reference-deck contract: small icon/logo pictures
+  allowed, picture-dominated slides still flagged.
+- **Brand mode renders like freeform** (`BRAND_RENDER_MODE=native`, new default): brand decks go through
+  the same native layout system, themed with the template's extracted BrandDNA — colors, fonts, and the
+  extracted logo placed on cover/closing (`NativePptxRenderer._add_logo`, aspect-preserved). The legacy
+  clone/edit path remains behind `BRAND_RENDER_MODE=clone` (its tests pinned to clone mode).
+- **Content depth prompts:** subheading must be a POSITIONING line (why the claim matters — never
+  "Evidence from source"); each body must ADD a mechanism/example/consequence/allowed-number beyond its
+  lead; speaker notes are 2-3 presenter sentences; point counts prefer the richer end of the contract.
+  Refine preserves per-point icons.
+- **Backfill respects narrative shape** (`llm._fill_deck_to_target`): fill slides insert BEFORE a trailing
+  closing and never duplicate singleton roles (cover/executive summary/closing) — a live brand run had
+  appended a second cover + exec summary AFTER the closing slide.
+
+Verified: suite **483 passed**, ruff clean, live qwen freeform+brand e2e (`all_mode_smoke --modes
+freeform,brand --brand-template Theseus_Research_PPTX_Template.pptx`) — both modes pass the full gate (no
+fallback, zero planning/build warnings, deck-quality passed). Contact sheets confirm the brand deck shares
+the freeform layout system with Theseus blue/orange + logo on cover/closing; both decks carry ~13-16 small
+icon/logo pictures over ~70 editable text shapes — the reference-deck composition. Note: qwen remains the
+test model; Bedrock (Sonnet) is the intended production planner — the richer authoring/refine prompts are
+written for a stronger model and should only improve there.
+
+### Consultant-grade output pass: no cut sentences, icon glyphs, density-adaptive layouts (2026-07-02)
+
+A live qwen deck (Bootstrapping Benchmarks) reviewed slide-by-slide surfaced the five defect classes still
+separating output from consultant grade, each now fixed and verified against a fresh live generation:
+
+- **No sentence ships cut mid-thought.** Three independent cut paths closed: (1) the native primitives'
+  `title or _short(body, 50-60)` pattern chopped untitled items to a pseudo-title and silently discarded
+  the remainder — all six sites (rows, callout_list, matrix, timeline, layers, columns) now render the
+  full body via `_lead_body_paras` when no lead exists; (2) `grounding._truncate_at_word` word-cut a
+  single over-budget sentence — it now keeps one finished sentence up to 1.45x the cap before falling
+  back; (3) the model itself truncated sentences to honor the authoring-contract char budget — the author
+  and refine prompts now demand "a SHORTER complete sentence, never a sentence cut mid-thought," and the
+  refine pass detects suspected cuts (a long point with no terminal punctuation) and feeds them to the
+  model as defects to rewrite. Dangling-token trims learned comparative stragglers ("rather", "versus",
+  "instead", ...) so a 15-word title cut ends grammatically.
+- **Icon circles carry meaning.** `components.add_icon_circle` + `primitives._item_glyph`: a semantic
+  glyph (✓ ! → ↑ ↓ ?) when the item's hint/lead signals one, else a monogram of the lead word — never the
+  empty placeholder dot on every card.
+- **Density-adaptive layouts.** 1-2-item card slides render as large panels (22/17px type, 0.6in icons,
+  2.4in height floor) instead of two thin strips floating in whitespace; `callout_list` with a single
+  supporting card fills the column at 20/16px. Card grids remain content-sized for 3+ items.
+- **Title↔evidence count reconciliation.** `content_planner._reconcile_title_item_counts`: when a title
+  spells out a count ("Five harness layers...") that the exhibit doesn't show, the numeral is restated to
+  match the rendered item count (conservative: exactly one number word, no digits in the title).
+- **Closing ask band sizes to its text** (a three-line decision ask previously overflowed the fixed
+  0.62in band), and the closing/statement title fixes from the earlier pass hold.
+
+Verified: suite **478 passed**, ruff clean, live qwen freeform e2e (`all_mode_smoke --modes freeform`) on
+Bootstrapping Benchmarks — zero planning/build warnings, deck-quality gate passed, contact sheet inspected
+before/after (full sentences on every card, glyph/monogram icons, themed comparison-table exhibit, real
+source quote slide, titled closing with fitted ask band).
+
+Second live-iteration round (same day) closed four more leaks the fresh decks exposed:
+
+- **Canned table scaffolds are now unreachable on the LLM path.** Two paths were still stuffing model
+  slides with keyword-templated tables: `_authored_reselection_target` now demotes `comparison_table`
+  *and* `table_reference` to a safe list when the bundle has no REAL source tables (metrics don't make a
+  comparison; the compiler otherwise falls back to the "Evidence signal / Unmanaged pattern / Harness
+  move" scaffold), and `specs._repair_underfilled_exhibit` no longer fills a sparse authored comparison
+  with the canned dimension rows ("Fragmented inputs / Shared source of truth") — on the LLM path it
+  reshapes the slide's own points as a list (`test_sparse_authored_comparison_reshapes_to_list_on_llm_path`,
+  plus the rewritten `test_planner_repairs_sparse_comparison_exhibits_before_render`).
+- **Every deck of substance ends on a decision.** `content_planner._ensure_closing_slide`: when the model
+  authors no closing beat (observed live), the last slide converts to a recommendation built from its own
+  authored points + the story map's LLM-authored recommendation — no canned next-steps bank.
+- **Only slide 1 is a cover.** A mid-deck "cover" slide (model variance) renders as a statement, and the
+  cover primitive now measures its title block and places the subtitle below it (a 4-line deck title
+  previously overlapped the fixed-position subtitle).
+- **`_body_to_bullets` table rows** join only non-empty cells ("Context | |" junk bullets fixed).
+
+Final state: suite **479 passed**, ruff clean; consecutive live qwen freeform runs pass the full gate
+(no fallback, zero planning/build warnings, deck-quality passed) with contact sheets showing grounded
+content end-to-end.
+
 ### LLM-output protection, fallback title grammar, native polish & editability guard (2026-07-02)
 
 A repo-wide audit (render paths + planner) traced the remaining "generic deck" feel to three sources and
@@ -213,6 +359,21 @@ Verification: backend suite **470 passed** (5 new tests), `ruff check app/ tests
 end-to-end render inspected as a contact sheet (before/after). A live qwen e2e
 (`all_mode_smoke --vision`) is the recommended next check when the metis endpoint
 (`100.87.204.73:1240`) is reachable again — it was down this session.
+
+**Follow-up (same day): fail fast on an unreachable LLM endpoint.** A live-use report ("stuck at
+Ingest sources") traced to the endpoint black-holing connections: `httpx.Client(timeout=900)` applied
+the full 900s generation timeout to *connecting*, tenacity retries multiplied it, and with
+`JOB_WORKER_CONCURRENCY=1` the hung job pinned the single worker — every new job sat `queued`, which
+the UI renders as the first stage ("Ingest sources"). On backend restart `_enqueue_recoverable_jobs`
+re-enqueued the stuck job first, so the freeze survived restarts. Fixes:
+`OpenAICompatibleClient._http_timeout()` splits timeouts (connect 10s, read = configured generation
+timeout) for both text and vision calls, and a new `client.preflight()` (5s `GET /models`, raises only
+on transport-level failure so servers without /models still pass) runs in the orchestrator before
+planning — an unreachable server now errors the job in ~5s with "LLM endpoint unreachable at <url>…"
+instead of hanging for hours. Covered by `test_openai_compatible_client_splits_connect_timeout`,
+`test_preflight_raises_clear_error_when_endpoint_unreachable`,
+`test_preflight_passes_when_server_responds_with_http_error`, and
+`test_orchestrator_fails_fast_when_llm_endpoint_unreachable`. Suite **474 passed**, ruff clean.
 
 ### LLM-authored content + critique-and-refine pass; less deterministic rewriting (2026-06-26)
 

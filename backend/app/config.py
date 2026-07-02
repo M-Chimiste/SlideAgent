@@ -107,6 +107,12 @@ class Settings(BaseSettings):
         default=False, alias="BRAND_LAYOUT_INSTANTIATION"
     )
 
+    # Brand mode rendering: "native" (default) renders brand decks through the
+    # SAME layout system as freeform, themed with the template's extracted
+    # brand DNA (colors, fonts, logo) — consistent, compelling output across
+    # modes. "clone" is the legacy conservative duplicate-slide clone/edit path.
+    brand_render_mode: str = Field(default="native", alias="BRAND_RENDER_MODE")
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.templates_dir.mkdir(parents=True, exist_ok=True)

@@ -158,12 +158,17 @@ build warning), so generated decks always download as editable PowerPoint. For g
   fonts, colors, charts, icons, tables, diagrams, footers, brand layout-profile placement). Diagram/icon PNGs are
   rasterized by the Node workers (Pillow fallback) into `<output_stem>-diagrams/`.
 
-- **brand** first attempts a full clone of the *uploaded* template PPTX via `BrandTemplateCloneRenderer` (real
-  master/layout/theme reuse); if the clone produces nothing it strips template frames and falls back to the engine
-  above. Set `RENDERER_ENGINE=legacy` to skip cloning entirely. With `BRAND_LAYOUT_INSTANTIATION=true` (default off),
-  `BrandLayoutInstantiationRenderer` runs *before* the clone and builds new slides from the template's **layout
-  library** (`slides.add_slide(layout)` + role-matched placeholder fill), falling back to the clone path if it yields
-  nothing — this lifts the "capped at the uploaded file's slide count" ceiling.
+- **brand** renders through the **same native layout system as freeform** by default
+  (`BRAND_RENDER_MODE=native`), themed with the template's extracted BrandDNA — colors, fonts, and the
+  extracted logo (placed on cover/closing by `NativePptxRenderer._add_logo`) — so brand and freeform decks
+  are visually consistent. Set `BRAND_RENDER_MODE=clone` for the legacy conservative clone/edit path
+  (`BrandTemplateCloneRenderer` duplicate-slide editing; `BRAND_LAYOUT_INSTANTIATION=true` additionally tries
+  layout-library instantiation before the clone). `RENDERER_ENGINE=legacy` skips both.
+- **Icons:** native card/row/callout primitives draw a small react-icons (Feather) PNG chip in the accent
+  circle — `pptx_native/icons.py` resolves the model's per-point `icon` hint (or lead keywords) to an icon
+  name and rasterizes it once via `workers/icon_renderer.js` into a temp disk cache; without Node it falls
+  back to the glyph/monogram treatment. Small icon/logo images are expected in decks (like the reference
+  decks); the editability audit only flags picture-dominated slides.
 - **strict** → `StrictSlideInjector.inject(...)` updates strict fields via XML; any `flexible` slides are rendered
   (diagrams disabled) and merged back with `HybridAssembler.assemble(...)`, preserving relationships/media/masters.
 - The legacy PptxGenJS path (`workers/pptxgen_runner.js` via `NodePptxGenRunner`) is retained but **not used** in the tested freeform/brand/strict flows.
@@ -223,7 +228,10 @@ layout primitives instead of collapsing to repeated cards.
 | `documents` | uploaded files | ingested with provenance |
 
 Other job endpoints: `GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/preview[/{image}]`,
-`GET /api/jobs/{id}/download?format=pptx|pdf`, `POST /api/jobs/{id}/regen/{slide_index}`.
+`GET /api/jobs/{id}/download?format=pptx|pdf`, `POST /api/jobs/{id}/regen/{slide_index}` (optional JSON body
+`{guidance}` → LLM re-authors that slide following the user's guidance, defensively gated), and
+`PATCH /api/jobs/{id}/slides/{slide_index}` (direct edits `{action_title?, subheading?, points?, layout?}`
+from the review cockpit; terminal jobs rebuild the deck).
 Plan review: `POST /api/jobs/{id}/render` (render a `planned` job), `GET`/`PATCH /api/jobs/{id}/outline`,
 `GET /api/jobs/{id}/planning/{artifact}` (story map, blueprint, spec-gate, editing-contract, …),
 `GET /api/jobs/{id}/qa/rendered-slide-audit`.

@@ -74,3 +74,4 @@ class TemplateProfile(BaseModel):
 class TemplateUpdateRequest(BaseModel):
     name: Optional[str] = None
     slides: Optional[List[SlideSpec]] = None
+    brand: Optional[BrandDNA] = None
