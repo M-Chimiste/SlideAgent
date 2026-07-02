@@ -125,6 +125,7 @@ class JobOrchestrator:
             )
             outlines = self.designer.apply_editing_contract(outlines)
             outlines = self.builder.prepare_outlines(template, outlines)
+            outlines = self._apply_background_style(job, outlines)
             if consulting_warnings:
                 warnings = self._merge_warnings(warnings, consulting_warnings)
             contract = self._save_editing_contract(job.id, template, outlines, "planned")
@@ -179,6 +180,7 @@ class JobOrchestrator:
             outlines = self.planner.repair_weak_outline_claims(outlines, bundle)
             outlines = self.designer.apply_editing_contract(outlines)
             outlines = self.builder.prepare_outlines(template, outlines)
+            outlines = self._apply_background_style(job, outlines)
             await self._render_outlines(
                 job,
                 template,
@@ -354,6 +356,31 @@ class JobOrchestrator:
             completed_at=self._timestamp(),
         )
 
+    def _apply_background_style(
+        self, job: JobRecord, outlines: list[SlideOutline]
+    ) -> list[SlideOutline]:
+        """Deck-level background preference: "light" sets every slide except the
+        cover to the light background (a light template wants white working
+        slides); "dark" sets the whole deck dark. Slides carrying an explicit
+        per-slide background_mode keep it. "auto" leaves the rhythm alone."""
+        style = str((job.config_json or {}).get("background_style") or "auto").strip().lower()
+        if style not in {"light", "dark"}:
+            return outlines
+        stamped: list[SlideOutline] = []
+        for index, outline in enumerate(outlines):
+            content = outline.content_json or {}
+            role = str(content.get("narrative_role") or content.get("slide_type") or "").lower()
+            is_cover = index == 0 or role == "cover"
+            if content.get("background_mode") in ("dark", "light") or (
+                style == "light" and is_cover
+            ):
+                stamped.append(outline)
+                continue
+            revised = outline.model_copy(deep=True)
+            revised.content_json["background_mode"] = style
+            stamped.append(revised)
+        return stamped
+
     def _apply_slide_fields(self, outline, fields: dict):
         """Apply validated slide edits (title/subheading/points/layout) to an
         outline copy — the single write path shared by manual edits and guided
@@ -390,6 +417,11 @@ class JobOrchestrator:
                     else (c["title"] or c["body"])
                     for c in clean
                 ]
+        background = str(fields.get("background") or "").strip().lower()
+        if background == "auto":
+            content.pop("background_mode", None)
+        elif background in {"dark", "light"}:
+            content["background_mode"] = background
         layout = str(fields.get("layout") or "").strip().lower()
         if layout:
             stype_key = slide_types.slide_type_for_archetype(layout)

@@ -21,3 +21,5 @@ export type DesignLanguage =
   | "warm_magazine"
   | "technical_mono"
   | "data_forward";
+
+export type BackgroundStyle = "auto" | "light" | "dark";

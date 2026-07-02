@@ -1068,3 +1068,46 @@ async def test_regenerate_slide_applies_edits_before_llm_rework(tmp_path: Path) 
     refreshed = await store.list_slide_outlines("edit-regen-job")
     edited = next(o for o in refreshed if o.slide_index == target.slide_index)
     assert edited.content_json["action_title"] == "Manual title survives a rejected rewrite"
+
+
+@pytest.mark.asyncio
+async def test_background_style_light_stamps_all_but_cover(tmp_path: Path) -> None:
+    """background_style=light: every slide except the cover renders on the
+    light background; per-slide edits can still pin a slide afterwards."""
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings)
+    storage = LocalStorage(settings)
+    await store.init()
+    job = _job("bg-job", FREEFORM_TEMPLATE_ID, "freeform")
+    job.config_json = {"generation_mode": "freeform", "background_style": "light"}
+    await store.create_job(job)
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        store=store,
+        storage=storage,
+        ingester=StaticIngester(),
+        planner=ContentPlanner(),
+        designer=DesignAgent(),
+        builder=PptxBuilder(node_runner=object(), renderer_engine="native"),
+        qa_agent=CleanQAAgent(),
+    )
+    await orchestrator.run_job("bg-job")
+    outlines = await store.list_slide_outlines("bg-job")
+    assert outlines
+    for outline in outlines:
+        role = (outline.content_json.get("narrative_role") or outline.content_json.get("slide_type") or "").lower()
+        if outline.slide_index == 0 or role == "cover":
+            assert outline.content_json.get("background_mode") != "light" or role != "cover"
+        else:
+            assert outline.content_json.get("background_mode") == "light"
+
+    # Per-slide override back to dark via the edit path.
+    target = next(o for o in outlines if o.slide_index > 0 and o.mode == "flexible")
+    await orchestrator.edit_slide(
+        "bg-job", orchestrator.freeform_template(), target.slide_index,
+        {"background": "dark"}, rebuild=False,
+    )
+    refreshed = await store.list_slide_outlines("bg-job")
+    edited = next(o for o in refreshed if o.slide_index == target.slide_index)
+    assert edited.content_json["background_mode"] == "dark"

@@ -300,3 +300,20 @@ def test_brand_mode_renders_through_native_layouts_by_default(tmp_path):
     assert len(prs.slides) == 2
     assert any(sh.has_text_frame and "layout system" in sh.text_frame.text
                for sh in prs.slides[1].shapes)
+
+
+def test_background_mode_override_wins_over_rhythm(tmp_path):
+    """Explicit background_mode pins a slide dark/light regardless of rhythm."""
+    outs = [
+        _outline(0, "cover", "Deck Title", []),
+        _outline(1, "cards", "A working slide forced dark", [
+            {"title": "Point", "body": "Body sentence for the card."}]),
+        _outline(2, "statement", "A statement forced light", ["Supporting tick"]),
+    ]
+    outs[1].content_json["background_mode"] = "dark"
+    outs[2].content_json["background_mode"] = "light"
+    from app.services.pptx_native import theme as theme_mod
+
+    modes = theme_mod.slide_modes(outs)
+    assert modes[1] == "dark"
+    assert modes[2] == "light"

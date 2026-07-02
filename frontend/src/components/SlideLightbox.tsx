@@ -89,12 +89,14 @@ export default function SlideLightbox({
   const [editTitle, setEditTitle] = useState("");
   const [editSubheading, setEditSubheading] = useState("");
   const [editLayout, setEditLayout] = useState("");
+  const [editBackground, setEditBackground] = useState("");
   const [editPoints, setEditPoints] = useState<SlidePoint[]>([]);
 
   useEffect(() => {
     setEditTitle(outlineSlide?.action_title || "");
     setEditSubheading(outlineSlide?.subheading || "");
     setEditLayout(outlineSlide?.layout || "");
+    setEditBackground(outlineSlide?.background_mode || "");
     setEditPoints((outlineSlide?.points || []).map((p) => ({ ...p })));
     setEditing(false);
     setGuidance("");
@@ -113,6 +115,9 @@ export default function SlideLightbox({
     };
     if (editLayout && editLayout !== (outlineSlide?.layout || "")) {
       payload.layout = editLayout;
+    }
+    if (editBackground !== (outlineSlide?.background_mode || "")) {
+      payload.background = (editBackground || "auto") as SlideEditPayload["background"];
     }
     return payload;
   };
@@ -498,6 +503,16 @@ export default function SlideLightbox({
                     {l}
                   </option>
                 ))}
+              </select>
+              <select
+                value={editBackground}
+                onChange={(e) => setEditBackground(e.target.value)}
+                style={fieldStyle}
+                title="Pin this slide's background, or leave it to the deck rhythm"
+              >
+                <option value="">Background: deck rhythm (auto)</option>
+                <option value="light">Background: light / white</option>
+                <option value="dark">Background: dark</option>
               </select>
               {editPoints.map((p, i) => (
                 <div

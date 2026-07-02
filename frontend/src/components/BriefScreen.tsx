@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { card, eyebrow, microLabel, segActive, segGroup, segIdle, SERIF } from "../ui";
-import { DesignLanguage, Length, Mode, Planner, PresentationStyle, Quality } from "../types";
+import { DesignLanguage, Length, Mode, Planner, PresentationStyle, Quality, BackgroundStyle } from "../types";
 
 const MONO = "'IBM Plex Mono', monospace";
 
@@ -20,12 +20,14 @@ type Props = {
   length: Length;
   presentationStyle: PresentationStyle;
   designLanguage: DesignLanguage;
+  backgroundStyle: BackgroundStyle;
   visualQa: boolean;
   onPlanner: (v: Planner) => void;
   onQuality: (v: Quality) => void;
   onLength: (v: Length) => void;
   onPresentationStyle: (v: PresentationStyle) => void;
   onDesignLanguage: (v: DesignLanguage) => void;
+  onBackgroundStyle: (v: BackgroundStyle) => void;
   onToggleVisualQa: () => void;
   submitting: boolean;
   error: string | null;
@@ -381,6 +383,17 @@ export default function BriefScreen(p: Props) {
               { v: "warm_magazine", label: "Warm magazine" },
               { v: "technical_mono", label: "Technical mono" },
               { v: "data_forward", label: "Data forward" },
+            ]}
+          />
+
+          <div style={{ ...microLabel, marginBottom: 8 }}>SLIDE BACKGROUNDS</div>
+          <Dropdown
+            value={p.backgroundStyle}
+            onChange={p.onBackgroundStyle}
+            options={[
+              { v: "auto", label: "Auto (dark/light rhythm)" },
+              { v: "light", label: "Light — white slides after the cover" },
+              { v: "dark", label: "Dark — full-color throughout" },
             ]}
           />
 
