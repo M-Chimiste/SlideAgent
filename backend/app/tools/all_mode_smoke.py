@@ -1,0 +1,1186 @@
+import argparse
+import json
+import re
+import sys
+import tempfile
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.util import Inches
+
+from app.clients.openai_compatible_client import OpenAICompatibleClient
+from app.config import Settings
+from app.models.brand import BrandDNA
+from app.models.qa import QAIssue, QAResult
+from app.models.template import SlideField, SlideSchema, SlideSpec, TemplateProfile
+from app.services.content_planner import ContentPlanner
+from app.services.design_agent import DesignAgent
+from app.services.document_ingester import DocumentIngester
+from app.services.freeform_theme import derive_freeform_brand
+from app.services.pptx_builder import PptxBuilder
+from app.services.template_analyzer import TemplateAnalyzer
+from app.services.visual_qa_agent import VisualQAAgent
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_DOC = REPO_ROOT / "data" / "Beyond Vibe Coding.docx"
+DEFAULT_OUT_DIR = Path(tempfile.gettempdir()) / "slideagent-beyond-vibe"
+DEFAULT_INSTRUCTIONS = (
+    "Create a consulting-quality executive deck about moving beyond vibe coding. "
+    "Use action titles, source-grounded claims, varied slide layouts, and concise evidence."
+)
+
+
+def run_smoke(
+    doc_path: Path = DEFAULT_DOC,
+    out_dir: Path = DEFAULT_OUT_DIR,
+    instructions: str = DEFAULT_INSTRUCTIONS,
+    use_vision: bool = False,
+    quality_profile: str = "balanced",
+    length_strategy: str = "auto",
+    slide_strategy: str = "batched",
+    settings: Settings | None = None,
+    vision_settings: Settings | None = None,
+    run_label: str | None = None,
+    modes: list[str] | None = None,
+    progress: bool = False,
+    allow_planner_fallback: bool = False,
+    allow_generic_output: bool = False,
+    brand_template_path: Path | None = None,
+) -> dict[str, Any]:
+    settings = settings or Settings(BEDROCK_VALIDATE=False)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    label = run_label or _model_slug(settings.openai_compatible_model)
+    selected_modes = _normalize_modes(modes)
+
+    client = OpenAICompatibleClient(settings)
+    planner = ContentPlanner(llm_client=client, slide_generation_strategy=slide_strategy)
+    designer = DesignAgent()
+    builder = PptxBuilder(node_runner=object(), renderer_engine=settings.renderer_engine,
+                          brand_render_mode=settings.brand_render_mode)
+    qa_client = OpenAICompatibleClient(vision_settings or settings) if use_vision else None
+    qa_agent = VisualQAAgent(openai_client=qa_client)
+
+    _, bundle = DocumentIngester().ingest_documents("all-mode-qwen-smoke", [doc_path])
+    if brand_template_path is not None:
+        # Use a real uploaded template so brand mode exercises the actual analyze
+        # -> clone / native-fallback path with the template's extracted brand DNA.
+        brand_template, _brand_thumbs = TemplateAnalyzer().analyze(
+            brand_template_path, brand_template_path.stem, "brand"
+        )
+        _progress(
+            progress,
+            f"[brand] analyzed template {brand_template_path.name}: "
+            f"primary #{brand_template.brand.colors.primary}, "
+            f"heading {brand_template.brand.fonts.heading}, "
+            f"{len(brand_template.layout_library)} layout(s)",
+        )
+    else:
+        brand_template = _template("brand", _brand())
+    results: dict[str, Any] = {}
+    quality_failures: list[str] = []
+    for mode, template in [
+        ("freeform", _template("freeform", derive_freeform_brand(bundle, instructions))),
+        ("brand", brand_template),
+    ]:
+        if mode not in selected_modes:
+            continue
+        _progress(progress, f"[{mode}] planning")
+        outlines, planning_warnings = planner.plan(
+            template,
+            bundle,
+            instructions=instructions,
+            generation_mode=mode,
+            quality_profile=quality_profile,
+            length_strategy=length_strategy,
+        )
+        consulting_repair_history = [
+            warning
+            for warning in planning_warnings
+            if _is_initial_consulting_warning(warning)
+        ]
+        planning_warnings = [
+            warning
+            for warning in planning_warnings
+            if not _is_initial_consulting_warning(warning)
+        ]
+        if _has_planner_fallback(planning_warnings) and not allow_planner_fallback:
+            reason = _planner_fallback_reason(planning_warnings)
+            raise RuntimeError(
+                f"{mode} planner used deterministic fallback. "
+                f"{reason} "
+                "Fix the model invocation or rerun with --allow-planner-fallback "
+                "only when intentionally inspecting fallback behavior."
+            )
+        _progress(progress, f"[{mode}] applying design")
+        outlines = designer.apply_design(outlines)
+        outlines, consulting_warnings, consulting_history = _run_consulting_repairs(
+            planner,
+            designer,
+            outlines,
+            bundle,
+            settings.qa_max_rounds,
+        )
+        consulting_repair_history.extend(consulting_history)
+        planning_warnings.extend(consulting_warnings)
+        output_path = out_dir / f"{mode}-beyond-vibe-{label}.pptx"
+        _progress(progress, f"[{mode}] building {output_path.name}")
+        build_warnings = builder.build_deck(
+            template, outlines, output_path, out_dir / f"{mode}-{label}-work"
+        )
+        _progress(progress, f"[{mode}] visual QA")
+        qa_result, preview_images = qa_agent.inspect_deck(
+            output_path, out_dir / f"{mode}-{label}-preview", outlines
+        )
+        qa_rounds = 0
+        qa_history = [summarize_qa(qa_result.issues)]
+        seen_actionable_signatures: set[tuple[tuple[int | None, str, str], ...]] = set()
+        while qa_rounds < settings.qa_max_rounds:
+            actionable_signature = _actionable_issue_signature(designer, qa_result)
+            if (
+                not actionable_signature
+                or actionable_signature in seen_actionable_signatures
+            ):
+                break
+            seen_actionable_signatures.add(actionable_signature)
+            qa_rounds += 1
+            _progress(progress, f"[{mode}] repair round {qa_rounds}")
+            outlines = designer.revise_deck_for_qa(outlines, qa_result.issues)
+            outlines, consulting_warnings, consulting_history = _run_consulting_repairs(
+                planner,
+                designer,
+                outlines,
+                bundle,
+                settings.qa_max_rounds,
+            )
+            consulting_repair_history.extend(consulting_history)
+            planning_warnings.extend(consulting_warnings)
+            repair_warnings = builder.build_deck(
+                template, outlines, output_path, out_dir / f"{mode}-{label}-work"
+            )
+            build_warnings.extend(repair_warnings)
+            qa_result, preview_images = qa_agent.inspect_deck(
+                output_path, out_dir / f"{mode}-{label}-preview", outlines
+            )
+            qa_history.append(summarize_qa(qa_result.issues))
+        rendered = Presentation(output_path.as_posix())
+        _progress(progress, f"[{mode}] done: {len(rendered.slides)} slides")
+        contact_sheet = _write_contact_sheet(
+            preview_images,
+            out_dir / f"{mode}-{label}-contact-sheet.jpg",
+        )
+        results[mode] = deck_report(
+            mode=mode,
+            output_path=output_path,
+            slide_count=len(rendered.slides),
+            titles=[outline.label for outline in outlines],
+            layouts=[outline.layout_json.get("layout", "") for outline in outlines],
+            outlines=outlines,
+            planning_warnings=planning_warnings,
+            build_warnings=build_warnings,
+            qa_result=qa_result,
+            preview_images=preview_images,
+            contact_sheet=contact_sheet,
+            qa_rounds=qa_rounds,
+            qa_history=qa_history,
+            consulting_repair_history=consulting_repair_history,
+        )
+        if (
+            mode in {"freeform", "brand"}
+            and not allow_generic_output
+            and not results[mode]["deck_quality"]["passed"]
+        ):
+            issues = "; ".join(results[mode]["deck_quality"]["issues"])
+            quality_failures.append(
+                f"{mode} deck did not pass dynamic-output harness checks: {issues}. "
+                "Rerun with --allow-generic-output only when intentionally inspecting "
+                "a weak deck."
+            )
+
+    if "strict" in selected_modes:
+        _progress(progress, "[strict] planning")
+        strict_template = _strict_template(out_dir, label)
+        strict_outlines, strict_planning_warnings = ContentPlanner().plan(
+            strict_template,
+            bundle,
+            instructions="Populate the strict executive summary fields from the uploaded source.",
+            generation_mode="strict",
+            quality_profile=quality_profile,
+            length_strategy=length_strategy,
+        )
+        strict_output = out_dir / f"strict-beyond-vibe-{label}.pptx"
+        _progress(progress, f"[strict] building {strict_output.name}")
+        strict_build_warnings = builder.build_deck(
+            strict_template, strict_outlines, strict_output, out_dir / f"strict-{label}-work"
+        )
+        _progress(progress, "[strict] visual QA")
+        strict_qa_result, strict_images = qa_agent.inspect_deck(
+            strict_output, out_dir / f"strict-{label}-preview", strict_outlines
+        )
+        strict_rendered = Presentation(strict_output.as_posix())
+        _progress(progress, f"[strict] done: {len(strict_rendered.slides)} slides")
+        results["strict"] = deck_report(
+            mode="strict",
+            output_path=strict_output,
+            slide_count=len(strict_rendered.slides),
+            titles=[outline.label for outline in strict_outlines],
+            layouts=[outline.layout_json.get("layout", "") for outline in strict_outlines],
+            outlines=strict_outlines,
+            planning_warnings=strict_planning_warnings,
+            build_warnings=strict_build_warnings,
+            qa_result=strict_qa_result,
+            preview_images=strict_images,
+            contact_sheet=_write_contact_sheet(
+                strict_images,
+                out_dir / f"strict-{label}-contact-sheet.jpg",
+            ),
+            qa_rounds=0,
+            qa_history=[summarize_qa(strict_qa_result.issues)],
+        )
+
+    report = {
+        "doc_path": doc_path.as_posix(),
+        "out_dir": out_dir.as_posix(),
+        "model": settings.openai_compatible_model,
+        "base_url": settings.openai_compatible_base_url,
+        "run_label": label,
+        "vision_enabled": use_vision,
+        "vision_model": (vision_settings or settings).openai_compatible_model
+        if use_vision
+        else None,
+        "vision_base_url": (vision_settings or settings).openai_compatible_base_url
+        if use_vision
+        else None,
+        "selected_modes": selected_modes,
+        "quality_profile": quality_profile,
+        "length_strategy": length_strategy,
+        "generic_output_allowed": allow_generic_output,
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "modes": results,
+    }
+    report_path = out_dir / f"all-mode-{label}-smoke-report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report["report_path"] = report_path.as_posix()
+    if quality_failures:
+        raise RuntimeError(
+            " ".join(quality_failures)
+            + f" Smoke report was written to {report_path.as_posix()}."
+        )
+    return report
+
+
+def _progress(enabled: bool, message: str) -> None:
+    if enabled:
+        print(message, file=sys.stderr, flush=True)
+
+
+def _has_planner_fallback(warnings: list[dict[str, Any]]) -> bool:
+    return any(warning.get("field") == "llm_planning" for warning in warnings)
+
+
+def _planner_fallback_reason(warnings: list[dict[str, Any]]) -> str:
+    for warning in warnings:
+        if warning.get("field") == "llm_planning" and warning.get("message"):
+            return str(warning["message"])
+    return "No fallback reason was reported."
+
+
+def _is_initial_consulting_warning(warning: dict[str, Any]) -> bool:
+    # ContentPlanner runs ConsultingQA before the outline repair loop. Keep
+    # those initial findings as repair history so the report's planning_warnings
+    # field only reflects unresolved final issues.
+    return warning.get("field") in {"consulting_qa", "horizontal_flow"}
+
+
+def _normalize_modes(modes: list[str] | None) -> list[str]:
+    allowed = ["freeform", "brand", "strict"]
+    if not modes:
+        return allowed
+    normalized: list[str] = []
+    for mode in modes:
+        value = mode.strip().lower()
+        if not value:
+            continue
+        if value not in allowed:
+            raise ValueError(f"Unsupported smoke mode: {mode}")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized or allowed
+
+
+def _parse_modes(raw_modes: str) -> list[str]:
+    return _normalize_modes(raw_modes.split(","))
+
+
+def _run_consulting_repairs(
+    planner: ContentPlanner,
+    designer: DesignAgent,
+    outlines,
+    bundle,
+    max_rounds: int,
+) -> tuple[list, list[dict[str, Any]], list[dict[str, Any]]]:
+    repaired = outlines
+    history: list[dict[str, Any]] = []
+    seen_signatures: set[tuple[tuple[int, str, str], ...]] = set()
+    for round_index in range(max(1, max_rounds)):
+        issues = planner.consulting_issues_for_outlines(repaired, bundle)
+        signature = tuple(
+            sorted(
+                (
+                    -1 if issue.slide_index is None else issue.slide_index,
+                    issue.category or "",
+                    " ".join(issue.message.lower().split())[:160],
+                )
+                for issue in issues
+                if issue.severity in {"CRITICAL", "WARNING"}
+            )
+        )
+        if not signature:
+            break
+        history.extend(
+            {
+                "slide_index": issue.slide_index,
+                "field": "consulting_qa",
+                "message": f"Round {round_index}: {issue.message}",
+            }
+            for issue in issues
+            if issue.severity in {"CRITICAL", "WARNING"}
+        )
+        if signature in seen_signatures:
+            break
+        seen_signatures.add(signature)
+        repaired = planner.repair_outlines_for_consulting(repaired, issues, bundle)
+        repaired = designer.apply_design(repaired)
+    unresolved = _consulting_warnings(
+        planner.consulting_issues_for_outlines(repaired, bundle),
+        "final",
+    )
+    return repaired, unresolved, history
+
+
+def _consulting_warnings(
+    issues: list[QAIssue],
+    round_label: int | str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "slide_index": issue.slide_index,
+            "field": "consulting_qa",
+            "message": f"Round {round_label}: {issue.message}",
+        }
+        for issue in issues
+        if issue.severity in {"CRITICAL", "WARNING"}
+    ]
+
+
+def deck_report(
+    mode: str,
+    output_path: Path,
+    slide_count: int,
+    titles: list[str],
+    layouts: list[str],
+    planning_warnings: list[dict[str, Any]],
+    build_warnings: list[dict[str, Any]],
+    qa_result: QAResult,
+    preview_images: list[Path],
+    outlines: list | None = None,
+    contact_sheet: Path | None = None,
+    qa_rounds: int = 0,
+    qa_history: list[dict[str, Any]] | None = None,
+    consulting_repair_history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    deck_quality = evaluate_deck_quality(
+        mode=mode,
+        output_path=output_path,
+        titles=titles,
+        layouts=layouts,
+        outlines=outlines or [],
+    )
+    unresolved_consulting = [
+        warning
+        for warning in planning_warnings
+        if warning.get("field") in {"consulting_qa", "horizontal_flow"}
+    ]
+    unresolved_source_or_spec = [
+        warning
+        for warning in planning_warnings
+        if warning.get("field") in {"source_coverage", "spec_gate"}
+    ]
+    if mode in {"freeform", "brand"} and deck_quality["available"] and unresolved_consulting:
+        deck_quality["passed"] = False
+        deck_quality["issues"].append(
+            f"{len(unresolved_consulting)} unresolved consulting QA warning(s)"
+        )
+        deck_quality["metrics"]["unresolved_consulting_warnings"] = len(
+            unresolved_consulting
+        )
+    if mode in {"freeform", "brand"} and deck_quality["available"] and unresolved_source_or_spec:
+        deck_quality["passed"] = False
+        deck_quality["issues"].append(
+            f"{len(unresolved_source_or_spec)} unresolved source/spec warning(s)"
+        )
+        deck_quality["metrics"]["unresolved_source_spec_warnings"] = len(
+            unresolved_source_or_spec
+        )
+    if mode in {"freeform", "brand"} and deck_quality["available"] and not qa_result.passed:
+        deck_quality["passed"] = False
+        deck_quality["issues"].append("final visual QA did not pass")
+        deck_quality["metrics"]["qa_passed"] = False
+    actionable_count = len(_actionable_issue_signature(DesignAgent(), qa_result))
+    if mode in {"freeform", "brand"} and deck_quality["available"] and actionable_count:
+        deck_quality["passed"] = False
+        deck_quality["issues"].append(f"{actionable_count} unresolved actionable QA issue(s)")
+        deck_quality["metrics"]["unresolved_actionable_qa_issues"] = actionable_count
+    return {
+        "mode": mode,
+        "output": output_path.as_posix(),
+        "slides": slide_count,
+        "titles": titles,
+        "layouts": layouts,
+        "deck_quality": deck_quality,
+        "planner_fallback": _has_planner_fallback(planning_warnings),
+        "planning_warnings": _dedupe_warning_dicts(planning_warnings),
+        "consulting_repair_history": consulting_repair_history or [],
+        "build_warnings": build_warnings,
+        "qa_rounds": qa_rounds,
+        "qa_passed": qa_result.passed,
+        "qa": summarize_qa(qa_result.issues),
+        "qa_issues": serialize_qa_issues(qa_result.issues),
+        "qa_history": qa_history or [summarize_qa(qa_result.issues)],
+        "preview_images": [path.as_posix() for path in preview_images],
+        "contact_sheet": contact_sheet.as_posix() if contact_sheet else None,
+    }
+
+
+def evaluate_deck_quality(
+    mode: str,
+    output_path: Path,
+    titles: list[str],
+    layouts: list[str],
+    outlines: list,
+) -> dict[str, Any]:
+    if not output_path.exists():
+        return {"available": False, "passed": True, "issues": [], "metrics": {}}
+    pptx_metrics = _pptx_visual_metrics(output_path)
+    image_based = bool(pptx_metrics.get("image_based"))
+    slide_count = max(len(layouts), len(titles), pptx_metrics["slide_count"])
+    distinct_layouts = len(set(layout for layout in layouts if layout))
+    layout_diversity = distinct_layouts / max(1, len([layout for layout in layouts if layout]))
+    visual_slide_count = _visual_slide_count(outlines, pptx_metrics)
+    visual_slide_ratio = visual_slide_count / max(1, slide_count)
+    max_layout_run = _max_adjacent_run(layouts)
+    title_frame_ratio = _most_common_title_frame_ratio(titles)
+    generic_titles = _generic_title_frames(titles)
+    sparse_outline_slides = _sparse_outline_slide_numbers(outlines)
+    metrics = {
+        "slide_count": slide_count,
+        "distinct_layouts": distinct_layouts,
+        "layout_diversity": round(layout_diversity, 3),
+        "max_adjacent_layout_run": max_layout_run,
+        "visual_slide_count": visual_slide_count,
+        "visual_slide_ratio": round(visual_slide_ratio, 3),
+        "distinct_fill_colors": pptx_metrics["distinct_fill_colors"],
+        "top_fill_colors": pptx_metrics["top_fill_colors"],
+        "distinct_fonts": pptx_metrics["distinct_fonts"],
+        "picture_count": pptx_metrics["picture_count"],
+        "chart_count": pptx_metrics["chart_count"],
+        "table_count": pptx_metrics["table_count"],
+        "placeholder_text_count": pptx_metrics["placeholder_text_count"],
+        "rendered_text_issue_count": pptx_metrics["rendered_text_issue_count"],
+        "rendered_text_issues": pptx_metrics["rendered_text_issues"],
+        "title_frame_repetition": round(title_frame_ratio, 3),
+        "house_palette_ratio": round(pptx_metrics["house_palette_ratio"], 3),
+        "image_based": image_based,
+        "generic_title_count": len(generic_titles),
+        "sparse_outline_slide_count": len(sparse_outline_slides),
+        "sparse_outline_slides": sparse_outline_slides,
+    }
+    issues: list[str] = []
+    if mode in {"freeform", "brand"}:
+        min_layouts = min(6, max(3, slide_count // 2))
+        if distinct_layouts < min_layouts:
+            issues.append(
+                f"uses only {distinct_layouts} distinct layouts; expected at least {min_layouts}"
+            )
+        if slide_count >= 6 and layout_diversity < 0.5:
+            issues.append("layout diversity is below 0.50")
+        if max_layout_run > 2:
+            issues.append("repeats the same layout more than twice in a row")
+        if visual_slide_ratio < 0.85:
+            issues.append("too many slides lack a primary visual element")
+        # (The old shape-fill color-diversity / house-palette heuristics were tuned
+        # for the authored renderer; the native renderer uses a deliberate themed
+        # palette, so those checks no longer apply.)
+        if slide_count >= 8 and title_frame_ratio > 0.38:
+            issues.append("action titles repeat the same opening frame too often")
+        if generic_titles:
+            issues.append(
+                "generic/meta action titles remain: "
+                + "; ".join(generic_titles[:3])
+            )
+        if pptx_metrics["placeholder_text_count"]:
+            issues.append("placeholder visual text remains in rendered slides")
+        if pptx_metrics["rendered_text_issue_count"]:
+            issues.append(
+                "rendered text quality defects remain: "
+                + "; ".join(pptx_metrics["rendered_text_issues"][:4])
+            )
+        if sparse_outline_slides:
+            issues.append(
+                "sparse source-backed slides remain: "
+                + ", ".join(str(number) for number in sparse_outline_slides[:8])
+            )
+    return {
+        "available": True,
+        "passed": not issues,
+        "issues": issues,
+        "metrics": metrics,
+    }
+
+
+def _outline_slide_texts(outlines: list) -> list[list[str]]:
+    """Per-slide visible text gathered from outline content (for image decks)."""
+    slides: list[list[str]] = []
+    for outline in outlines:
+        content = getattr(outline, "content_json", None) or {}
+        texts: list[str] = []
+        for key in ("action_title", "subheading", "title", "summary"):
+            value = content.get(key)
+            if value:
+                texts.append(str(value))
+        for bullet in content.get("bullets") or []:
+            texts.append(bullet if isinstance(bullet, str) else str(bullet.get("text", "")))
+        exhibit = content.get("exhibit_spec") or {}
+        for key in ("points", "items", "next_steps"):
+            for entry in exhibit.get(key) or []:
+                if isinstance(entry, str):
+                    texts.append(entry)
+                elif isinstance(entry, dict):
+                    texts.append(str(entry.get("text") or entry.get("action") or entry.get("label") or ""))
+        for key in ("recommendation", "decision_ask"):
+            if exhibit.get(key):
+                texts.append(str(exhibit[key]))
+        slides.append([t for t in texts if t.strip()])
+    return slides
+
+
+def _pptx_visual_metrics(output_path: Path) -> dict[str, Any]:
+    prs = Presentation(output_path.as_posix())
+    fill_colors: Counter[str] = Counter()
+    fonts: Counter[str] = Counter()
+    picture_count = 0
+    chart_count = 0
+    table_count = 0
+    visual_slides = 0
+    placeholder_text_count = 0
+    rendered_text_issues: list[str] = []
+    for slide in prs.slides:
+        slide_visuals = 0
+        slide_texts: list[str] = []
+        for shape in slide.shapes:
+            shape_type = getattr(shape, "shape_type", None)
+            if shape_type == MSO_SHAPE_TYPE.PICTURE:
+                picture_count += 1
+                slide_visuals += 1
+            if getattr(shape, "has_chart", False):
+                chart_count += 1
+                slide_visuals += 1
+            if getattr(shape, "has_table", False):
+                table_count += 1
+                slide_visuals += 1
+            color = _shape_fill_color(shape)
+            if color:
+                fill_colors[color] += 1
+                if not getattr(shape, "has_text_frame", False):
+                    slide_visuals += 1
+            if getattr(shape, "has_text_frame", False):
+                text_value = " ".join(shape.text.split())
+                if text_value:
+                    slide_texts.append(text_value)
+                for paragraph in shape.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        if run.font.name:
+                            fonts[run.font.name] += 1
+                if _is_placeholder_visual_text(shape.text):
+                    placeholder_text_count += 1
+        rendered_text_issues.extend(_rendered_text_issues(len(rendered_text_issues), slide_texts))
+        if slide_visuals:
+            visual_slides += 1
+    house_hits = sum(
+        count for color, count in fill_colors.items() if color.upper() in _HOUSE_COLORS
+    )
+    total_fills = sum(fill_colors.values())
+    # An HTML/design-system deck embeds each slide as a full-bleed picture with
+    # no fill shapes or text runs, so shape-introspection color/font metrics are
+    # degenerate. Flag it so the acceptance gate evaluates it correctly.
+    image_based = (
+        len(prs.slides) > 0
+        and picture_count >= len(prs.slides)
+        and sum(fonts.values()) == 0
+    )
+    return {
+        "slide_count": len(prs.slides),
+        "visual_slides_from_pptx": visual_slides,
+        "image_based": image_based,
+        "distinct_fill_colors": len(fill_colors),
+        "top_fill_colors": fill_colors.most_common(8),
+        "house_palette_ratio": house_hits / total_fills if total_fills else 0,
+        "distinct_fonts": len(fonts),
+        "picture_count": picture_count,
+        "chart_count": chart_count,
+        "table_count": table_count,
+        "placeholder_text_count": placeholder_text_count,
+        "rendered_text_issue_count": len(rendered_text_issues),
+        "rendered_text_issues": rendered_text_issues[:12],
+    }
+
+
+def _rendered_text_issues(offset: int, texts: list[str]) -> list[str]:
+    joined = " || ".join(texts)
+    issues: list[str] = []
+    if re.search(r"\bconvert\b.{0,180}\binto an(?: owned)?(?: action)?", joined, re.IGNORECASE):
+        issues.append("generated Convert-into-action boilerplate")
+    if re.search(r"\(\s*owner\s*/\s*next\s*\)|\bowner\s*/\s*next\b", joined, re.IGNORECASE):
+        issues.append("unresolved owner/next placeholder")
+    if re.search(r"\w\s*\|\s*\w", joined):
+        issues.append("raw table delimiter text")
+    if len({m.group(0).casefold() for m in re.finditer(r"\b(?:high|low) impact\s*/\s*(?:high|low) readiness\b", joined, re.IGNORECASE)}) >= 2:
+        issues.append("generic impact/readiness matrix labels")
+    trailing = re.compile(
+        r"\b(?:a|an|and|as|by|for|from|in|into|of|or|the|their|through|to|with)\.?$",
+        re.IGNORECASE,
+    )
+    if any(len(text.split()) >= 4 and trailing.search(text.strip()) for text in texts):
+        issues.append("dangling sentence fragment")
+    return [f"text-{offset + index + 1}: {issue}" for index, issue in enumerate(issues)]
+
+
+def _shape_fill_color(shape) -> str | None:
+    try:
+        fill = shape.fill
+        color = fill.fore_color.rgb
+    except Exception:
+        return None
+    return str(color).upper() if color else None
+
+
+def _visual_slide_count(outlines: list, pptx_metrics: dict[str, Any]) -> int:
+    if not outlines:
+        return int(pptx_metrics["visual_slides_from_pptx"])
+    count = 0
+    for outline in outlines:
+        layout = (outline.layout_json or {}).get("layout")
+        visuals = (outline.layout_json or {}).get("visual_elements") or []
+        exhibit = (outline.content_json or {}).get("exhibit_spec")
+        if layout in {"cover", "section_divider", "quote_sidebar", "closing_recommendation"}:
+            count += 1
+        elif visuals or (isinstance(exhibit, dict) and exhibit.get("type")):
+            count += 1
+    return max(count, int(pptx_metrics["visual_slides_from_pptx"]))
+
+
+_SPARSE_SENSITIVE_LAYOUTS = {
+    "anti_patterns",
+    "callouts",
+    "checklist",
+    "comparison_table",
+    "icon_rows",
+    "matrix_2x2",
+    "quote_sidebar",
+    "table_reference",
+    "two_column",
+}
+
+
+def _sparse_outline_slide_numbers(outlines: list) -> list[int]:
+    sparse: list[int] = []
+    for outline in outlines or []:
+        if getattr(outline, "mode", "flexible") != "flexible":
+            continue
+        content = getattr(outline, "content_json", {}) or {}
+        layout_json = getattr(outline, "layout_json", {}) or {}
+        layout = str(layout_json.get("layout") or "").lower()
+        archetype = str(content.get("archetype") or layout_json.get("archetype") or "").lower()
+        if layout in {"cover", "section_divider", "closing_recommendation"}:
+            continue
+        if layout not in _SPARSE_SENSITIVE_LAYOUTS and archetype not in _SPARSE_SENSITIVE_LAYOUTS:
+            continue
+        display_items = [
+            item
+            for item in _outline_display_items(outline)
+            if item and not _is_placeholder_visual_text(item)
+        ]
+        meaningful_items = [
+            item for item in display_items if len(_meaningful_words(item)) >= 4
+        ]
+        exhibit_text = _flatten_outline_value(content.get("exhibit_spec"))
+        visible_text = " ".join(
+            [
+                str(content.get("subheading") or ""),
+                *meaningful_items,
+                exhibit_text,
+            ]
+        )
+        token_count = len(_meaningful_words(visible_text))
+        if len(meaningful_items) < 2 or token_count < 18:
+            sparse.append(int(getattr(outline, "slide_index", len(sparse))) + 1)
+    return sparse
+
+
+def _outline_display_items(outline) -> list[str]:
+    content = getattr(outline, "content_json", {}) or {}
+    items: list[str] = []
+    bullets = content.get("bullets")
+    if isinstance(bullets, list):
+        items.extend(_coerce_outline_item(item) for item in bullets)
+    blocks = content.get("content_blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            body = block.get("body")
+            if isinstance(body, list):
+                items.extend(_coerce_outline_item(item) for item in body)
+    exhibit = content.get("exhibit_spec")
+    if isinstance(exhibit, dict):
+        items.extend(_exhibit_display_items(exhibit))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        cleaned = " ".join(str(item).split())
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _exhibit_display_items(exhibit: dict[str, Any]) -> list[str]:
+    items: list[str] = []
+    for key in (
+        "points",
+        "supporting_points",
+        "next_steps",
+        "items",
+        "steps",
+        "rows",
+        "lines",
+        "rules",
+        "cards",
+        "callouts",
+        "patterns",
+        "quadrants",
+    ):
+        value = exhibit.get(key)
+        if isinstance(value, list):
+            items.extend(_coerce_outline_item(item) for item in value)
+    return items
+
+
+def _coerce_outline_item(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        parts = [
+            str(item.get(key) or "").strip()
+            for key in ("title", "body", "label", "name", "text", "description", "value")
+            if str(item.get(key) or "").strip()
+        ]
+        return ": ".join(parts)
+    if isinstance(item, list):
+        return " | ".join(_coerce_outline_item(value) for value in item)
+    return str(item).strip()
+
+
+def _flatten_outline_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_flatten_outline_value(item) for item in value.values())
+    if isinstance(value, list):
+        return " ".join(_flatten_outline_value(item) for item in value)
+    return str(value or "")
+
+
+def _meaningful_words(text: str) -> set[str]:
+    stop = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(text).lower())
+        if len(token) > 2 and token not in stop
+    }
+
+
+def _max_adjacent_run(values: list[str]) -> int:
+    max_run = 0
+    current = 0
+    previous = None
+    for value in values:
+        current = current + 1 if value and value == previous else 1
+        previous = value
+        max_run = max(max_run, current)
+    return max_run
+
+
+def _most_common_title_frame_ratio(titles: list[str]) -> float:
+    frames = [
+        " ".join(title.lower().split()[:2])
+        for title in titles
+        if len(title.split()) >= 2
+    ]
+    if not frames:
+        return 0
+    return Counter(frames).most_common(1)[0][1] / len(frames)
+
+
+def _generic_title_frames(titles: list[str]) -> list[str]:
+    generic: list[str] = []
+    patterns = [
+        r"^translate\s+executive summary\b",
+        r"^convert\s+executive summary\b",
+        r"^translate\s+business case\b",
+        r"^convert\s+business case\b",
+        r"^translate\s+evidence\b",
+        r"^convert\s+evidence\b",
+        r"^(translate|convert)\b.+\bdistinct operating decision\b",
+        r"^commit\s+to\s+the\s+recommendation\b",
+        r"^turn\s+closing remarks\b",
+        r"\bconclusion and future directions\b",
+        r"\bclosing remarks\b",
+        r"\bexplicit operating decision\b",
+    ]
+    for title in titles:
+        normalized = " ".join(str(title).split()).lower()
+        if any(re.search(pattern, normalized) for pattern in patterns):
+            generic.append(str(title))
+    return generic
+
+
+def _is_placeholder_visual_text(text: str) -> bool:
+    normalized = " ".join(str(text).lower().split()).strip(" .:-")
+    return normalized in {
+        "clarify the implication and required management action",
+        "item",
+        "metric",
+        "metrics",
+        "prediction",
+        "predictions",
+        "signal",
+        "sourced metric",
+    }
+
+
+def _write_contact_sheet(images: list[Path], output_path: Path) -> Path | None:
+    if not images:
+        return None
+    thumbs: list[tuple[Image.Image, str]] = []
+    for index, image_path in enumerate(images, start=1):
+        with Image.open(image_path) as image:
+            thumb = image.convert("RGB")
+            thumb.thumbnail((360, 205), Image.Resampling.LANCZOS)
+            thumbs.append((thumb.copy(), f"{index:02d}"))
+    cols = min(4, max(1, len(thumbs)))
+    rows = (len(thumbs) + cols - 1) // cols
+    cell_w, cell_h = 390, 250
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "white")
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.load_default(size=20)
+    except Exception:
+        font = ImageFont.load_default()
+    for idx, (thumb, label) in enumerate(thumbs):
+        row, col = divmod(idx, cols)
+        x = col * cell_w + (cell_w - thumb.width) // 2
+        y = row * cell_h + 34
+        draw.text((col * cell_w + 16, row * cell_h + 8), label, fill="black", font=font)
+        sheet.paste(thumb, (x, y))
+        draw.rectangle((x - 1, y - 1, x + thumb.width + 1, y + thumb.height + 1), outline="#AAAAAA")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, quality=92)
+    return output_path
+
+
+_HOUSE_COLORS = {
+    "0D1426",
+    "14213D",
+    "44506A",
+    "C8893B",
+    "EAEEF5",
+    "D9DBE0",
+    "E1E3E7",
+    "FFFFFF",
+}
+
+
+def _dedupe_warning_dicts(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for warning in warnings:
+        key = (
+            warning.get("slide_index"),
+            warning.get("field"),
+            warning.get("message"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(warning)
+    return deduped
+
+
+def summarize_qa(issues: list[QAIssue]) -> dict[str, Any]:
+    categories = Counter(issue.category or "uncategorized" for issue in issues)
+    return {
+        "count": len(issues),
+        "critical": sum(1 for issue in issues if issue.severity == "CRITICAL"),
+        "warning": sum(1 for issue in issues if issue.severity == "WARNING"),
+        "info": sum(1 for issue in issues if issue.severity == "INFO"),
+        "categories": dict(categories),
+    }
+
+
+def serialize_qa_issues(issues: list[QAIssue]) -> list[dict[str, Any]]:
+    return [
+        {
+            "severity": issue.severity,
+            "category": issue.category,
+            "message": issue.message,
+            "slide_index": issue.slide_index,
+        }
+        for issue in issues
+    ]
+
+
+def _actionable_issue_signature(
+    designer: DesignAgent, qa_result: QAResult
+) -> tuple[tuple[int, str, str], ...]:
+    return tuple(
+        sorted(
+            (
+                -1 if issue.slide_index is None else issue.slide_index,
+                issue.category or "",
+                " ".join(issue.message.lower().split())[:160],
+            )
+            for issue in qa_result.issues
+            if issue.severity == "CRITICAL" or designer.is_actionable_qa_issue(issue)
+        )
+    )
+
+
+def _template(mode: str, brand: BrandDNA | None = None, source_file: str = "") -> TemplateProfile:
+    timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return TemplateProfile(
+        id=f"smoke-{mode}",
+        name=f"Smoke {mode}",
+        type=mode,
+        brand=brand or BrandDNA(),
+        slides=[],
+        source_file=source_file,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _brand() -> BrandDNA:
+    return BrandDNA(
+        primary_color="#111827",
+        secondary_color="#2563eb",
+        accent_color="#16a34a",
+        font_headings="Aptos Display",
+        font_body="Aptos",
+    )
+
+
+def _strict_template(out_dir: Path, label: str) -> TemplateProfile:
+    strict_source = out_dir / f"strict-smoke-template-{label}.pptx"
+    _write_strict_template(strict_source)
+    template = _template("strict", source_file=strict_source.as_posix())
+    template.slides = [
+        SlideSpec(
+            index=0,
+            mode="strict",
+            label="Strict Executive Summary",
+            schema=SlideSchema(
+                fields=[
+                    SlideField(
+                        id="project_title",
+                        type="text",
+                        location="shape:ProjectTitle",
+                        required=True,
+                        max_chars=90,
+                    ),
+                    SlideField(
+                        id="executive_summary",
+                        type="text",
+                        location="shape:ExecutiveSummary",
+                        required=True,
+                        max_chars=260,
+                    ),
+                    SlideField(
+                        id="key_implication",
+                        type="text",
+                        location="shape:KeyImplication",
+                        required=True,
+                        max_chars=260,
+                    ),
+                ]
+            ),
+        )
+    ]
+    return template
+
+
+def _write_strict_template(path: Path) -> None:
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    for name, text, top in [
+        ("ProjectTitle", "Old project title", 0.7),
+        ("ExecutiveSummary", "Old summary", 1.6),
+        ("KeyImplication", "Old implication", 4.2),
+    ]:
+        box = slide.shapes.add_textbox(Inches(0.8), Inches(top), Inches(11.5), Inches(0.8))
+        box.name = name
+        box.text = text
+    prs.save(path.as_posix())
+
+
+def _model_slug(model_name: str) -> str:
+    slug = "".join(
+        char.lower() if char.isalnum() else "-"
+        for char in model_name.replace(".", "-")
+    )
+    return "-".join(part for part in slug.split("-") if part)[:48] or "model"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run all-mode local model smoke generation.")
+    parser.add_argument("--doc", type=Path, default=DEFAULT_DOC)
+    parser.add_argument(
+        "--brand-template",
+        type=Path,
+        default=None,
+        help="Path to a real .pptx to analyze and use for brand mode (exercises the "
+        "clone / native-fallback path with the template's extracted brand DNA).",
+    )
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS)
+    parser.add_argument("--base-url", default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--timeout-seconds", type=int, default=None)
+    parser.add_argument("--slide-strategy", default="batched", choices=["batched", "per_slide"])
+    parser.add_argument("--vision-base-url", default=None)
+    parser.add_argument("--vision-model", default=None)
+    parser.add_argument("--vision-timeout-seconds", type=int, default=None)
+    parser.add_argument("--label", default=None)
+    parser.add_argument(
+        "--modes",
+        default="freeform,brand,strict",
+        help="Comma-separated modes to run: freeform, brand, strict.",
+    )
+    parser.add_argument(
+        "--quality-profile",
+        choices=["fast", "balanced", "showcase"],
+        default="balanced",
+    )
+    parser.add_argument(
+        "--length-strategy",
+        choices=["auto", "concise", "expanded"],
+        default="auto",
+    )
+    parser.add_argument(
+        "--vision",
+        action="store_true",
+        help="Run local OpenAI-compatible vision QA over generated previews.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress logs on stderr.",
+    )
+    parser.add_argument(
+        "--allow-planner-fallback",
+        action="store_true",
+        help=(
+            "Allow freeform/brand smoke runs to continue if the LLM planner "
+            "falls back to deterministic specs. Intended for fallback debugging only."
+        ),
+    )
+    parser.add_argument(
+        "--allow-generic-output",
+        action="store_true",
+        help=(
+            "Allow generated-mode smoke runs to finish even when the dynamic "
+            "deck-quality harness judges the PPTX too generic."
+        ),
+    )
+    args = parser.parse_args()
+    settings_kwargs: dict[str, Any] = {"BEDROCK_VALIDATE": False}
+    if args.base_url:
+        settings_kwargs["OPENAI_COMPATIBLE_BASE_URL"] = args.base_url
+    if args.model:
+        settings_kwargs["OPENAI_COMPATIBLE_MODEL"] = args.model
+    if args.timeout_seconds:
+        settings_kwargs["OPENAI_COMPATIBLE_TIMEOUT_SECONDS"] = args.timeout_seconds
+    settings = Settings(**settings_kwargs)
+    vision_settings = None
+    if args.vision and (
+        args.vision_base_url or args.vision_model or args.vision_timeout_seconds
+    ):
+        vision_kwargs: dict[str, Any] = {"BEDROCK_VALIDATE": False}
+        vision_kwargs["OPENAI_COMPATIBLE_BASE_URL"] = (
+            args.vision_base_url or settings.openai_compatible_base_url
+        )
+        vision_kwargs["OPENAI_COMPATIBLE_MODEL"] = (
+            args.vision_model or settings.openai_compatible_model
+        )
+        if args.vision_timeout_seconds:
+            vision_kwargs["OPENAI_COMPATIBLE_TIMEOUT_SECONDS"] = (
+                args.vision_timeout_seconds
+            )
+        vision_settings = Settings(**vision_kwargs)
+    report = run_smoke(
+        doc_path=args.doc,
+        out_dir=args.out_dir,
+        instructions=args.instructions,
+        use_vision=args.vision,
+        quality_profile=args.quality_profile,
+        length_strategy=args.length_strategy,
+        slide_strategy=args.slide_strategy,
+        settings=settings,
+        vision_settings=vision_settings,
+        run_label=args.label,
+        modes=_parse_modes(args.modes),
+        progress=not args.quiet,
+        allow_planner_fallback=args.allow_planner_fallback,
+        allow_generic_output=args.allow_generic_output,
+        brand_template_path=args.brand_template,
+    )
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    main()

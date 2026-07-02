@@ -1,312 +1,384 @@
-# SlideAgent — Architecture Diagrams
+# SlideAgent / SlideForge Target Architecture
 
-## System Architecture
-
-```mermaid
-graph TB
-    subgraph Client["Client (Browser)"]
-        UI[React Frontend<br/>Vite + TypeScript]
-    end
-
-    subgraph AWS["AWS"]
-        subgraph CDN["CloudFront + S3"]
-            STATIC[Static Frontend Build]
-        end
-
-        subgraph AppRunner["App Runner"]
-            API[FastAPI Backend<br/>Uvicorn / Gunicorn]
-        end
-
-        subgraph Storage["S3"]
-            TMPL_BUCKET[Templates Bucket<br/>versioned]
-            OUT_BUCKET[Outputs Bucket<br/>24h lifecycle]
-        end
-
-        subgraph Compute["Serverless"]
-            BEDROCK[Amazon Bedrock<br/>Claude claude-sonnet-4-6 / Haiku]
-        end
-
-        subgraph Data["Data"]
-            DYNAMO[DynamoDB<br/>Job Records]
-        end
-    end
-
-    UI -->|HTTPS REST| API
-    UI -->|Presigned URL| OUT_BUCKET
-    STATIC -->|Serves| UI
-    API -->|Read template| TMPL_BUCKET
-    API -->|Write output| OUT_BUCKET
-    API -->|Job state| DYNAMO
-    API -->|Converse API| BEDROCK
-```
+**Date:** 2026-06-18
+**Status:** Target architecture plus current backend module boundaries
 
 ---
 
-## Backend Service Architecture
+## 1. Core Architecture Principles
 
-```mermaid
-graph TD
-    subgraph Routes["FastAPI Routes"]
-        R1[POST /jobs]
-        R2[GET /jobs/:id]
-        R3[POST /jobs/:id/approve]
-        R4[GET /templates]
-        R5[POST /templates]
-    end
-
-    subgraph Orchestration["Job Orchestration"]
-        ORCH[Job Runner<br/>asyncio BackgroundTask]
-    end
-
-    subgraph Services["Core Services"]
-        IP[InputParser<br/>field mapping + coercion]
-        CV[ConstraintValidator<br/>pure Python]
-        DP[DeckPlanner<br/>outline generation]
-        CG[ContentGenerator<br/>per-slide content]
-        CC[CoherenceCheck<br/>review pass]
-        XI[XMLInjector<br/>lxml manipulation]
-        PP[PPTXPipeline<br/>unzip → edit → rezip]
-    end
-
-    subgraph LLM["LLM Client"]
-        BC[BedrockClient<br/>boto3 converse]
-    end
-
-    subgraph Storage["Storage"]
-        ST[StorageInterface]
-        SL[LocalStorage]
-        SS[S3Storage]
-    end
-
-    subgraph JobStore["Job Store"]
-        JS[JobStoreInterface]
-        SQ[SQLiteStore]
-        DY[DynamoDBStore]
-    end
-
-    R1 --> ORCH
-    R2 --> JS
-    R3 --> ORCH
-    R4 --> ST
-    R5 --> ST
-
-    ORCH --> IP
-    ORCH --> CV
-    ORCH --> DP
-    ORCH --> CG
-    ORCH --> CC
-    ORCH --> XI
-    ORCH --> PP
-    ORCH --> JS
-
-    IP --> BC
-    DP --> BC
-    CG --> BC
-    CC --> BC
-
-    PP --> ST
-    ST --> SL
-    ST --> SS
-    JS --> SQ
-    JS --> DY
-```
+1. **Structure before rendering:** Build and validate a ghost deck before
+   generating full slide content or PPTX files.
+2. **LLMs produce structured specs only:** Language models return validated
+   JSON objects. They do not write files, mutate XML, or directly assemble PPTX
+   packages.
+3. **Deterministic services own PPTX work:** Rendering, XML injection, ZIP
+   repackaging, and file validation are pure service responsibilities.
+4. **The style guide is executable:** [style_guide.md](./style_guide.md)
+   defines prompts, schema constraints, consulting QA checks, and visual QA
+   expectations.
+5. **Every deck passes two QA gates:** Consulting QA validates the argument;
+   visual QA validates the rendered artifact.
 
 ---
 
-## Mode 1: Template Population Flow
+## 2. Target Pipeline
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant FE as Frontend
-    participant API as FastAPI
-    participant IP as InputParser
-    participant CV as ConstraintValidator
-    participant XI as XMLInjector
-    participant PP as PPTXPipeline
-    participant BC as BedrockClient
-    participant S3
-
-    User->>FE: Select template, fill form
-    FE->>API: POST /jobs {template_id, mode:1, input_data}
-    API->>API: Schema validation (sync)
-    alt Validation fails
-        API-->>FE: 422 with field errors
-    else Validation passes
-        API-->>FE: 202 {job_id}
-        API->>API: Queue background job
-
-        Note over API,S3: Background job starts
-        API->>IP: Parse + map fields
-        IP->>BC: Coerce ambiguous fields (if any)
-        BC-->>IP: Coerced field values
-        IP-->>API: Mapped field values
-
-        API->>CV: Validate all fields
-        CV-->>API: Validated values + warnings
-
-        API->>S3: Fetch template.pptx
-        S3-->>API: template bytes
-
-        API->>PP: Unpack template
-        PP-->>API: Staging dir path
-
-        API->>XI: Inject all fields into XML
-        XI-->>API: Modified XMLs
-
-        API->>PP: Repack to output.pptx
-        PP-->>API: output bytes
-
-        API->>S3: Write output.pptx
-        S3-->>API: Presigned URL
-
-        API->>API: Update job status → complete
-    end
-
-    FE->>API: GET /jobs/{id} (polling)
-    API-->>FE: {status: complete, output_url}
-    FE-->>User: Show thumbnail + download button
+```text
+User brief + documents + optional template
+  -> DocumentIngester
+  -> TemplateAnalyzer (brand/strict only)
+  -> NarrativePlanner
+  -> ConsultingQA gate
+  -> ContentGenerator
+  -> DesignSpecGenerator
+  -> Renderer / StrictXMLInjector / HybridAssembler
+  -> VisualQA gate
+  -> Repair loop
+  -> PPTX + previews + warnings
 ```
+
+### Pipeline contract
+
+- `DocumentIngester` extracts structured source material and provenance.
+- `NarrativePlanner` creates the ghost deck and action-title storyline.
+- `ConsultingQA` validates the storyline before slide rendering.
+- `ContentGenerator` fills evidence under approved action titles.
+- `DesignSpecGenerator` selects slide archetypes and layout instructions.
+- `Renderer` creates new generated slides from specs.
+- `StrictXMLInjector` updates strict template fields through targeted XML edits.
+- `VisualQA` renders the deck to images and checks visual/compatibility issues.
+- Repair loops modify structured specs, not arbitrary PPTX output.
+
+### Current backend boundaries
+
+The current backend keeps stable public service facades while moving internal
+logic into smaller packages:
+
+- `app.services.content_planner.ContentPlanner` remains the public planner
+  entrypoint. Its implementation is split across `app.services.planning`:
+  `blueprint`, `llm`, `specs`, `repairs`, `grounding`, `outlines`,
+  `exhibits`, and `constants`.
+- `app.services.pptx_renderer.DeterministicPptxRenderer` remains the public
+  generated-slide renderer. Its implementation is split across
+  `app.services.pptx_rendering`: `assets`, `chrome`, `core_layouts`,
+  `table_layouts`, `immersive_layouts`, `exhibit_layouts`, `drawing`, and
+  `constants`.
+- `app.services.visual_qa_agent.VisualQAAgent` remains the public VisualQA
+  entrypoint. Its implementation is split across `app.services.visual_qa`:
+  `checks`, `preview`, `vision`, and `constants`.
+
+These package boundaries are behavior-preserving refactors. Public imports,
+request/response shapes, job states, strict-mode preservation, smoke flags, and
+generated PPTX semantics remain stable.
 
 ---
 
-## Mode 2: Branded Content Generation Flow
+## 3. Mode-Specific Flows
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant FE as Frontend
-    participant API as FastAPI
-    participant DP as DeckPlanner
-    participant CG as ContentGenerator
-    participant CC as CoherenceCheck
-    participant CV as ConstraintValidator
-    participant XI as XMLInjector
-    participant PP as PPTXPipeline
-    participant BC as BedrockClient
-    participant S3
+### 3.1 Freeform Generation
 
-    User->>FE: Select branding template, write brief
-    FE->>API: POST /jobs {template_id, mode:2, input_data}
-    API-->>FE: 202 {job_id}
-
-    Note over API,BC: Phase 1 - Planning
-    API->>DP: Generate deck outline from brief
-    DP->>BC: DeckPlanner prompt (claude-sonnet-4-6)
-    BC-->>DP: DeckOutline JSON
-    DP-->>API: Validated DeckOutline
-
-    API->>API: Update job status → awaiting_approval
-    FE->>API: GET /jobs/{id} (polling)
-    API-->>FE: {status: awaiting_approval, outline: DeckOutline}
-    FE-->>User: Show editable outline
-
-    alt User edits and approves
-        User->>FE: Edit outline, click Approve
-        FE->>API: POST /jobs/{id}/approve {revised_outline}
-    else User rejects with instructions
-        User->>FE: Add revision notes, click Re-plan
-        FE->>API: POST /jobs/{id}/approve {approved:false, revision_instructions}
-        API->>DP: Re-plan with revision instructions
-        DP->>BC: Revised DeckPlanner prompt
-        BC-->>DP: Revised DeckOutline
-        API->>API: Update status → awaiting_approval again
-    end
-
-    Note over API,BC: Phase 2 - Content Generation
-    API->>API: Update status → generating
-
-    par Generate all slides concurrently
-        API->>CG: Generate slide 1 content
-        CG->>BC: ContentGenerator prompt
-        BC-->>CG: SlideContent
-    and
-        API->>CG: Generate slide N content
-        CG->>BC: ContentGenerator prompt
-        BC-->>CG: SlideContent
-    end
-
-    API->>CC: Coherence check all slide content
-    CC->>BC: CoherenceCheck prompt (claude-haiku-4-5)
-    BC-->>CC: CoherenceCheckOutput
-    CC-->>API: Issues + corrections applied
-
-    API->>CV: Validate all field content
-    CV-->>API: Validated values + warnings
-
-    API->>S3: Fetch branding template.pptx
-    API->>PP: Unpack template
-    API->>XI: Inject all slide content
-    API->>PP: Repack output.pptx
-    API->>S3: Write output
-
-    API->>API: Update job status → complete
-    FE-->>User: Show thumbnail + download button
+```text
+Brief + optional docs
+  -> DocumentIngester
+  -> NarrativePlanner (SCR/Pyramid ghost deck)
+  -> ConsultingQA
+  -> ContentGenerator
+  -> DesignSpecGenerator
+  -> FreeformRenderer
+  -> VisualQA
+  -> PPTX
 ```
+
+Freeform mode uses built-in layout archetypes. It is the first target vertical
+slice because it validates the core narrative/content/render/QA system without
+template analysis complexity.
+
+### 3.2 Brand / Master-Template Generation
+
+```text
+Brand PPTX + brief + docs
+  -> TemplateAnalyzer extracts brand DNA
+  -> DocumentIngester
+  -> NarrativePlanner
+  -> ConsultingQA
+  -> ContentGenerator
+  -> BrandAwareDesignSpecGenerator
+  -> BrandRenderer
+  -> VisualQA
+  -> PPTX
+```
+
+Brand mode uses the uploaded PPTX as a visual reference. Existing template
+content is illustrative. Generated slides are new and should follow brand DNA:
+colors, fonts, logo rules, master/layout patterns, and chart/table styling.
+
+### 3.3 Strict-Template Generation
+
+```text
+Strict PPTX + brief + docs
+  -> TemplateAnalyzer extracts slide classifications and field schema
+  -> User reviews strict/flexible classifications
+  -> DocumentIngester
+  -> NarrativePlanner maps content to strict fields and flexible slides
+  -> ConsultingQA
+  -> StrictXMLInjector updates strict fields
+  -> Renderer creates flexible/generated slides when needed
+  -> HybridAssembler combines strict + generated slides
+  -> VisualQA
+  -> PPTX
+```
+
+Strict mode preserves the uploaded PPTX structure. Existing strict slide
+geometry, shape positions, and formatting must survive generation. Required
+fields without source content receive `[INSERT CONTENT HERE]` and generate
+warnings.
 
 ---
 
-## PPTX Pipeline Detail
+## 4. Service Responsibilities
 
-```mermaid
-flowchart TD
-    A[template.pptx from S3/disk] --> B[Unzip to staging_dir/job_id/]
-    B --> C[Parse presentation.xml<br/>Build slide index map]
-    C --> D{For each InjectionTarget}
-    D --> E[Open slide{N}.xml with lxml]
-    E --> F[XPath to shape by shape_id]
-    F --> G{Shape found?}
-    G -->|No| H[Log warning: shape_id missing<br/>Continue]
-    G -->|Yes| I[Find all a:t elements in shape]
-    I --> J[Replace text content<br/>Preserve a:rPr attributes]
-    J --> K[Validate XML well-formed]
-    K --> L{Valid?}
-    L -->|No| M[Fail job<br/>Preserve staging dir]
-    L -->|Yes| N[Write modified slide{N}.xml]
-    N --> D
-    D -->|All slides done| O[Run clean pass<br/>Remove orphaned rels]
-    O --> P[Rezip to output.pptx<br/>Preserve original theme/media]
-    P --> Q[Verify output opens<br/>No XML parse errors]
-    Q --> R[Upload to S3<br/>Generate presigned URL]
-    R --> S[Cleanup staging dir]
-    S --> T[Return PipelineResult]
-```
+### DocumentIngester
+
+- Converts uploaded files to text/markdown and structured records.
+- Extracts sections, tables, metrics, dates, entities, and source provenance.
+- Marks claims and metrics with source identifiers.
+- Does not summarize into slide content directly.
+
+### TemplateAnalyzer
+
+- For brand templates, extracts brand DNA and slide-layout fingerprints.
+- For strict templates, renders thumbnails, classifies strict vs flexible
+  slides, and extracts field schemas.
+- Produces user-reviewable template profiles.
+- Uses vision/LLM analysis as assistance, not as the only source of truth.
+
+### NarrativePlanner
+
+- Creates a ghost deck before rendering.
+- Uses SCR, Pyramid Principle, MECE grouping, and horizontal flow.
+- Produces action titles, slide intents, evidence needs, and source needs.
+- Chooses whether each slide is strict, brand-generated, or freeform-generated.
+
+### ConsultingQA
+
+- Runs before rendering.
+- Checks action-title quality, horizontal flow, SCR/Pyramid structure, MECE
+  coverage, one-message-per-slide, and source coverage.
+- Returns structured issues and repair instructions.
+- Blocks rendering on critical storyline failures.
+
+### ContentGenerator
+
+- Generates slide-level evidence under approved action titles.
+- Keeps quantitative claims source-grounded.
+- Uses `[source needed]` where provided material does not support a claim.
+- Produces concise content blocks, not positioned shapes.
+
+### DesignSpecGenerator
+
+- Chooses consulting slide archetypes from the style guide.
+- Produces structured design specs: layout archetype, chart/table/callout
+  choices, emphasis color, annotations, and source/footer needs.
+- Enforces one primary exhibit per slide and layout variety across the deck.
+
+### Renderer
+
+- Converts slide specs into PPTX slides.
+- Owns positioning, sizing, fonts, colors, charts, icons, tables, and footer
+  rendering.
+- Uses deterministic layout rules and validates generated slide dimensions.
+- Never accepts arbitrary executable slide code from an LLM as the source of
+  truth.
+
+### StrictXMLInjector
+
+- Unpacks PPTX files and edits specific XML targets.
+- Preserves run/paragraph/shape formatting wherever possible.
+- Updates text, fills, status indicators, and supported table/chart fields.
+- Validates XML and ZIP integrity before returning an output PPTX.
+
+### HybridAssembler
+
+- Combines strict template slides and generated flexible slides.
+- Preserves relationships, media, charts, masters, layouts, and content types.
+- Validates the final package before VisualQA.
+
+### VisualQA
+
+- Renders PPTX to PDF/images.
+- Checks overlap, overflow, low contrast, text walls, layout repetition, missing
+  previews, and obvious compatibility warnings.
+- Allows `[INSERT CONTENT HERE]` on strict slides but highlights it in the UI.
+- Produces targeted repair instructions for generated slides.
 
 ---
 
-## Frontend State Machine
+## 5. Target Data Contracts
 
-```mermaid
-stateDiagram-v2
-    [*] --> TemplateSelect
-    TemplateSelect --> InputForm : template selected
-    InputForm --> Submitting : form submitted
-    Submitting --> Polling : job_id received
-    Submitting --> InputForm : 422 validation error
+### Generation mode
 
-    state Polling {
-        [*] --> queued
-        queued --> parsing
-        parsing --> planning : mode 2 only
-        planning --> AwaitingApproval : mode 2 only
-        parsing --> generating : mode 1
-        AwaitingApproval --> generating : approved
-        AwaitingApproval --> planning : rejected / re-plan
-        generating --> packaging
-        packaging --> complete
+```text
+freeform | brand | strict
+```
+
+### Planner and quality controls
+
+Model-routing planner profile:
+
+```text
+fast | deep
+```
+
+- `fast`: default local Qwen planner path for iteration.
+- `deep`: optional premium local planner path, currently Minimax/Athena when
+  configured.
+
+Output-quality profile:
+
+```text
+fast | balanced | showcase
+```
+
+- `fast`: lower-latency planner profile for iteration.
+- `balanced`: default quality/cost tradeoff.
+- `showcase`: higher-budget planning for richer source-backed decks.
+- `length_strategy` separately controls `auto | concise | expanded`.
+- Visual QA should be configured separately from planner selection so a
+  vision-capable model can inspect rendered slides even when the planner model
+  is text-only or slow.
+
+### Deck plan
+
+```json
+{
+  "deck_title": "string",
+  "audience": "string",
+  "goal": "string",
+  "narrative_arc": "situation|complication|resolution summary",
+  "slides": []
+}
+```
+
+### Slide spec
+
+```json
+{
+  "slide_number": 1,
+  "slide_type": "executive_summary|content|chart|comparison|matrix|waterfall|process|gantt|framework|appendix",
+  "archetype": "dependency_map|framework_cycle|comparison_table|code_panel|...",
+  "narrative_role": "cover|executive_summary|problem|evidence|framework|implementation|reference|decision|closing",
+  "action_title": "Complete sentence stating the conclusion",
+  "subheading": "Evidence context, units, period, or segment",
+  "content_blocks": [
+    {
+      "type": "bullets|chart|table|callout|framework|text",
+      "body": [],
+      "annotations": [],
+      "callouts": []
     }
-
-    Polling --> Failed : any → failed
-    Polling --> Complete : complete
-
-    state AwaitingApproval {
-        [*] --> ShowOutline
-        ShowOutline --> EditOutline : user edits
-        EditOutline --> ShowOutline : edits saved
-        ShowOutline --> Approving : approve clicked
-        ShowOutline --> Rejecting : reject clicked
-    }
-
-    Complete --> [*] : download PPTX
-    Failed --> InputForm : retry
+  ],
+  "exhibit_spec": {},
+  "diagram_spec": {
+    "kind": "dependency_flow|cycle",
+    "nodes": [],
+    "edges": [],
+    "steps": []
+  },
+  "design_intent": "string",
+  "chart_spec": null,
+  "source_refs": ["canonical source-id or [source needed]"],
+  "sources": ["human-readable footer label or [source needed]"],
+  "speaker_notes": "string",
+  "qa": {
+    "consulting_status": "pending",
+    "visual_status": "pending",
+    "issues": []
+  }
+}
 ```
+
+### Strict field mapping
+
+```json
+{
+  "slide_index": 0,
+  "field_id": "overall_rag",
+  "location": "shape:StatusIndicator or xpath",
+  "type": "text|number|date|enum|text_list|status_color|chart_data|table_data",
+  "required": true,
+  "constraints": {},
+  "value": "[INSERT CONTENT HERE]"
+}
+```
+
+---
+
+## 6. QA Gates and Repair
+
+### Consulting QA gate
+
+Runs on deck plans, generated specs, and repaired outlines before rendering.
+For generated decks it also re-runs after each visual repair. Critical failures
+include:
+
+- Topic-label titles instead of action titles.
+- No coherent horizontal flow.
+- Multiple messages on one slide.
+- Unsupported quantitative claims.
+- Missing canonical source references on source-backed generated slides.
+- Missing primary exhibits on non-cover generated slides.
+- Missing Resolution weight in the deck narrative.
+- Non-MECE breakdowns where structure is central to the slide.
+
+Repairs should update the deck plan or slide specs, then re-run ConsultingQA.
+
+### Visual QA gate
+
+Runs after rendering. Critical failures include:
+
+- PPTX cannot render.
+- Text overlaps, clips, or becomes illegible.
+- Generated slide is a text wall.
+- Primary exhibit does not support the action title.
+- Layout repetition makes adjacent generated slides visually redundant.
+
+Repairs should update generated slide specs or renderer parameters. Strict
+template slides should only be changed through approved strict field mappings.
+
+---
+
+## 7. Implementation Milestones
+
+### Milestone 1: Freeform vertical slice
+
+- Generate a 5-slide deck from a short brief.
+- Produce action-title ghost deck and pass ConsultingQA.
+- Render deterministic PPTX and preview images.
+- Run VisualQA and surface warnings.
+
+### Milestone 2: Source-grounded content
+
+- Ingest documents with provenance.
+- Require source references or `[source needed]` for quantitative claims.
+- Add consulting QA checks for unsupported metrics.
+- Resolve generated `source_refs` to rendered section-level source labels.
+- Compile source-shaped sections, tables, and metrics into exhibit specs.
+
+### Milestone 3: Brand templates
+
+- Extract theme colors, fonts, logo, and layout-profile patterns.
+- Render generated slides using brand-aware specs.
+- Validate brand consistency in VisualQA.
+
+### Milestone 4: Strict templates
+
+- Extract strict schemas and flexible slide intents.
+- Implement XML-level strict field injection.
+- Preserve formatting and validate package integrity.
+
+### Milestone 5: Hybrid assembly and repair
+
+- Combine strict and generated slides safely.
+- Add targeted repair loops for ConsultingQA and VisualQA.
+- Improve per-slide regeneration and warning review.

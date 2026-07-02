@@ -1,0 +1,802 @@
+import { CSSProperties, useEffect, useState } from "react";
+import { card, eyebrow, ghostBtn, h1, microLabel, primaryBtn, SERIF } from "../ui";
+import {
+  getTemplateAssets,
+  templateLogoUrl,
+  templateThumbnailUrl,
+  TemplateAssets,
+  TemplateProfile,
+  templateImageUrl,
+  updateTemplateLogo,
+} from "../api/client";
+import { Mode } from "../types";
+
+type Props = {
+  mode: Exclude<Mode, "freeform">;
+  template: TemplateProfile | null;
+  analyzing: boolean;
+  error: string | null;
+  onUpload: (file: File) => void;
+  onBack: () => void;
+  onContinue: () => void;
+};
+
+const MONO = "'IBM Plex Mono', monospace";
+
+function hex(c: string): string {
+  if (!c) return "#000000";
+  return c.startsWith("#") ? c : `#${c}`;
+}
+
+const colHead: CSSProperties = {
+  fontFamily: MONO,
+  fontSize: 9,
+  letterSpacing: ".08em",
+  color: "var(--ink-3)",
+  padding: "10px 14px",
+  background: "var(--surface-2)",
+  borderBottom: "1px solid var(--line)",
+};
+
+export default function SetupScreen({
+  mode,
+  template,
+  analyzing,
+  error,
+  onUpload,
+  onBack,
+  onContinue,
+}: Props) {
+  const isBrand = mode === "brand";
+  const [assets, setAssets] = useState<TemplateAssets | null>(null);
+  const [logoVersion, setLogoVersion] = useState(0);
+  const [logoBusy, setLogoBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setAssets(null);
+    if (!template) return;
+    getTemplateAssets(template.id)
+      .then((next) => {
+        if (active) setAssets(next);
+      })
+      .catch(() => {
+        if (active) setAssets(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [template]);
+
+  const changeLogo = async (image: string | null) => {
+    if (!template) return;
+    setLogoBusy(true);
+    try {
+      await updateTemplateLogo(template.id, image);
+      const next = await getTemplateAssets(template.id);
+      setAssets(next);
+      setLogoVersion((v) => v + 1);
+    } catch {
+      /* surfaced by the unchanged logo box */
+    } finally {
+      setLogoBusy(false);
+    }
+  };
+
+  const setupTitle = isBrand ? "Match an existing brand" : "Preserve a rigid template";
+  const setupSub = isBrand
+    ? "SlideForge reads the master deck as a visual reference — its colors, type, and layout rules guide every generated slide."
+    : "The uploaded deck is the artifact of record. Structure and formatting stay intact; only mapped fields change.";
+
+  return (
+    <div className="sf-rise">
+      <div style={eyebrow}>02 — TEMPLATE SETUP</div>
+      <h1 style={h1}>{setupTitle}</h1>
+      <p
+        style={{
+          fontSize: 15,
+          color: "var(--ink-2)",
+          margin: "0 0 32px",
+          maxWidth: "60ch",
+          lineHeight: 1.55,
+        }}
+      >
+        {setupSub}
+      </p>
+
+      <div
+        className="sf-setup-grid"
+        style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 24, alignItems: "start" }}
+      >
+        {/* upload column */}
+        <div style={{ ...card, padding: 20 }}>
+          <div style={{ ...microLabel, marginBottom: 12 }}>TEMPLATE FILE</div>
+
+          {template ? (
+            <>
+              <div
+                style={{
+                  border: "1.5px solid var(--line-2)",
+                  borderRadius: 9,
+                  padding: 18,
+                  display: "flex",
+                  gap: 13,
+                  alignItems: "center",
+                  background: "var(--surface-2)",
+                }}
+              >
+                <div
+                  style={{
+                    flex: "none",
+                    width: 38,
+                    height: 46,
+                    borderRadius: 4,
+                    background: "var(--bad-soft)",
+                    border: "1px solid var(--line-2)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontFamily: MONO,
+                    fontSize: 9,
+                    fontWeight: 500,
+                    color: "var(--bad)",
+                  }}
+                >
+                  PPTX
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 13.5,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {template.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}>
+                    {template.slides.length} slides · {template.type}
+                  </div>
+                </div>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginTop: 14,
+                  fontSize: 12,
+                  color: "var(--good)",
+                }}
+              >
+                <span
+                  style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good)" }}
+                />{" "}
+                Analyzed — profile extracted
+              </div>
+            </>
+          ) : (
+            <label
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                textAlign: "center",
+                border: "1.5px dashed var(--line-2)",
+                borderRadius: 9,
+                padding: "28px 18px",
+                background: "var(--surface-2)",
+                cursor: analyzing ? "default" : "pointer",
+              }}
+            >
+              <div
+                style={{
+                  width: 38,
+                  height: 46,
+                  borderRadius: 4,
+                  background: "var(--bad-soft)",
+                  border: "1px solid var(--line-2)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontFamily: MONO,
+                  fontSize: 9,
+                  fontWeight: 500,
+                  color: "var(--bad)",
+                  ...(analyzing ? { animation: "sf-pulse 1.4s ease-in-out infinite" } : {}),
+                }}
+              >
+                PPTX
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                {analyzing ? "Analyzing template…" : "Upload a .pptx template"}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                {analyzing ? "Extracting profile" : "Click to choose a master deck"}
+              </div>
+              <input
+                type="file"
+                accept=".pptx"
+                disabled={analyzing}
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onUpload(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          )}
+
+          {error && (
+            <div style={{ marginTop: 12, fontSize: 12, color: "var(--bad)" }}>{error}</div>
+          )}
+
+          {template && (
+            <>
+              <div style={{ height: 1, background: "var(--line)", margin: "18px 0" }} />
+              {(assets?.thumbnails?.length ?? 0) > 0 && (
+                <>
+                  <div style={{ ...microLabel, marginBottom: 10 }}>THUMBNAILS</div>
+                  <div
+                    className="sf-template-thumbnails"
+                    style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8, marginBottom: 16 }}
+                  >
+                    {assets?.thumbnails.slice(0, 4).map((image) => (
+                      <div
+                        key={image}
+                        style={{
+                          aspectRatio: "16 / 9",
+                          border: "1px solid var(--line)",
+                          borderRadius: 7,
+                          overflow: "hidden",
+                          background: "var(--surface-2)",
+                        }}
+                      >
+                        <img
+                          src={templateThumbnailUrl(template.id, image)}
+                          alt={image}
+                          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div style={{ ...microLabel, marginBottom: 10 }}>SLIDE INVENTORY</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {template.slides.map((iv, i) => {
+                  const badge = (iv.content_category || iv.mode || "BODY").toUpperCase();
+                  const strict = iv.mode?.toLowerCase() === "strict";
+                  return (
+                    <div
+                      key={iv.index ?? i}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        padding: "8px 10px",
+                        border: "1px solid var(--line)",
+                        borderRadius: 7,
+                        background: "var(--surface)",
+                      }}
+                    >
+                      <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)", width: 14 }}>
+                        {i + 1}
+                      </span>
+                      <span
+                        style={{
+                          flex: 1,
+                          fontSize: 12.5,
+                          fontWeight: 500,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {iv.label}
+                      </span>
+                      <span
+                        style={{
+                          fontFamily: MONO,
+                          fontSize: 9,
+                          letterSpacing: ".06em",
+                          padding: "3px 7px",
+                          borderRadius: 4,
+                          background: strict ? "var(--accent-soft)" : "var(--surface-2)",
+                          color: strict ? "var(--accent)" : "var(--ink-3)",
+                        }}
+                      >
+                        {badge}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* profile column */}
+        <div>
+          {!template ? (
+            <div
+              style={{
+                ...card,
+                padding: 24,
+                color: "var(--ink-3)",
+                fontSize: 13,
+                lineHeight: 1.6,
+              }}
+            >
+              {isBrand
+                ? "Upload a master deck to extract its brand DNA — theme colors, typefaces, logo placement, and layout rules will appear here."
+                : "Upload a rigid template to review its field schema — the fields SlideForge will inject via XML will appear here."}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {isBrand ? (
+                <BrandProfile
+                template={template}
+                assets={assets}
+                logoVersion={logoVersion}
+                logoBusy={logoBusy}
+                onChangeLogo={changeLogo}
+              />
+              ) : (
+                <StrictSchema template={template} />
+              )}
+              <TemplateFrameMap assets={assets} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginTop: 32,
+        }}
+      >
+        <button style={ghostBtn} onClick={onBack}>
+          ← Back
+        </button>
+        <button
+          style={{
+            ...primaryBtn,
+            opacity: template ? 1 : 0.55,
+            cursor: template ? "pointer" : "not-allowed",
+          }}
+          disabled={!template}
+          onClick={onContinue}
+        >
+          Continue to brief <span style={{ fontSize: 15 }}>→</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TemplateFrameMap({ assets }: { assets: TemplateAssets | null }) {
+  const frameMap = assets?.frame_map;
+  const slides = frameMap?.slides ?? [];
+  return (
+    <div style={{ ...card, padding: 20 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 12,
+          alignItems: "baseline",
+          marginBottom: 6,
+        }}
+      >
+        <div style={{ fontFamily: SERIF, fontSize: 19, fontWeight: 600 }}>Template frame map</div>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+          {frameMap?.available ? `${frameMap.slot_count} slots` : "pending"}
+        </span>
+      </div>
+      <div style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45, marginBottom: 14 }}>
+        Claude-style source-deck analysis: slide frames, placeholder text, media slots, and schema-bearing slides before content is mapped.
+      </div>
+      {frameMap?.available ? (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 14 }}>
+            <FrameMetric label="Slides" value={String(frameMap.slide_count)} />
+            <FrameMetric label="Schema" value={String(frameMap.schema_bearing_slide_count)} />
+            <FrameMetric label="Slots" value={String(frameMap.slot_count)} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {slides.slice(0, 6).map((slide) => (
+              <div
+                key={slide.slide_index}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "38px 1fr auto",
+                  gap: 10,
+                  alignItems: "start",
+                  padding: "9px 10px",
+                  border: "1px solid var(--line)",
+                  borderRadius: 7,
+                  background: "var(--surface)",
+                }}
+              >
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--accent)" }}>
+                  S{String((slide.slide_index ?? 0) + 1).padStart(2, "0")}
+                </span>
+                <span style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {slide.label || slide.layout_name || "Slide frame"}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--ink-3)",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      marginTop: 2,
+                    }}
+                  >
+                    {slide.content_category
+                      ? `${slide.content_category.replace(/_/g, " ")} · ${slide.text_inventory || slide.visual_guidance || slide.layout_name || "No text inventory"}`
+                      : slide.text_inventory || slide.visual_guidance || slide.layout_name || "No text inventory"}
+                  </div>
+                </span>
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+                  {slide.text_slot_count ?? 0}T / {slide.media_slot_count ?? 0}M
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 12.5, color: "var(--ink-3)", lineHeight: 1.45 }}>
+          Frame-map analysis is not available for this template yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FrameMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--line)",
+        borderRadius: 7,
+        padding: "9px 10px",
+        background: "var(--surface-2)",
+      }}
+    >
+      <div style={{ fontFamily: MONO, fontSize: 9, color: "var(--ink-3)", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontFamily: MONO, fontSize: 16, color: "var(--ink)" }}>{value}</div>
+    </div>
+  );
+}
+
+function BrandProfile({
+  template,
+  assets,
+  logoVersion,
+  logoBusy,
+  onChangeLogo,
+}: {
+  template: TemplateProfile;
+  assets: TemplateAssets | null;
+  logoVersion: number;
+  logoBusy: boolean;
+  onChangeLogo: (image: string | null) => void;
+}) {
+  const c = template.brand.colors;
+  const swatches = [c.primary, c.secondary, c.accent, c.background_light].filter(Boolean);
+  const fonts = [
+    { name: template.brand.fonts.heading, role: "TITLES" },
+    { name: template.brand.fonts.body, role: "BODY" },
+  ];
+  const notes = (template.brand.design_notes || "")
+    .split(/[\n.]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return (
+    <div style={{ ...card, padding: 24 }}>
+      <div style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>
+        Brand DNA
+      </div>
+      <div style={{ fontSize: 13, color: "var(--ink-2)", marginBottom: 22 }}>
+        Extracted from the uploaded master. Generated slides will inherit this identity.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+        <div>
+          <div style={{ ...microLabel, marginBottom: 11 }}>THEME COLORS</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {swatches.map((sw, i) => (
+              <div key={i} style={{ flex: 1 }}>
+                <div
+                  style={{
+                    height: 46,
+                    borderRadius: 7,
+                    background: hex(sw),
+                    border: "1px solid var(--line-2)",
+                  }}
+                />
+                <div
+                  style={{
+                    fontFamily: MONO,
+                    fontSize: 9,
+                    color: "var(--ink-3)",
+                    marginTop: 6,
+                    textAlign: "center",
+                  }}
+                >
+                  {hex(sw)}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...microLabel, margin: "22px 0 11px" }}>TYPEFACES</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {fonts.map((f, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  justifyContent: "space-between",
+                  padding: "9px 12px",
+                  border: "1px solid var(--line)",
+                  borderRadius: 7,
+                }}
+              >
+                <span style={{ fontSize: 16, fontWeight: 600 }}>{f.name}</span>
+                <span style={{ fontFamily: MONO, fontSize: 9, color: "var(--ink-3)" }}>{f.role}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div style={{ ...microLabel, marginBottom: 11 }}>LOGO</div>
+          <div
+            style={{
+              height: 78,
+              borderRadius: 7,
+              border: "1.5px dashed var(--line-2)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background:
+                "repeating-linear-gradient(135deg,var(--surface-2),var(--surface-2) 7px,transparent 7px,transparent 14px)",
+              overflow: "hidden",
+            }}
+          >
+            {assets?.logo_available ? (
+              <img
+                src={templateLogoUrl(template.id, logoVersion)}
+                alt="Extracted logo"
+                style={{ maxWidth: "80%", maxHeight: "58px", objectFit: "contain" }}
+              />
+            ) : (
+              <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+                no logo — generated slides skip logo placement
+              </span>
+            )}
+          </div>
+          {assets?.logo_available && (
+            <button
+              onClick={() => onChangeLogo(null)}
+              disabled={logoBusy}
+              style={{
+                marginTop: 8,
+                border: "1px solid var(--line)",
+                background: "transparent",
+                color: "var(--ink-2)",
+                borderRadius: 7,
+                font: "inherit",
+                fontSize: 11.5,
+                cursor: "pointer",
+                padding: "5px 10px",
+                opacity: logoBusy ? 0.6 : 1,
+              }}
+            >
+              {logoBusy ? "Updating…" : "Remove logo"}
+            </button>
+          )}
+          {(assets?.images?.length ?? 0) > 0 && (
+            <>
+              <div style={{ ...microLabel, margin: "14px 0 8px" }}>
+                {assets?.logo_available ? "OR PICK A DIFFERENT IMAGE" : "PICK A LOGO FROM DECK IMAGES"}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {assets?.images?.slice(0, 12).map((image) => (
+                  <button
+                    key={image}
+                    onClick={() => onChangeLogo(image)}
+                    disabled={logoBusy}
+                    title={`Use ${image} as the logo`}
+                    style={{
+                      width: 52,
+                      height: 40,
+                      padding: 2,
+                      border: "1px solid var(--line)",
+                      borderRadius: 6,
+                      background: "var(--surface-2)",
+                      cursor: logoBusy ? "default" : "pointer",
+                      opacity: logoBusy ? 0.6 : 1,
+                    }}
+                  >
+                    <img
+                      src={templateImageUrl(template.id, image)}
+                      alt={image}
+                      style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+                    />
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          <div style={{ ...microLabel, margin: "22px 0 11px" }}>LAYOUT NOTES</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+            {notes.length ? (
+              notes.map((n, i) => (
+                <div
+                  key={i}
+                  style={{
+                    display: "flex",
+                    gap: 9,
+                    fontSize: 12.5,
+                    color: "var(--ink-2)",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  <span style={{ color: "var(--accent)", flex: "none" }}>—</span>
+                  <span>{n}</span>
+                </div>
+              ))
+            ) : (
+              <div style={{ fontSize: 12.5, color: "var(--ink-3)", lineHeight: 1.4 }}>
+                No layout notes extracted from this template.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StrictSchema({ template }: { template: TemplateProfile }) {
+  const schemaSlides = template.slides.filter((s) => (s.schema?.fields?.length ?? 0) > 0);
+  const fields = schemaSlides.flatMap((slide) =>
+    (slide.schema?.fields ?? []).map((field) => ({ ...field, slide }))
+  );
+
+  return (
+    <div style={{ ...card, padding: 24 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          marginBottom: 4,
+        }}
+      >
+        <div style={{ fontFamily: SERIF, fontSize: 20, fontWeight: 600 }}>Strict field schema</div>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--ink-3)" }}>
+          {schemaSlides.length ? `${schemaSlides.length} mapped slides` : "No mapped fields"}
+        </span>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--ink-2)", marginBottom: 20 }}>
+        Review the fields SlideForge will inject via XML. Geometry and formatting stay untouched.
+      </div>
+      {fields.length > 0 ? (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1.4fr .9fr .7fr .7fr",
+            border: "1px solid var(--line)",
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        >
+          <div style={colHead}>FIELD ID</div>
+          <div style={colHead}>TYPE</div>
+          <div style={colHead}>REQUIRED</div>
+          <div style={colHead}>MAX</div>
+          {fields.map(({ slide, ...fd }) => {
+            const req = fd.required ? "YES" : "NO";
+            return (
+              <div key={`${slide.index}-${fd.id}`} style={{ display: "contents" }}>
+                <div
+                  style={{
+                    fontFamily: MONO,
+                    fontSize: 12,
+                    color: "var(--ink)",
+                    padding: "12px 14px",
+                    borderBottom: "1px solid var(--line)",
+                  }}
+                >
+                  {`S${(slide.index ?? 0) + 1} · ${fd.id}`}
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--ink-2)",
+                    padding: "12px 14px",
+                    borderBottom: "1px solid var(--line)",
+                  }}
+                >
+                  {fd.type}
+                </div>
+                <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}>
+                  <span
+                    style={{
+                      fontFamily: MONO,
+                      fontSize: 10,
+                      padding: "2px 7px",
+                      borderRadius: 4,
+                      background: fd.required ? "var(--accent-soft)" : "var(--surface-2)",
+                      color: fd.required ? "var(--accent)" : "var(--ink-3)",
+                    }}
+                  >
+                    {req}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    fontFamily: MONO,
+                    fontSize: 12,
+                    color: "var(--ink-2)",
+                    padding: "12px 14px",
+                    borderBottom: "1px solid var(--line)",
+                  }}
+                >
+                  {fd.max_chars ?? "—"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ fontSize: 13, color: "var(--ink-3)" }}>
+          No mapped fields were detected in this template.
+        </div>
+      )}
+      <div
+        style={{
+          display: "flex",
+          gap: 9,
+          alignItems: "flex-start",
+          marginTop: 16,
+          padding: "12px 14px",
+          borderRadius: 8,
+          background: "var(--warn-soft)",
+        }}
+      >
+        <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--warn)", flex: "none" }}>!</span>
+        <span style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45 }}>
+          Unmapped required fields render{" "}
+          <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--warn)" }}>
+            [INSERT CONTENT HERE]
+          </span>{" "}
+          and surface a warning rather than failing the build.
+        </span>
+      </div>
+    </div>
+  );
+}

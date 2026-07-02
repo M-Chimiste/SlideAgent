@@ -1,0 +1,32 @@
+services:
+  slideforge:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ~/.aws:/root/.aws:ro
+      - ./data:/app/data
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai_compatible}
+      - OPENAI_COMPATIBLE_BASE_URL=${OPENAI_COMPATIBLE_BASE_URL:-http://host.docker.internal:1240/v1}
+      - OPENAI_COMPATIBLE_MODEL=${OPENAI_COMPATIBLE_MODEL:-qwen3.6-35b-a3b-mtp}
+      - OPENAI_COMPATIBLE_API_KEY=${OPENAI_COMPATIBLE_API_KEY:-lm-studio}
+      - OPENAI_COMPATIBLE_REASONING_EFFORT=${OPENAI_COMPATIBLE_REASONING_EFFORT:-none}
+      - OPENAI_COMPATIBLE_TIMEOUT_SECONDS=${OPENAI_COMPATIBLE_TIMEOUT_SECONDS:-900}
+      - DEEP_PLANNER_BASE_URL=${DEEP_PLANNER_BASE_URL:-http://host.docker.internal:1240/v1}
+      - DEEP_PLANNER_MODEL=${DEEP_PLANNER_MODEL:-minimax-m2.7}
+      - DEEP_PLANNER_TIMEOUT_SECONDS=${DEEP_PLANNER_TIMEOUT_SECONDS:-900}
+      - DEEP_PLANNER_REASONING_EFFORT=${DEEP_PLANNER_REASONING_EFFORT:-}
+      - VISION_BASE_URL=${VISION_BASE_URL:-http://host.docker.internal:1240/v1}
+      - VISION_MODEL=${VISION_MODEL:-qwen3.6-35b-a3b-mtp}
+      - VISION_TIMEOUT_SECONDS=${VISION_TIMEOUT_SECONDS:-60}
+      - VISION_MAX_SLIDES=${VISION_MAX_SLIDES:-4}
+      - VISION_REASONING_EFFORT=${VISION_REASONING_EFFORT:-none}
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      - SONNET_MODEL_ID=${SONNET_MODEL_ID:-us.anthropic.claude-sonnet-4-20250514}
+      - HAIKU_MODEL_ID=${HAIKU_MODEL_ID:-us.anthropic.claude-haiku-4-5-20251001}
+      - BEDROCK_VALIDATE=${BEDROCK_VALIDATE:-false}
+      - QA_MAX_ROUNDS=${QA_MAX_ROUNDS:-2}
+      - JOB_WORKER_CONCURRENCY=${JOB_WORKER_CONCURRENCY:-1}
+    restart: unless-stopped
